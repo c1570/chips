@@ -16,6 +16,8 @@
 * [ROM disassembly](https://g3sl.github.io/c1541rom.html)
 * [G64 documentation](http://www.unusedino.de/ec64/technical/formats/g64.html)
 * Denise source code: [mechanics.cpp](https://bitbucket.org/piciji/denise/src/master/emulation/libc64/disk/drive/mechanics.cpp) - see via2.ca1In and cpu.triggerSO - and [opcodes.cpp](https://bitbucket.org/piciji/denise/src/master/emulation/libc64/disk/cpu/opcodes.cpp) - see soBlock
+* [AAY1541](http://unusedino.de/ec64/technical/aay/c1541/index.htm) - see [VIA registers](http://unusedino.de/ec64/technical/aay/c1541/viamain.htm)
+* [C64 CIA2](https://www.c64-wiki.de/wiki/CIA#CIA_2) - see $DD00, "low" is 0V
 
 ## Milestones
 
