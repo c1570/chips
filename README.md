@@ -15,12 +15,13 @@
 * [Gate Array](/docs/PN325572.png)
 * [ROM disassembly](https://g3sl.github.io/c1541rom.html)
 * [G64 documentation](http://www.unusedino.de/ec64/technical/formats/g64.html)
+* Denise source code: [mechanics.cpp](https://bitbucket.org/piciji/denise/src/master/emulation/libc64/disk/drive/mechanics.cpp) - see via2.ca1In and cpu.triggerSO - and [opcodes.cpp](https://bitbucket.org/piciji/denise/src/master/emulation/libc64/disk/cpu/opcodes.cpp) - see soBlock
 
 ## Milestones
 
 1. Get drive CPU to reset and run to idle ($ec12..$ec2d)
 2. Connect drive and host (reading error channel from BASIC should return `73, CBM DOS V2.6 1541, 0, 0`)
-3. Read directory from GCR data (i.e., keep passing [track 18 GCR data](/docs/1541_test_demo_track18gcr.h) to VIA and connect SO CPU line)
+3. Read directory from GCR data (i.e., keep passing [track 18 GCR data](/docs/1541_test_demo_track18gcr.h) to VIA, handle SYNC and SO CPU line, needs m6502.h changes, see Denise source)
 4. Read full disk from G64 image (implement stepper motor)
 5. Read full disk from D64 image (on the fly encoding from D64 to GCR)
 6. Write support (this is complicated)
