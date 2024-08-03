@@ -543,6 +543,7 @@ void c64_reset(c64_t* sys) {
     sys->joy_joy1_mask = sys->joy_joy2_mask = 0;
     sys->io_mapped = true;
     sys->cas_port = C64_CASPORT_MOTOR|C64_CASPORT_SENSE;
+    sys->iec_port = C64_IECPORT_RESET;
     _c64_update_memory_map(sys);
     sys->pins |= M6502_RES;
     m6526_reset(&sys->cia_1);
@@ -551,15 +552,8 @@ void c64_reset(c64_t* sys) {
     m6581_reset(&sys->sid);
 }
 
+uint8_t last_iec = 255;
 static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
-    // FIXME: move datasette and floppy tick to end
-    if (sys->c1530.valid) {
-        c1530_tick(&sys->c1530);
-    }
-    if (sys->c1541.valid) {
-        c1541_tick(&sys->c1541);
-    }
-
     // tick the CPU
     pins = m6502_tick(&sys->cpu, pins);
     const uint16_t addr = M6502_GET_ADDR(pins);
@@ -648,7 +642,7 @@ static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
         const uint8_t pa = ~(sys->kbd_joy2_mask|sys->joy_joy2_mask);
         const uint8_t pb = ~(kbd_scan_columns(&sys->kbd) | sys->kbd_joy1_mask | sys->joy_joy1_mask);
         M6526_SET_PAB(cia1_pins, pa, pb);
-        if (sys->cas_port & C64_CASPORT_READ) {
+        if (sys->cas_port & C64_CASPORT_READ || sys->iec_port & C64_IECPORT_SRQIN) {
             cia1_pins |= M6526_FLAG;
         }
         cia1_pins = m6526_tick(&sys->cia_1, cia1_pins);
@@ -684,7 +678,16 @@ static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
         CIA-2 IRQ pin connected to CPU NMI pin
     */
     {
+        // Port signals are HIGH by default, so initialize with 0xFF
         M6526_SET_PAB(cia2_pins, 0xFF, 0xFF);
+        if (!(sys->iec_port & C64_IECPORT_CLK)) {
+            // Pull down CLK line if IEC CLK is low
+            cia2_pins &= ~M6526_PA6;
+        }
+        if (!(sys->iec_port & C64_IECPORT_DATA)) {
+            // Pull down DATA line if IEC DATA is low
+            cia2_pins &= ~M6526_PA7;
+        }
         cia2_pins = m6526_tick(&sys->cia_2, cia2_pins);
         sys->vic_bank_select = ((~M6526_GET_PA(cia2_pins))&3)<<14;
         if (cia2_pins & M6502_IRQ) {
@@ -692,6 +695,12 @@ static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
         }
         if ((cia2_pins & (M6526_CS|M6526_RW)) == (M6526_CS|M6526_RW)) {
             pins = M6502_COPY_DATA(pins, cia2_pins);
+            sys->iec_port = sys->iec_port & ~(C64_IECPORT_ATN | C64_IECPORT_CLK | C64_IECPORT_DATA | C64_IECPORT_RESET) | ((cia2_pins & M6526_PA3) ? C64_IECPORT_ATN : 0) | ((cia2_pins & M6526_PA4) ? C64_IECPORT_CLK : 0) | ((cia2_pins & M6526_PA5) ? C64_IECPORT_DATA : 0) | ((pins & M6502_RES) ? C64_IECPORT_RESET : 0);
+            // printf("CIA2 changed\n");
+        }
+        if (sys->iec_port != last_iec) {
+            last_iec = sys->iec_port;
+            // printf("CIA2 IEC: $%02x\n", last_iec);
         }
     }
 
@@ -740,6 +749,13 @@ static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
             // memory write
             mem_wr(&sys->mem_cpu, addr, M6502_GET_DATA(pins));
         }
+    }
+
+    if (sys->c1530.valid) {
+        c1530_tick(&sys->c1530);
+    }
+    if (sys->c1541.valid) {
+        c1541_tick(&sys->c1541);
     }
     return pins;
 }
@@ -790,7 +806,7 @@ static uint16_t _c64_vic_fetch(uint16_t addr, void* user_data) {
         Fetch data into the VIC-II.
 
         The VIC-II has a 14-bit address bus and 12-bit data bus, and
-        has a different memory mapping then the CPU (that's why it
+        has a different memory mapping than the CPU (that's why it
         goes through the mem_vic pagetable):
             - a full 16-bit address is formed by taking the address bits
               14 and 15 from the value written to CIA-1 port A
