@@ -25,8 +25,8 @@
 2. Connect drive and host (reading error channel from BASIC should return `73, CBM DOS V2.6 1541, 0, 0`)
 3. Read directory from GCR data (i.e., keep passing [track 18 GCR data](/docs/1541_test_demo_track18gcr.h) to VIA, handle SYNC and SO CPU line, needs m6502.h changes, see Denise source)
 4. Read full disk from G64 image (implement stepper motor)
-5. Read full disk from D64 image (on the fly encoding from D64 to GCR)
-6. Write support (this is complicated)
+5. Read full disk from D64 image (on the fly encoding from D64 to GCR, see [nibtools](https://github.com/rittwage/nibtools/) fileio.c/gcr.c for conversion code)
+6. Write support (on the fly encoding from GCR to D64. Again, see nibtools)
 
 # chips
 
