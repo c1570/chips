@@ -112,6 +112,7 @@
 #*/
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -445,8 +446,11 @@ static inline void _m6522_read_port_pins(m6522_t* c, uint64_t pins) {
     bool new_cb2 = 0 != (pins & M6522_CB2);
     c->pa.c1_triggered = (c->pa.c1_in != new_ca1) && ((new_ca1 && M6522_PCR_CA1_LOW_TO_HIGH(c)) || (!new_ca1 && M6522_PCR_CA1_HIGH_TO_LOW(c)));
     c->pa.c2_triggered = (c->pa.c2_in != new_ca2) && ((new_ca2 && M6522_PCR_CA2_LOW_TO_HIGH(c)) || (!new_ca2 && M6522_PCR_CA2_HIGH_TO_LOW(c)));
-    c->pb.c1_triggered = (c->pb.c1_in != new_cb1) && ((new_cb1 && M6522_PCR_CB1_LOW_TO_HIGH(c)) || (!new_ca1 && M6522_PCR_CB1_HIGH_TO_LOW(c)));
-    c->pb.c2_triggered = (c->pb.c2_in != new_cb2) && ((new_cb2 && M6522_PCR_CB2_LOW_TO_HIGH(c)) || (!new_ca2 && M6522_PCR_CB2_HIGH_TO_LOW(c)));
+    // FIXME: copy paste error? new_ca1
+    // c->pb.c1_triggered = (c->pb.c1_in != new_cb1) && ((new_cb1 && M6522_PCR_CB1_LOW_TO_HIGH(c)) || (!new_ca1 && M6522_PCR_CB1_HIGH_TO_LOW(c)));
+    // c->pb.c2_triggered = (c->pb.c2_in != new_cb2) && ((new_cb2 && M6522_PCR_CB2_LOW_TO_HIGH(c)) || (!new_ca2 && M6522_PCR_CB2_HIGH_TO_LOW(c)));
+    c->pb.c1_triggered = (c->pb.c1_in != new_cb1) && ((new_cb1 && M6522_PCR_CB1_LOW_TO_HIGH(c)) || (!new_cb1 && M6522_PCR_CB1_HIGH_TO_LOW(c)));
+    c->pb.c2_triggered = (c->pb.c2_in != new_cb2) && ((new_cb2 && M6522_PCR_CB2_LOW_TO_HIGH(c)) || (!new_cb2 && M6522_PCR_CB2_HIGH_TO_LOW(c)));
     c->pa.c1_in = new_ca1;
     c->pa.c2_in = new_cb2;
     c->pb.c1_in = new_cb1;
@@ -878,14 +882,17 @@ static void _m6522_write(m6522_t* c, uint8_t addr, uint8_t data) {
 }
 
 uint64_t m6522_tick(m6522_t* c, uint64_t pins) {
+    // FIXME: == M6522_CS2?
     if ((pins & (M6522_CS1|M6522_CS2)) == M6522_CS1) {
         uint8_t addr = pins & M6522_RS_PINS;
         if (pins & M6522_RW) {
             uint8_t data = _m6522_read(c, addr);
+            // printf("m6522_read $%x = $%02x\n", addr, data);
             M6522_SET_DATA(pins, data);
         }
         else {
             uint8_t data = M6522_GET_DATA(pins);
+            // printf("m6522_write $%x = $%02x (%p)\n", addr, data, c);
             _m6522_write(c, addr, data);
         }
     }
