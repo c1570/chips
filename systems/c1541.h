@@ -48,6 +48,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "iecbus.h"
 
 #ifdef __cplusplus
 extern "C" {

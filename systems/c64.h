@@ -247,6 +247,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdalign.h>
+#include "iecbus.h"
 
 #ifdef __cplusplus
 extern "C" {
