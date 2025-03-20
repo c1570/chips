@@ -1771,9 +1771,11 @@ static void _c64_debug_out_processor_pc(c64_t* sys, uint64_t pins) {
 #endif
 
 static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
+    static uint16_t last_cpu_address = 0;
 #ifdef __IEC_DEBUG
     _c64_debug_out_processor_pc(sys, pins);
 #endif
+    iec_get_signals(&sys->iec_bus, NULL);
     // tick the CPU
     pins = m6502_tick(&sys->cpu, pins);
     const uint16_t addr = M6502_GET_ADDR(pins);
@@ -1825,6 +1827,9 @@ static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
                 mem_access = true;
             }
         }
+    }
+    if (pins & M6502_SYNC) {
+        last_cpu_address = addr;
     }
 
     // tick the SID
@@ -1925,22 +1930,35 @@ static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
             if (cia2_pins & M6526_RW) {
                 pins = M6502_COPY_DATA(pins, cia2_pins);
             } else {
-         
+                if (addr == 0xdd00) {
+                    // write
+                    uint8_t write_data = M6502_GET_DATA(cia2_pins);
+                    printf("%ld - c64 - Write CIA2 $DD00 = $%02X - CPU @ $%04X\n", get_world_tick(), write_data, last_cpu_address);
+                }
             }
         }
         {
-            uint8_t signals = sys->iec_device->signals;
+            uint8_t signals = sys->iec_device->signals & ~(IECLINE_ATN | IECLINE_CLK | IECLINE_DATA);
             
             cia2_pa = M6526_GET_PA(cia2_pins);
 
-            signals = (signals & ~IECLINE_ATN) | (cia2_pa & (1 << 3) ? IECLINE_ATN : 0);
-            signals = (signals & ~IECLINE_CLK) | (cia2_pa & (1 << 4) ? IECLINE_CLK : 0);
-            signals = (signals & ~IECLINE_DATA) | (cia2_pa & (1 << 5) ? IECLINE_DATA : 0);
+            if (cia2_pins & M6522_PA3) {
+                signals |= IECLINE_ATN;
+            }
+            if (cia2_pins & M6522_PA4) {
+                signals |= IECLINE_CLK;
+            }
+            if (cia2_pins & M6522_PA5) {
+                signals |= IECLINE_DATA;
+            }
+
             if (signals != sys->iec_device->signals) {
+                char message_prefix[256];
+                sprintf(message_prefix, "%ld - c64 - write-iec - cpu @ $%04X", get_world_tick(), last_cpu_address);
                 sys->iec_device->signals = signals;
-#ifdef __IEC_DEBUG
-                iec_debug_print_device_signals(sys->iec_device, "c64-write-iec");
-#endif
+// #ifdef __IEC_DEBUG
+                iec_debug_print_device_signals(sys->iec_device, message_prefix);
+// #endif
             }
         }
     }
@@ -1984,11 +2002,21 @@ static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
     else if (mem_access) {
         if (pins & M6502_RW) {
             // memory read
-            M6502_SET_DATA(pins, mem_rd(&sys->mem_cpu, addr));
+            uint8_t read_data = mem_rd(&sys->mem_cpu, addr);
+            M6502_SET_DATA(pins, read_data);
+            // FIXME: for debugging purpose only
+            if (addr == 0xdd00) {
+                printf("%ld - c64 - Read CIA2 $DD00 = $%02X - CPU @ $%04X\n", get_world_tick(), read_data, last_cpu_address);
+            }
         }
         else {
             // memory write
-            mem_wr(&sys->mem_cpu, addr, M6502_GET_DATA(pins));
+            uint8_t write_data = M6502_GET_DATA(pins);
+            mem_wr(&sys->mem_cpu, addr, write_data);
+            // FIXME: for debugging purpose only
+            if (addr == 0xdd00) {
+                printf("%ld - c64 - Write CIA2 $DD00 = $%02X - CPU @ $%04X\n", get_world_tick(), write_data, last_cpu_address);
+            }
         }
     }
 
@@ -2214,18 +2242,18 @@ uint32_t c64_exec(c64_t* sys, uint32_t micro_seconds) {
     if (0 == sys->debug.callback.func) {
         // run without debug callback
         for (uint32_t ticks = 0; ticks < num_ticks; ticks++) {
-#ifdef __IEC_DEBUG
+// #ifdef __IEC_DEBUG
             world_tick();
-#endif
+// #endif
             pins = _c64_tick(sys, pins);
         }
     }
     else {
         // run with debug callback
         for (uint32_t ticks = 0; (ticks < num_ticks) && !(*sys->debug.stopped); ticks++) {
-#ifdef __IEC_DEBUG
+// #ifdef __IEC_DEBUG
             world_tick();
-#endif
+// #endif
             pins = _c64_tick(sys, pins);
             sys->debug.callback.func(sys->debug.callback.user_data, pins);
         }

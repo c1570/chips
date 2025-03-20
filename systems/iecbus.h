@@ -62,6 +62,8 @@ typedef struct {
     uint8_t signal_invert_mask;
     // Each connected device pulls on its own end of the lines
     uint8_t signals;
+    // for debug purposes
+    uint8_t last_signals;
     // ...
     uint8_t id;
 } iecbus_device_t;
@@ -143,7 +145,7 @@ uint8_t iec_get_signals(iecbus_t* iec_bus, iecbus_device_t* requesting_device) {
     // Initialize resulting signals with IEC logical low meaning high level voltage
     uint8_t signals = IEC_ALL_LINES;
     uint8_t device_signals = 0;
-    // uint8_t requesting_device_id = IEC_BUS_MAX_DEVICES;
+    bool changed = false;
 
     for (i = 0; i < IEC_BUS_MAX_DEVICES; i++) {
         if (iec_bus->usage_map & (1<<i)) {
@@ -151,15 +153,20 @@ uint8_t iec_get_signals(iecbus_t* iec_bus, iecbus_device_t* requesting_device) {
             device_signals = (iec_bus->devices[i].signals ^ iec_bus->devices[i].signal_invert_mask) & IEC_ALL_LINES;
             // Let the device signals pull down lines on the bus
             signals &= device_signals;
-            // if (requesting_device == &(iec_bus->devices[i])) {
-            //     requesting_device_id = i;
-            // }
+            changed = changed || (iec_bus->devices[i].signals != iec_bus->devices[i].last_signals);
+            iec_bus->devices[i].last_signals = iec_bus->devices[i].signals;
         }
     }
 
-    if (signals != last_iec_signals) {
-        last_iec_signals = signals;
-        printf("IEC\tATN: %dV\tDAT: %dV\tRES: %dV\tCLK: %dV\ttick: %08lx\n", (signals & IECLINE_ATN) ? 5 : 0, (signals & IECLINE_DATA) ? 5 : 0, (signals & IECLINE_RESET) ? 5 : 0, (signals & IECLINE_CLK) ? 5 : 0, get_world_tick());
+    if (changed) {
+        printf("%ld - iecbus - bus: %c%c%c - device 0: %02X - device 8: %02X\n",
+               get_world_tick(),
+               (signals & IECLINE_ATN) ? 'A' : 'a',
+               (signals & IECLINE_DATA) ? 'D' : 'd',
+               (signals & IECLINE_CLK) ? 'C' : 'c',
+               iec_bus->devices[0].signals,
+               iec_bus->devices[1].signals
+        );
     }
 
     if (requesting_device != NULL) {
@@ -222,7 +229,6 @@ void iec_get_device_status_text(iecbus_device_t* iec_device, char* dest) {
 
 void iec_debug_print_device_signals(iecbus_device_t* device, char* prefix) {
     uint8_t signals = device->signals ^ device->signal_invert_mask;
-    // uint8_t need_newline = 0;
     printf("%s\t", prefix);
     if (!(signals & IECLINE_ATN)) {
         printf("ATN\t");
@@ -234,7 +240,6 @@ void iec_debug_print_device_signals(iecbus_device_t* device, char* prefix) {
         printf("DATA");
     }
     printf("\n");
-    // printf("ATN: %dV\tDAT: %dV\tRES: %dV\tCLK: %dV\tDEV: %d\n", (signals & IECLINE_ATN) ? 5 : 0, (signals & IECLINE_DATA) ? 5 : 0, (signals & IECLINE_RESET) ? 5 : 0, (signals & IECLINE_CLK) ? 5 : 0, device->id);
 }
 
 uint64_t _world_tick = 0;

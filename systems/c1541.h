@@ -58,6 +58,25 @@ extern "C" {
 
 #define RUNTIME_LIMIT_TICKS 1000
 
+#define VIA2_STEPPER_LO_BIT_POS  0
+#define VIA2_STEPPER_HI_BIT_POS  1
+#define VIA2_ROTOR_BIT_POS       2
+#define VIA2_LED_BIT_POS         3
+#define VIA2_READ_ONLY_BIT_POS   4
+#define VIA2_BIT_RATE_LO_BIT_POS 5
+#define VIA2_BIT_RATE_HI_BIT_POS 6
+#define VIA2_SYNC_BIT_POS        7
+
+#define VIA2_STEPPER_LO          (1<<VIA2_STEPPER_LO_BIT_POS)
+#define VIA2_STEPPER_HI          (1<<VIA2_STEPPER_HI_BIT_POS)
+#define VIA2_ROTOR               (1<<VIA2_ROTOR_BIT_POS)
+#define VIA2_LED                 (1<<VIA2_LED_BIT_POS)
+#define VIA2_READ_ONLY           (1<<VIA2_READ_ONLY_BIT_POS)
+#define VIA2_BIT_RATE_LO         (1<<VIA2_BIT_RATE_LO_BIT_POS)
+#define VIA2_BIT_RATE_HI         (1<<VIA2_BIT_RATE_HI_BIT_POS)
+#define VIA2_SYNC                (1<<VIA2_SYNC_BIT_POS)
+
+
 // config params for c1541_init()
 typedef struct {
     // the IEC bus to connect to
@@ -88,6 +107,24 @@ typedef struct {
 #ifdef __IEC_DEBUG
     FILE* debug_file;
 #endif
+    uint16_t hundred_cycles_rotor_active;
+    uint16_t hundred_cycles_per_bit;
+    bool rotor_active;
+    uint8_t gcr_bytes[0x2000];
+    uint16_t gcr_size;
+    uint16_t gcr_byte_pos;
+    uint8_t gcr_bit_pos;
+    uint8_t gcr_ones;
+    uint8_t current_byte;
+    uint8_t current_bit_pos;
+    bool gcr_sync;
+
+    uint16_t current_data;
+    uint8_t output_data;
+    uint8_t output_bit_counter;
+    bool byte_ready;
+    uint32_t exit_countdown;
+    uint8_t half_track;
 } c1541_t;
 
 // initialize a new c1541_t instance
@@ -119,6 +156,8 @@ void c1541_snapshot_onload(c1541_t* snapshot, c1541_t* sys, void* base);
     #define CHIPS_ASSERT(c) assert(c)
 #endif
 
+#include "../docs/1541_test_demo_track18gcr.h"
+
 void c1541_init(c1541_t* sys, const c1541_desc_t* desc) {
     CHIPS_ASSERT(sys && desc);
 
@@ -127,6 +166,15 @@ void c1541_init(c1541_t* sys, const c1541_desc_t* desc) {
     sys->debug_file = desc->debug_file;
 #endif
     sys->valid = true;
+    sys->gcr_size = sizeof(track18_gcr);
+    memcpy(&sys->gcr_bytes[0], &track18_gcr[0], sys->gcr_size);
+    sys->gcr_byte_pos = 0;
+    sys->gcr_bit_pos = 0;
+    sys->current_byte = 0;
+    sys->current_bit_pos = 0;
+    sys->hundred_cycles_per_bit = 369;
+    sys->hundred_cycles_rotor_active = 0;
+    sys->half_track = 18 << 1;
 
     // copy ROM images
     CHIPS_ASSERT(desc->roms.c000_dfff.ptr && (0x2000 == desc->roms.c000_dfff.size));
@@ -140,6 +188,9 @@ void c1541_init(c1541_t* sys, const c1541_desc_t* desc) {
     sys->pins = m6502_init(&sys->cpu, &cpu_desc);
     m6522_init(&sys->via_1);
     m6522_init(&sys->via_2);
+
+    sys->via_1.chip_name = "via1";
+    sys->via_2.chip_name = "via2";
 
     // setup memory map
     mem_init(&sys->mem);
@@ -168,15 +219,85 @@ void c1541_reset(c1541_t* sys) {
     m6522_reset(&sys->via_2);
 }
 
+static uint16_t _1541_last_cpu_address = 0;
+uint8_t last_via2_0_write = 0xff;
+uint8_t last_via2_1_write = 0xff;
+uint8_t last_via2_2_write = 0xff;
+uint8_t last_via2_3_write = 0xff;
 void _c1541_write(c1541_t* sys, uint16_t addr, uint8_t data) {
     char *area = "n/a";
     bool illegal = false;
+    bool changed = false;
+
     if ((addr & 0xFC00) == 0x1800) {
         area = "via1";
         _m6522_write(&sys->via_1, addr & 0xF, data);
     } else if ((addr & 0xFC00) == 0x1C00) {
         // Write to VIA2
         area = "via2";
+        if (addr == 0x1C00) {
+            sys->rotor_active = (data & VIA2_ROTOR) != 0;
+            if (!sys->rotor_active) {
+                sys->hundred_cycles_rotor_active = 0;
+            }
+	    // FIXME: use correct formula once the cpu frequency is decoupled from c64 and uses real 1MHz
+            // sys->hundred_cycles_per_bit = 400 - ((data & 3) * 25);
+            switch (data & 3) {
+                case 0:
+                    sys->hundred_cycles_per_bit = 394;
+                    break;
+                case 1:
+                    sys->hundred_cycles_per_bit = 369;
+                    break;
+                case 2:
+                    sys->hundred_cycles_per_bit = 345;
+                    break;
+                case 3:
+                    sys->hundred_cycles_per_bit = 320;
+                    break;
+            }
+        }
+        if ((addr & 0x0f) == 0 && (data != last_via2_0_write)) {
+            last_via2_0_write = data;
+            changed = true;
+        }
+        if ((addr & 0x0f) == 1 && (data != last_via2_1_write)) {
+            last_via2_1_write = data;
+            changed = true;
+        }
+        if ((addr & 0x0f) == 2 && (data != last_via2_2_write)) {
+            last_via2_2_write = data;
+            changed = true;
+        }
+        if ((addr & 0x0f) == 3 && (data != last_via2_3_write)) {
+            last_via2_3_write = data;
+            changed = true;
+        }
+	// FIXME: for debugging purpose only
+        if (changed) {
+            printf("%ld - 1541 - VIA2 Write $%04X = $%02X - CPU @ $%04X - Stepper=(%d%d[%d%d]) Rotor=(%d[%d]) LED=(%d[%d]) R/O=(%d[%d]) BitRate=(%d%d[%d%d]) Sync=(%d[%d])\n",
+                get_world_tick(),
+                addr,
+                data,
+                _1541_last_cpu_address,
+                last_via2_0_write & (1<<1) ? 1 : 0,
+                last_via2_0_write & (1<<0) ? 1 : 0,
+                last_via2_2_write & (1<<1) ? 1 : 0,
+                last_via2_2_write & (1<<0) ? 1 : 0,
+                last_via2_0_write & (1<<2) ? 1 : 0,
+                last_via2_2_write & (1<<2) ? 1 : 0,
+                last_via2_0_write & (1<<3) ? 1 : 0,
+                last_via2_2_write & (1<<3) ? 1 : 0,
+                last_via2_0_write & (1<<4) ? 1 : 0,
+                last_via2_2_write & (1<<4) ? 1 : 0,
+                last_via2_0_write & (1<<6) ? 1 : 0,
+                last_via2_0_write & (1<<5) ? 1 : 0,
+                last_via2_2_write & (1<<6) ? 1 : 0,
+                last_via2_2_write & (1<<5) ? 1 : 0,
+                last_via2_0_write & (1<<7) ? 1 : 0,
+                last_via2_2_write & (1<<7) ? 1 : 0
+            );
+        }
         _m6522_write(&sys->via_2, addr & 0xF, data);
     } else if (addr < 0x0800) {
         // Write to RAM
@@ -192,26 +313,33 @@ void _c1541_write(c1541_t* sys, uint16_t addr, uint8_t data) {
     }
 }
 
+#define XOR(a,b) (((a) && !(b)) || ((b) && !(a)))
+#define AND(a,b) ((a) && (b))
+
 void _c1541_write_iec_pins(c1541_t* sys, uint64_t pins) {
-    uint8_t signals = 0;
+    uint8_t out_signals = 0;
 
-    if (pins & M6522_PB1) {
-        signals |= IECLINE_DATA;
+    uint8_t iec_signals = iec_get_signals(sys->iec_bus, sys->iec_device);
+
+    if ((pins & M6522_PB1) || (XOR(iec_signals & IECLINE_ATN, pins & M6522_PB7))) {
+        out_signals |= IECLINE_DATA;
     }
 
-    if (pins & M6522_PB3) {
-        signals |= IECLINE_CLK;
+    if ((pins & M6522_PB3)) {// || (pins & M6522_PB4)) {
+        out_signals |= IECLINE_CLK;
     }
 
-    if (signals != sys->iec_device->signals) {
-        sys->iec_device->signals = signals;
-#ifdef __IEC_DEBUG
-        iec_debug_print_device_signals(sys->iec_device, "1541-write-iec");
-#endif
+    if (out_signals != sys->iec_device->signals) {
+        char message_prefix[256];
+        sprintf(message_prefix, "%ld - 1541 - write-iec - CPU @ $%04X", get_world_tick(), _1541_last_cpu_address);
+        sys->iec_device->signals = out_signals;
+	// FIXME: for debugging purpose only
+// #ifdef __IEC_DEBUG
+        iec_debug_print_device_signals(sys->iec_device, message_prefix);
+// #endif
     }
 }
 
-#ifdef __IEC_DEBUG
 uint16_t _get_c1541_nearest_routine_address(uint16_t addr) {
     uint16_t res = 0;
     if (addr >= 0xFF0D) res = 0xFF0D;
@@ -2374,6 +2502,7 @@ char* _get_c1541_routine_name(uint16_t addr) {
     }
 }
 
+#ifdef __IEC_DEBUG
 static void _c1541_debug_out_processor_pc(c1541_t* sys, uint64_t pins) {
     if (pins & M6502_SYNC) {
         uint16_t cpu_pc = m6502_pc(&sys->cpu);
@@ -2390,9 +2519,6 @@ static void _c1541_debug_out_processor_pc(c1541_t* sys, uint64_t pins) {
             iec_get_device_status_text(sys->iec_device, local_iec_status);
 
             uint8_t iec_lines = iec_get_signals(sys->iec_bus, sys->iec_device);
-            // uint8_t via1_pa = M6522_GET_PA(sys->via_1.pins);
-            // uint8_t via1_pb = M6522_GET_PB(sys->via_1.pins);
-            // M6522_SET_PAB(via1_pins, via1_pa, via1_pb);
             uint64_t via1_pins = pins & M6502_PIN_MASK;
             via1_pins &= ~(M6522_PB0 | M6522_PB2 | M6522_PB7 | M6522_CA1);
             if (iec_lines & IECLINE_ATN) {
@@ -2417,10 +2543,42 @@ static void _c1541_debug_out_processor_pc(c1541_t* sys, uint64_t pins) {
 }
 #endif
 
+#define BYTE_TO_BINARY_PATTERN "%c%c%c%c%c%c%c%c"
+#define BYTE_TO_BINARY(byte)  \
+  ((byte) & 0x80 ? '1' : '0'), \
+  ((byte) & 0x40 ? '1' : '0'), \
+  ((byte) & 0x20 ? '1' : '0'), \
+  ((byte) & 0x10 ? '1' : '0'), \
+  ((byte) & 0x08 ? '1' : '0'), \
+  ((byte) & 0x04 ? '1' : '0'), \
+  ((byte) & 0x02 ? '1' : '0'), \
+  ((byte) & 0x01 ? '1' : '0') 
+
 uint64_t _c1541_tick(c1541_t* sys, uint64_t pins) {
 #ifdef __IEC_DEBUG
     _c1541_debug_out_processor_pc(sys, pins);
 #endif
+    iec_get_signals(sys->iec_bus, NULL);
+    
+    // FIXME: this code only exists for debugging purpose
+    if (sys->exit_countdown == 1) {
+        exit(0);
+    } else if (sys->exit_countdown > 0) {
+        sys->exit_countdown--;
+    }
+
+    // FIXME: the start address of an instruction is only memorized for debugging purpose
+    uint16_t cpu_addr = M6502_GET_ADDR(pins);
+    bool is_cpu_sync = (pins & M6502_SYNC);
+    if (is_cpu_sync) {
+        _1541_last_cpu_address = cpu_addr;
+    }
+
+    // s0 pin high workaround for injecting OV flag to the cpu on a new instruction
+    if (is_cpu_sync && sys->byte_ready && (sys->via_2.pins & M6522_CA2)) {
+        m6502_set_p(&sys->cpu, m6502_p(&sys->cpu)|M6502_VF);
+    }
+    
     pins = m6502_tick(&sys->cpu, pins);
     const uint16_t addr = M6502_GET_ADDR(pins);
 
@@ -2440,6 +2598,10 @@ uint64_t _c1541_tick(c1541_t* sys, uint64_t pins) {
         } else if ((addr & 0xFC00) == 0x1800) {
             // Read from VIA1
             read_data = _m6522_read(&sys->via_1, addr & 0xF);
+	    // FIXME: debugging purpose
+            if (addr == 0x1800) {
+                printf("%ld - 1541 - Read VIA1 $1800 = $%02X - CPU @ $%04X\n", get_world_tick(), read_data, _1541_last_cpu_address);
+            }
         } else if ((addr & 0xFC00) == 0x1C00) {
             // Read from VIA2
             read_data = _m6522_read(&sys->via_2, addr & 0xF);
@@ -2457,7 +2619,12 @@ uint64_t _c1541_tick(c1541_t* sys, uint64_t pins) {
     }
     else {
         // memory write
-        _c1541_write(sys, addr, M6502_GET_DATA(pins));
+        uint8_t write_data = M6502_GET_DATA(pins);
+        // FIXME: debugging purpose
+        if (addr == 0x1800) {
+            printf("%ld - 1541 - Write VIA1 $1800 = $%02X - CPU @ $%04X\n", get_world_tick(), write_data, _1541_last_cpu_address);
+        }
+        _c1541_write(sys, addr, write_data);
     }
 
     if ((addr & 0xFC00) == 0x1800) {
@@ -2501,6 +2668,89 @@ uint64_t _c1541_tick(c1541_t* sys, uint64_t pins) {
         }
         
         _c1541_write_iec_pins(sys, via1_pins);
+    }
+    
+
+    bool was_byte_ready = sys->byte_ready;
+    bool via_output = false;
+    {
+        // Prepare VIA2 pins
+
+        bool output_enable = (sys->via_2.pins & M6522_CB2) != 0;
+        bool motor_active = (sys->via_2.pins & M6522_PB2) != 0;
+        bool is_sync = (((sys->current_data + 1) & (1<<10)) != 0) && output_enable;
+        bool drive_ready = (sys->ram[0x20] & 0x80) == 0;
+        bool drive_on = (sys->ram[0x20] & 0x30) == 0x20;
+        bool drive_stepping = (sys->ram[0x20] & 0x60) == 0x60;
+
+        // Motor active?
+        if (motor_active && drive_on) {
+            // FIXME: for debugging purpose the countdown runs for 2 simulated seconds and terminates the program afterward
+            if (sys->exit_countdown == 0) {
+                sys->exit_countdown = C1541_FREQUENCY << 1;
+            }
+            via_output = true;
+            sys->hundred_cycles_rotor_active += 100; // fixed point arithmetic - use 2 digits as fractional part
+            if (sys->hundred_cycles_rotor_active >= sys->hundred_cycles_per_bit) {
+                sys->hundred_cycles_rotor_active -= sys->hundred_cycles_per_bit;
+                
+                // we are going to read new bits, so deactivate byte_ready
+                sys->byte_ready = false;
+
+                // shift in next gcr bit
+                sys->current_data <<= 1;
+                sys->current_data &= (1<<10)-1;
+                if (sys->gcr_bytes[sys->gcr_byte_pos] & (1<<(7-sys->gcr_bit_pos))) {
+                    // GCR 1 bit
+                    sys->current_data |= 1;
+                } else {
+                    // GCR 0 bit
+                }
+
+                // update gcr read position
+                sys->gcr_bit_pos++;
+                if (sys->gcr_bit_pos > 7) {
+                    sys->gcr_bit_pos = 0;
+                    sys->gcr_byte_pos++;
+                    if (sys->gcr_byte_pos >= sys->gcr_size || sys->gcr_bytes[sys->gcr_byte_pos] == 0) {
+                        sys->gcr_byte_pos = 0;
+			// FIXME: debug output
+                        printf("%ld - 1541 - disk cycle complete\n", get_world_tick());
+                    }
+                }
+
+                is_sync = (((sys->current_data + 1) & (1<<10)) != 0) && output_enable;
+                
+                if (is_sync) {
+                    sys->output_bit_counter = 0;
+                } else {
+                    sys->output_bit_counter++;
+                    if (sys->output_bit_counter > 7) {
+                        sys->output_bit_counter = 0;
+                        sys->byte_ready = true;
+                    }
+                }
+            }
+        } else {
+            sys->byte_ready = false;
+        }
+
+        if (!is_sync) {
+            via2_pins |= M6522_PB7;
+        } else {
+            sys->byte_ready = false;
+        }
+
+        if (sys->byte_ready) {
+            sys->output_data = sys->current_data & 0xff;
+            if (output_enable) {
+                via2_pins |= M6522_CA1;
+            }
+        }
+
+        if (output_enable) {
+            M6522_SET_PA(via2_pins, sys->output_data);
+        }
     }
 
     // tick VIA2

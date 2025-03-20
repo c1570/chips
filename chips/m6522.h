@@ -330,6 +330,7 @@ typedef struct {
     uint8_t acr;        /* auxilary control register */
     uint8_t pcr;        /* peripheral control register */
     uint64_t pins;
+    char *chip_name;
 } m6522_t;
 
 // extract 8-bit data bus from 64-bit pins
