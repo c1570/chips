@@ -6,7 +6,7 @@
 2. `git clone https://github.com/floooh/chips-test`
 3. `cd chips-test` and change `git: https://github.com/floooh/chips` in `fips.yml` to `git: git@github.com:c1570/chips.git`
 4. `./fips make` to build
-5. `../fips-deploy/chips-test/linux-make-debug/c64-ui -c1541` to run the emulator
+5. `../fips-deploy/chips-test/linux-make-debug/c64-ui c1541` to run the emulator including the C1541 code
 
 ## Technical Background Information
 
@@ -21,8 +21,8 @@
 
 ## Milestones
 
-1. Get drive CPU to reset and run to idle ($ec12..$ec2d)
-2. Connect drive and host (reading error channel from BASIC should return `73, CBM DOS V2.6 1541, 0, 0`)
+1. DONE: Get drive CPU to reset and run to idle ($ec12..$ec2d)
+2. DONE: Connect drive and host (reading error channel from BASIC should return `73, CBM DOS V2.6 1541, 0, 0`)
 3. Read directory from GCR data (i.e., keep passing [track 18 GCR data](/docs/1541_test_demo_track18gcr.h) to VIA, handle SYNC and SO CPU line, needs m6502.h changes, see Denise source)
 4. Read full disk from G64 image (implement stepper motor)
 5. Read full disk from D64 image (on the fly encoding from D64 to GCR, see [nibtools](https://github.com/rittwage/nibtools/) fileio.c/gcr.c for conversion code)
