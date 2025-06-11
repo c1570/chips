@@ -49,6 +49,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "iecbus.h"
+#include "disass.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -2537,6 +2538,16 @@ static void _c1541_debug_out_processor_pc(c1541_t* sys, uint64_t pins) {
                 fprintf(sys->debug_file, "tick:%08lx\taddr:%04x\tsys:c1541\tport-via1-b:%02x\tbus-iec:%s\tlocal-iec:%s\tlabel:%s+%x\n", get_world_tick(), cpu_pc, via1_pins, iec_status, local_iec_status, function_name, address_diff);
             } else {
                 fprintf(sys->debug_file, "tick:%08lx\taddr:%04x\tsys:c1541\tport-via1-b:%02x\tbus-iec:%s\tlocal-iec:%s\tlabel:%s\n", get_world_tick(), cpu_pc, via1_pins, iec_status, local_iec_status, function_name);
+            }
+
+            if(cpu_pc==0xf4da) {
+              if ((cpu_pc & 0xC000) == 0xC000) { // ROM
+                _show_debug_trace('8', &sys->cpu, get_world_tick(),
+                                  sys->rom[(cpu_pc+0) & 0x3FFF], sys->rom[(cpu_pc+1) & 0x3FFF], sys->rom[(cpu_pc+2) & 0x3FFF]);
+              } else if (cpu_pc < 0x0800) { // RAM
+                _show_debug_trace('8', &sys->cpu, get_world_tick(),
+                                  sys->ram[(cpu_pc+0) & 0x07FF], sys->ram[(cpu_pc+1) & 0x07FF], sys->ram[(cpu_pc+2) & 0x07FF]);
+              }
             }
         }
     }
