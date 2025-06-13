@@ -322,11 +322,12 @@ void _c1541_write_iec_pins(c1541_t* sys, uint64_t pins) {
 
     uint8_t iec_signals = iec_get_signals(sys->iec_bus, sys->iec_device);
 
-    if ((pins & M6522_PB1) || (XOR(iec_signals & IECLINE_ATN, pins & M6522_PB7))) {
+    if ((pins & M6522_PB1) || (XOR(iec_signals & IECLINE_ATN, pins & M6522_PB4))) {
+        // ATNA logic (UD3)
         out_signals |= IECLINE_DATA;
     }
 
-    if ((pins & M6522_PB3)) {// || (pins & M6522_PB4)) {
+    if ((pins & M6522_PB3)) {
         out_signals |= IECLINE_CLK;
     }
 
@@ -2662,10 +2663,8 @@ uint64_t _c1541_tick(c1541_t* sys, uint64_t pins) {
         if (iec_lines & IECLINE_DATA) {
             via1_pins |= M6522_PB0;
         }
-        if ((sys->via_1.pins & M6522_PB4) == 0 && (iec_lines & IECLINE_ATN) != 0) {
-            via1_pins |= M6522_PB0;
-        }
-        if ((sys->via_1.pins & M6522_PB4) != 0 && (iec_lines & IECLINE_ATN) == 0) {
+        if (XOR(sys->via_1.pins & M6522_PB4, iec_lines & IECLINE_ATN)) {
+            // ATNA logic (UD3) DATA read back. Note setting of ATN is done in _c1541_write_iec_pins()
             via1_pins |= M6522_PB0;
         }
         if (sys->via_1.pins & M6522_PB1) {
