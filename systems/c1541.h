@@ -2535,9 +2535,9 @@ static void _c1541_debug_out_processor_pc(c1541_t* sys, uint64_t pins) {
             via1_pins = (via1_pins >> M6522_PIN_PB0) & 0xff;
 
             if (address_diff > 0) {
-                fprintf(sys->debug_file, "tick:%08lx\taddr:%04x\tsys:c1541\tport-via1-b:%02x\tbus-iec:%s\tlocal-iec:%s\tlabel:%s+%x\n", get_world_tick(), cpu_pc, via1_pins, iec_status, local_iec_status, function_name, address_diff);
+                fprintf(sys->debug_file, "tick:%10ld\taddr:%04x\tsys:c1541\tport-via1-b:%02x\tbus-iec:%s\tlocal-iec:%s\tlabel:%s+%x\n", get_world_tick(), cpu_pc, via1_pins, iec_status, local_iec_status, function_name, address_diff);
             } else {
-                fprintf(sys->debug_file, "tick:%08lx\taddr:%04x\tsys:c1541\tport-via1-b:%02x\tbus-iec:%s\tlocal-iec:%s\tlabel:%s\n", get_world_tick(), cpu_pc, via1_pins, iec_status, local_iec_status, function_name);
+                fprintf(sys->debug_file, "tick:%10ld\taddr:%04x\tsys:c1541\tport-via1-b:%02x\tbus-iec:%s\tlocal-iec:%s\tlabel:%s\n", get_world_tick(), cpu_pc, via1_pins, iec_status, local_iec_status, function_name);
             }
 
             if(cpu_pc==0xf4da) {

@@ -997,9 +997,12 @@ uint16_t _get_c64_nearest_routine_address(uint16_t addr) {
     else if (addr >= 0xEDBE) res = 0xEDBE;
     else if (addr >= 0xEDB9) res = 0xEDB9;
     else if (addr >= 0xEDB2) res = 0xEDB2;
+    else if (addr >= 0xEDAF) res = 0xEDAF;
+    else if (addr >= 0xEDAD) res = 0xEDAD;
     else if (addr >= 0xED9F) res = 0xED9F;
     else if (addr >= 0xED7D) res = 0xED7D;
     else if (addr >= 0xED7A) res = 0xED7A;
+    else if (addr >= 0xED66) res = 0xED66;
     else if (addr >= 0xED5A) res = 0xED5A;
     else if (addr >= 0xED55) res = 0xED55;
     else if (addr >= 0xED50) res = 0xED50;
@@ -1307,9 +1310,12 @@ static char* _get_c64_routine_name(uint16_t addr) {
         case 0xED50: return "ISR02"; break;
         case 0xED55: return "ISR03"; break;
         case 0xED5A: return "NOEOI"; break; // Wait for DATA low
+        case 0xED66: return "ISR01"; break;
         case 0xED7A: return "ISRHI"; break;
         case 0xED7D: return "ISRCLK"; break;
         case 0xED9F: return "ISR04"; break;
+        case 0xEDAD: return "NODEV"; break;
+        case 0xEDAF: return "FRMERR"; break;
         case 0xEDB2: return "CSBERR"; break;
         case 0xEDB9: return "SECND"; break;
         case 0xEDBE: return "SCATN"; break;
@@ -1761,9 +1767,9 @@ static void _c64_debug_out_processor_pc(c64_t* sys, uint64_t pins) {
             cia2_pa = (cia2_pa & ~(1 << 7)) | (((iec_lines & IECLINE_DATA) == 0) ? (1<<7) : 0);
 
             if (address_diff > 0) {
-                fprintf(sys->debug_file, "tick:%08lx\taddr:%04x\tsys:c64 \tport-cia2-a:%02x\tbus-iec:%s\tlocal-iec:%s\tlabel:%s+%x\n", get_world_tick(), cpu_pc, cia2_pa, iec_status, local_iec_status, function_name, address_diff);
+                fprintf(sys->debug_file, "tick:%10ld\taddr:%04x\tsys:c64 \tport-cia2-a:%02x\tbus-iec:%s\tlocal-iec:%s\tlabel:%s+%x\n", get_world_tick(), cpu_pc, cia2_pa, iec_status, local_iec_status, function_name, address_diff);
             } else {
-                fprintf(sys->debug_file, "tick:%08lx\taddr:%04x\tsys:c64 \tport-cia2-a:%02x\tbus-iec:%s\tlocal-iec:%s\tlabel:%s\n", get_world_tick(), cpu_pc, cia2_pa, iec_status, local_iec_status, function_name);
+                fprintf(sys->debug_file, "tick:%10ld\taddr:%04x\tsys:c64 \tport-cia2-a:%02x\tbus-iec:%s\tlocal-iec:%s\tlabel:%s\n", get_world_tick(), cpu_pc, cia2_pa, iec_status, local_iec_status, function_name);
             }
         }
     }
