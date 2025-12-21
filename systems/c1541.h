@@ -2574,6 +2574,7 @@ uint64_t _c1541_tick(c1541_t* sys, uint64_t pins) {
     
     // FIXME: this code only exists for debugging purpose
     if (sys->exit_countdown == 1) {
+        printf("\n\n*** sys->exit_countdown == 1 - c1541.h debug exit***\n");
         exit(0);
     } else if (sys->exit_countdown > 0) {
         sys->exit_countdown--;
