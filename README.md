@@ -4,7 +4,7 @@
 
 1. `mkdir fips-workspace && cd fips-workspace`
 2. `git clone https://github.com/floooh/chips-test`
-3. `cd chips-test` and change `git: https://github.com/floooh/chips` in `fips.yml` to `git: git@github.com:c1570/chips.git`
+3. `cd chips-test && git checkout 5bd6333 && curl -o fips.yml https://raw.githubusercontent.com/c1570/chips/refs/heads/c1541/chips-test-fips.yml`
 4. `./fips make` to build
 5. `../fips-deploy/chips-test/linux-make-debug/c64-ui c1541` to run the emulator including the C1541 code
 

@@ -1,0 +1,21 @@
+#
+# pinned revisions for c1541 dev - see https://github.com/c1570/chips
+#
+---
+policies:
+  no_auto_import: true
+imports:
+  dcimgui:
+    git: https://github.com/floooh/dcimgui
+    rev: 4fcf465
+  chips:
+    git: git@github.com:c1570/chips.git
+  sokol:
+    git: https://github.com/floooh/sokol
+    rev: 789d970
+  sokol-tools-bin:
+    git: https://github.com/floooh/sokol-tools-bin
+    rev: d80b1d8
+  fips-utils:
+    git: https://github.com/fips-libs/fips-utils
+    rev: 9bd7403
