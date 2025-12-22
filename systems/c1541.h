@@ -50,6 +50,7 @@
 #include <stdlib.h>
 #include "iecbus.h"
 #include "disass.h"
+#include "gcr.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -126,6 +127,8 @@ typedef struct {
     bool byte_ready;
     uint32_t exit_countdown;
     uint8_t half_track;
+
+    uint8_t *gcr_disk_data;
 } c1541_t;
 
 // initialize a new c1541_t instance
@@ -157,25 +160,29 @@ void c1541_snapshot_onload(c1541_t* snapshot, c1541_t* sys, void* base);
     #define CHIPS_ASSERT(c) assert(c)
 #endif
 
-#include "../docs/1541_test_demo_track18gcr.h"
+//#include "../docs/1541_test_demo_track18gcr.h"
+#include "../docs/1541_test_demo.h"
 
 void c1541_init(c1541_t* sys, const c1541_desc_t* desc) {
     CHIPS_ASSERT(sys && desc);
+
+    uint8_t initial_full_track = 18;
 
     memset(sys, 0, sizeof(c1541_t));
 #ifdef __IEC_DEBUG
     sys->debug_file = desc->debug_file;
 #endif
     sys->valid = true;
-    sys->gcr_size = sizeof(track18_gcr);
-    memcpy(&sys->gcr_bytes[0], &track18_gcr[0], sys->gcr_size);
+    sys->gcr_disk_data = gcr_1541_test_demo_g64;
+    sys->gcr_size = gcr_1541_test_demo_g64_len;
+    gcr_get_half_track_bytes(sys->gcr_bytes, sys->gcr_disk_data, gcr_full_track_to_half_track(initial_full_track));
     sys->gcr_byte_pos = 0;
     sys->gcr_bit_pos = 0;
     sys->current_byte = 0;
     sys->current_bit_pos = 0;
     sys->hundred_cycles_per_bit = 369;
     sys->hundred_cycles_rotor_active = 0;
-    sys->half_track = 18 << 1;
+    sys->half_track = gcr_full_track_to_half_track(initial_full_track);
 
     // copy ROM images
     CHIPS_ASSERT(desc->roms.c000_dfff.ptr && (0x2000 == desc->roms.c000_dfff.size));
@@ -2696,10 +2703,10 @@ uint64_t _c1541_tick(c1541_t* sys, uint64_t pins) {
 
         // Motor active?
         if (motor_active && drive_on) {
-            // FIXME: for debugging purpose the countdown runs for 2 simulated seconds and terminates the program afterward
-            if (sys->exit_countdown == 0) {
-                sys->exit_countdown = C1541_FREQUENCY << 1;
-            }
+            //// FIXME: for debugging purpose the countdown runs for 2 simulated seconds and terminates the program afterward
+            //if (sys->exit_countdown == 0) {
+            //    sys->exit_countdown = C1541_FREQUENCY << 1;
+            //}
             via_output = true;
             sys->hundred_cycles_rotor_active += 100; // fixed point arithmetic - use 2 digits as fractional part
             if (sys->hundred_cycles_rotor_active >= sys->hundred_cycles_per_bit) {
