@@ -158,16 +158,16 @@ uint8_t iec_get_signals(iecbus_t* iec_bus, iecbus_device_t* requesting_device) {
         }
     }
 
-    if (changed) {
-        printf("%ld - iecbus - bus: %c%c%c - device 0: %02X - device 8: %02X\n",
-               get_world_tick(),
-               (signals & IECLINE_ATN) ? 'A' : 'a',
-               (signals & IECLINE_DATA) ? 'D' : 'd',
-               (signals & IECLINE_CLK) ? 'C' : 'c',
-               iec_bus->devices[0].signals,
-               iec_bus->devices[1].signals
-        );
-    }
+//    if (changed) {
+//        printf("%ld - iecbus - bus: %c%c%c - device 0: %02X - device 8: %02X\n",
+//               get_world_tick(),
+//               (signals & IECLINE_ATN) ? 'A' : 'a',
+//               (signals & IECLINE_DATA) ? 'D' : 'd',
+//               (signals & IECLINE_CLK) ? 'C' : 'c',
+//               iec_bus->devices[0].signals,
+//               iec_bus->devices[1].signals
+//        );
+//    }
 
     if (requesting_device != NULL) {
         // Transform the result into the logic levels of the requesting device
@@ -228,6 +228,7 @@ void iec_get_device_status_text(iecbus_device_t* iec_device, char* dest) {
 }
 
 void iec_debug_print_device_signals(iecbus_device_t* device, char* prefix) {
+    return;
     uint8_t signals = device->signals ^ device->signal_invert_mask;
     printf("%s\t", prefix);
     if (!(signals & IECLINE_ATN)) {

@@ -1939,7 +1939,7 @@ static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
                 if (addr == 0xdd00) {
                     // write
                     uint8_t write_data = M6502_GET_DATA(cia2_pins);
-                    printf("%ld - c64 - Write CIA2 $DD00 = $%02X - CPU @ $%04X\n", get_world_tick(), write_data, last_cpu_address);
+//                    printf("%ld - c64 - Write CIA2 $DD00 = $%02X - CPU @ $%04X\n", get_world_tick(), write_data, last_cpu_address);
                 }
             }
         }
@@ -1960,10 +1960,10 @@ static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
 
             if (signals != sys->iec_device->signals) {
                 char message_prefix[256];
-                sprintf(message_prefix, "%ld - c64 - write-iec - cpu @ $%04X", get_world_tick(), last_cpu_address);
+//                sprintf(message_prefix, "%ld - c64 - write-iec - cpu @ $%04X", get_world_tick(), last_cpu_address);
                 sys->iec_device->signals = signals;
 // #ifdef __IEC_DEBUG
-                iec_debug_print_device_signals(sys->iec_device, message_prefix);
+//                iec_debug_print_device_signals(sys->iec_device, message_prefix);
 // #endif
             }
         }

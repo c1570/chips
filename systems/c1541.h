@@ -166,7 +166,7 @@ void c1541_snapshot_onload(c1541_t* snapshot, c1541_t* sys, void* base);
 void c1541_init(c1541_t* sys, const c1541_desc_t* desc) {
     CHIPS_ASSERT(sys && desc);
 
-    uint8_t initial_full_track = 18;
+    uint8_t initial_full_track = 1;
 
     memset(sys, 0, sizeof(c1541_t));
 #ifdef __IEC_DEBUG
@@ -281,31 +281,31 @@ void _c1541_write(c1541_t* sys, uint16_t addr, uint8_t data) {
             last_via2_3_write = data;
             changed = true;
         }
-	// FIXME: for debugging purpose only
-        if (changed) {
-            printf("%ld - 1541 - VIA2 Write $%04X = $%02X - CPU @ $%04X - Stepper=(%d%d[%d%d]) Rotor=(%d[%d]) LED=(%d[%d]) R/O=(%d[%d]) BitRate=(%d%d[%d%d]) Sync=(%d[%d])\n",
-                get_world_tick(),
-                addr,
-                data,
-                _1541_last_cpu_address,
-                last_via2_0_write & (1<<1) ? 1 : 0,
-                last_via2_0_write & (1<<0) ? 1 : 0,
-                last_via2_2_write & (1<<1) ? 1 : 0,
-                last_via2_2_write & (1<<0) ? 1 : 0,
-                last_via2_0_write & (1<<2) ? 1 : 0,
-                last_via2_2_write & (1<<2) ? 1 : 0,
-                last_via2_0_write & (1<<3) ? 1 : 0,
-                last_via2_2_write & (1<<3) ? 1 : 0,
-                last_via2_0_write & (1<<4) ? 1 : 0,
-                last_via2_2_write & (1<<4) ? 1 : 0,
-                last_via2_0_write & (1<<6) ? 1 : 0,
-                last_via2_0_write & (1<<5) ? 1 : 0,
-                last_via2_2_write & (1<<6) ? 1 : 0,
-                last_via2_2_write & (1<<5) ? 1 : 0,
-                last_via2_0_write & (1<<7) ? 1 : 0,
-                last_via2_2_write & (1<<7) ? 1 : 0
-            );
-        }
+//	// FIXME: for debugging purpose only
+//        if (changed) {
+//            printf("%ld - 1541 - VIA2 Write $%04X = $%02X - CPU @ $%04X - Stepper=(%d%d[%d%d]) Rotor=(%d[%d]) LED=(%d[%d]) R/O=(%d[%d]) BitRate=(%d%d[%d%d]) Sync=(%d[%d])\n",
+//                get_world_tick(),
+//                addr,
+//                data,
+//                _1541_last_cpu_address,
+//                last_via2_0_write & (1<<1) ? 1 : 0,
+//                last_via2_0_write & (1<<0) ? 1 : 0,
+//                last_via2_2_write & (1<<1) ? 1 : 0,
+//                last_via2_2_write & (1<<0) ? 1 : 0,
+//                last_via2_0_write & (1<<2) ? 1 : 0,
+//                last_via2_2_write & (1<<2) ? 1 : 0,
+//                last_via2_0_write & (1<<3) ? 1 : 0,
+//                last_via2_2_write & (1<<3) ? 1 : 0,
+//                last_via2_0_write & (1<<4) ? 1 : 0,
+//                last_via2_2_write & (1<<4) ? 1 : 0,
+//                last_via2_0_write & (1<<6) ? 1 : 0,
+//                last_via2_0_write & (1<<5) ? 1 : 0,
+//                last_via2_2_write & (1<<6) ? 1 : 0,
+//                last_via2_2_write & (1<<5) ? 1 : 0,
+//                last_via2_0_write & (1<<7) ? 1 : 0,
+//                last_via2_2_write & (1<<7) ? 1 : 0
+//            );
+//        }
         _m6522_write(&sys->via_2, addr & 0xF, data);
     } else if (addr < 0x0800) {
         // Write to RAM
@@ -340,11 +340,11 @@ void _c1541_write_iec_pins(c1541_t* sys, uint64_t pins) {
 
     if (out_signals != sys->iec_device->signals) {
         char message_prefix[256];
-        sprintf(message_prefix, "%ld - 1541 - write-iec - CPU @ $%04X", get_world_tick(), _1541_last_cpu_address);
+//        sprintf(message_prefix, "%ld - 1541 - write-iec - CPU @ $%04X", get_world_tick(), _1541_last_cpu_address);
         sys->iec_device->signals = out_signals;
 	// FIXME: for debugging purpose only
 // #ifdef __IEC_DEBUG
-        iec_debug_print_device_signals(sys->iec_device, message_prefix);
+//        iec_debug_print_device_signals(sys->iec_device, message_prefix);
 // #endif
     }
 }
@@ -2618,10 +2618,10 @@ uint64_t _c1541_tick(c1541_t* sys, uint64_t pins) {
         } else if ((addr & 0xFC00) == 0x1800) {
             // Read from VIA1
             read_data = _m6522_read(&sys->via_1, addr & 0xF);
-	    // FIXME: debugging purpose
-            if (addr == 0x1800) {
-                printf("%ld - 1541 - Read VIA1 $1800 = $%02X - CPU @ $%04X\n", get_world_tick(), read_data, _1541_last_cpu_address);
-            }
+//	    // FIXME: debugging purpose
+//            if (addr == 0x1800) {
+//                printf("%ld - 1541 - Read VIA1 $1800 = $%02X - CPU @ $%04X\n", get_world_tick(), read_data, _1541_last_cpu_address);
+//            }
         } else if ((addr & 0xFC00) == 0x1C00) {
             // Read from VIA2
             read_data = _m6522_read(&sys->via_2, addr & 0xF);
@@ -2640,10 +2640,10 @@ uint64_t _c1541_tick(c1541_t* sys, uint64_t pins) {
     else {
         // memory write
         uint8_t write_data = M6502_GET_DATA(pins);
-        // FIXME: debugging purpose
-        if (addr == 0x1800) {
-            printf("%ld - 1541 - Write VIA1 $1800 = $%02X - CPU @ $%04X\n", get_world_tick(), write_data, _1541_last_cpu_address);
-        }
+//        // FIXME: debugging purpose
+//        if (addr == 0x1800) {
+//            printf("%ld - 1541 - Write VIA1 $1800 = $%02X - CPU @ $%04X\n", get_world_tick(), write_data, _1541_last_cpu_address);
+//        }
         _c1541_write(sys, addr, write_data);
     }
 
@@ -2699,7 +2699,6 @@ uint64_t _c1541_tick(c1541_t* sys, uint64_t pins) {
         bool is_sync = (((sys->current_data + 1) & (1<<10)) != 0) && output_enable;
         bool drive_ready = (sys->ram[0x20] & 0x80) == 0;
         bool drive_on = (sys->ram[0x20] & 0x30) == 0x20;
-        bool drive_stepping = (sys->ram[0x20] & 0x60) == 0x60;
 
         // Motor active?
         if (motor_active && drive_on) {
@@ -2776,6 +2775,24 @@ uint64_t _c1541_tick(c1541_t* sys, uint64_t pins) {
         via2_pins = m6522_tick(&sys->via_2, via2_pins);
         if (via2_pins & M6502_IRQ) {
             pins |= M6502_IRQ;
+        }
+        // bool drive_stepping = (sys->ram[0x20] & 0x60) == 0x60;
+        int stepper_position = (via2_pins >> 56) & 3;
+        static int last_position = 0;
+        if (last_position != stepper_position) {
+            if ((stepper_position - last_position) == -1 || (stepper_position + 4 - last_position) == -1) {
+                if (sys->half_track > 1) {
+                    sys->half_track--;
+                }
+                //printf("Moving inward, track: %g\n", ((float)sys->half_track + 1) / 2);
+            } else {
+                if (sys->half_track < 42 * 2) {
+                    sys->half_track++;
+                }
+                //printf("Moving outward, track: %g\n", ((float)sys->half_track + 1) / 2);
+            }
+            gcr_get_half_track_bytes(sys->gcr_bytes, sys->gcr_disk_data, sys->half_track);
+            last_position = stepper_position;
         }
     }
 
