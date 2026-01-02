@@ -683,14 +683,14 @@ struct MemoryEditor
     // Utilities for Data Preview
     const char* DataTypeGetDesc(ImGuiDataType data_type) const
     {
-        const char* descs[] = { "Int8", "Uint8", "Int16", "Uint16", "Int32", "Uint32", "Int64", "Uint64", "Float", "Double" };
+        const char* descs[ImGuiDataType_COUNT] = { "Int8", "Uint8", "Int16", "Uint16", "Int32", "Uint32", "Int64", "Uint64", "Float", "Double" };
         IM_ASSERT(data_type >= 0 && data_type < ImGuiDataType_COUNT);
         return descs[data_type];
     }
 
     size_t DataTypeGetSize(ImGuiDataType data_type) const
     {
-        const size_t sizes[] = { 1, 1, 2, 2, 4, 4, 8, 8, sizeof(float), sizeof(double) };
+        const size_t sizes[ImGuiDataType_COUNT] = { 1, 1, 2, 2, 4, 4, 8, 8, sizeof(float), sizeof(double) };
         IM_ASSERT(data_type >= 0 && data_type < ImGuiDataType_COUNT);
         return sizes[data_type];
     }

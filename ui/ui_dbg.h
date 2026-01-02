@@ -1366,7 +1366,7 @@ static void _ui_dbg_stopwatch_draw(ui_dbg_t* win) {
             if (win->stopwatch.frame_ticks > 0) {
                 frames = (double)cycle_count / (double)win->stopwatch.frame_ticks;
             }
-            ImGui::Text("%llu ticks", cycle_count);
+            ImGui::Text("%lu ticks", cycle_count);
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("milliseconds: %.3f\nraster lines: %.3f\nframes:       %.3f\n", ms, raster_lines, frames);
             }
