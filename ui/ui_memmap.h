@@ -124,7 +124,6 @@ void ui_memmap_region(ui_memmap_t* win, const char* name, uint16_t addr, int len
 static void _ui_memmap_draw_grid(ui_memmap_t* win, const ImVec2& canvas_pos, const ImVec2& canvas_area) {
     ImDrawList* l = ImGui::GetWindowDrawList();
     const ImU32 grid_color = ui_util_color(ImGuiCol_Text);
-    const float y1 = canvas_pos.y + canvas_area.y - win->layer_height;
     /* line rulers */
     if (canvas_area.x > win->left_padding) {
         static const char* addr[5] = { "0000", "4000", "8000", "C000", "FFFF" };
@@ -144,6 +143,7 @@ static void _ui_memmap_draw_grid(ui_memmap_t* win, const ImVec2& canvas_pos, con
         l->AddLine(p0, p1, grid_color);
     }
     /* layer names to the left */
+    const float y1 = canvas_pos.y + canvas_area.y - win->layer_height;
     ImVec2 text_pos(canvas_pos.x, (y1 - win->layer_height + 6));
     for (int i = 0; i < win->num_layers; i++) {
         l->AddText(text_pos, grid_color, win->layers[i].name);

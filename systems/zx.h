@@ -881,10 +881,9 @@ bool zx_quickload(zx_t* sys, chips_range_t data) {
                     if (0xED == val[1]) {
                         uint8_t count = val[2];
                         CHIPS_ASSERT(0 != count);
-                        uint8_t data = val[3];
                         src_pos += 4;
                         for (int i = 0; i < count; i++) {
-                            *dst_ptr++ = data;
+                            *dst_ptr++ = val[3];
                         }
                     }
                     else {

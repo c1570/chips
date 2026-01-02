@@ -545,7 +545,6 @@ static uint64_t _mc6847_decode_scanline(mc6847_t* vdg, uint64_t pins, size_t y) 
 
         // the vidmem src address and offset into the font data
         uint16_t addr = (y / 12) * 32;
-        uint8_t m; // the pixel bitmask
         size_t chr_y = y % 12;
         // bit shifters to extract a 2x2 or 2x3 semigraphics 2-bit stack
         size_t shift_2x2 = (1 - (chr_y / 6))*2;
@@ -558,6 +557,7 @@ static uint64_t _mc6847_decode_scanline(mc6847_t* vdg, uint64_t pins, size_t y) 
             uint8_t chr = MC6847_GET_DATA(pins);
             if (pins & MC6847_AS) {
                 // semigraphics mode
+                uint8_t m; // the pixel bitmask
                 uint8_t fg_color;
                 if (pins & MC6847_INTEXT) {
                     /*  2x3 semigraphics, 2 color sets at 4 colors (selected by CSS pin)
