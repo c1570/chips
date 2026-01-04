@@ -1,4 +1,4 @@
-#pragma once
+//#pragma once
 /*#
     # iecbus.h
 
@@ -37,9 +37,16 @@
         distribution.
 #*/
 
+#ifndef Z_IECBUS_H
+#define Z_IECBUS_H
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -62,8 +69,8 @@ typedef struct {
     uint8_t signal_invert_mask;
     // Each connected device pulls on its own end of the lines
     uint8_t signals;
-    // for debug purposes
-    uint8_t last_signals;
+    // // for debug purposes
+    // uint8_t last_signals;
     // ...
     uint8_t id;
 } iecbus_device_t;
@@ -72,10 +79,12 @@ typedef struct {
     // Up to 4 independent devices on a single bus
     iecbus_device_t devices[IEC_BUS_MAX_DEVICES];
     uint8_t usage_map;
+    uint8_t lock;
+    uint8_t master_tick;
 } iecbus_t;
 
 // Attach device to virtual IEC bus, use invert_logic if the connecting device has inverters on its bus output
-iecbus_device_t* iec_connect(iecbus_t* iec_bus, bool invert_logic);
+iecbus_device_t* iec_connect(iecbus_t** iec_bus, bool invert_logic);
 // Remove device from virtual IEC bus
 void iec_disconnect(iecbus_t* iec_bus, iecbus_device_t* iec_device);
 // Get total bus line status, using requesting_device for optional signal negation
@@ -86,23 +95,52 @@ void iec_get_device_status_text(iecbus_device_t* iec_device, char* dest);
 void iec_debug_print_device_signals(iecbus_device_t* device, char* prefix);
 void world_tick();
 uint64_t get_world_tick();
+void set_master_tick(iecbus_t *iec_bus);
+void clear_master_tick(iecbus_t *iec_bus);
 
 #ifdef __cplusplus
 } // extern "C"
 #endif
 
 /*-- IMPLEMENTATION ----------------------------------------------------------*/
+//#define CHIPS_IMPL
 #ifdef CHIPS_IMPL
 
-iecbus_device_t* iec_connect(iecbus_t* iec_bus, bool invert_logic) {
+void set_master_tick(iecbus_t *iec_bus) {
+    iec_bus->master_tick = 1;
+}
+
+void clear_master_tick(iecbus_t *iec_bus) {
+    iec_bus->master_tick = 0;
+}
+
+iecbus_device_t* iec_connect(iecbus_t** iec_bus, const bool invert_logic) {
     uint8_t i = 0;
     iecbus_device_t* bus_device = NULL;
+    iecbus_t *bus = NULL;
+
+    int fd = shm_open("/iec_bus", O_CREAT | O_RDWR, 0600);
+    struct stat st;
+    fstat(fd, &st);
+    if (st.st_size == 0) {
+        ftruncate(fd, sizeof(**iec_bus));
+    }
+
+    *iec_bus = (iecbus_t*) mmap(NULL, sizeof(**iec_bus), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+
+    bus = *iec_bus;
+
+    const int sem = bus->lock++;
+
+    while (sem > 0 && bus->lock > 0) {
+
+    }
 
     for (i = 0; i < IEC_BUS_MAX_DEVICES && bus_device == NULL; i++) {
-        if ((iec_bus->usage_map & (1<<i)) == 0) {
-            iec_bus->usage_map |= 1<<i;
+        if ((bus->usage_map & (1<<i)) == 0) {
+            bus->usage_map |= 1<<i;
             printf("IEC device connected: Slot %d\n", i);
-            bus_device = &iec_bus->devices[i];
+            bus_device = &bus->devices[i];
 
             // Initialize lines with the correct signal to not pull the line
             bus_device->signals = 0;
@@ -116,6 +154,8 @@ iecbus_device_t* iec_connect(iecbus_t* iec_bus, bool invert_logic) {
         }
     }
 
+    bus->lock--;
+
     return bus_device;
 }
 
@@ -128,6 +168,8 @@ void iec_disconnect(iecbus_t* iec_bus, iecbus_device_t* iec_device) {
             printf("IEC device disconnected: Slot %d\n", i);
         }
     }
+
+    munmap(iec_bus, sizeof(*iec_bus));
 }
 
 uint8_t _iec_get_device_index(iecbus_t* iec_bus, iecbus_device_t* device) {
@@ -139,13 +181,14 @@ uint8_t _iec_get_device_index(iecbus_t* iec_bus, iecbus_device_t* device) {
     return IEC_BUS_MAX_DEVICES;
 }
 
-uint8_t last_iec_signals = 255;
+// uint8_t last_iec_signals = 255;
 uint8_t iec_get_signals(iecbus_t* iec_bus, iecbus_device_t* requesting_device) {
     uint8_t i = 0;
     // Initialize resulting signals with IEC logical low meaning high level voltage
     uint8_t signals = IEC_ALL_LINES;
     uint8_t device_signals = 0;
-    bool changed = false;
+    // uint8_t device_bit = 1;
+    // bool changed = false;
 
     for (i = 0; i < IEC_BUS_MAX_DEVICES; i++) {
         if (iec_bus->usage_map & (1<<i)) {
@@ -153,8 +196,8 @@ uint8_t iec_get_signals(iecbus_t* iec_bus, iecbus_device_t* requesting_device) {
             device_signals = (iec_bus->devices[i].signals ^ iec_bus->devices[i].signal_invert_mask) & IEC_ALL_LINES;
             // Let the device signals pull down lines on the bus
             signals &= device_signals;
-            changed = changed || (iec_bus->devices[i].signals != iec_bus->devices[i].last_signals);
-            iec_bus->devices[i].last_signals = iec_bus->devices[i].signals;
+            // changed = changed || (iec_bus->devices[i].signals != iec_bus->devices[i].last_signals);
+            // iec_bus->devices[i].last_signals = iec_bus->devices[i].signals;
         }
     }
 
@@ -228,7 +271,7 @@ void iec_get_device_status_text(iecbus_device_t* iec_device, char* dest) {
 }
 
 void iec_debug_print_device_signals(iecbus_device_t* device, char* prefix) {
-    return;
+    // return;
     uint8_t signals = device->signals ^ device->signal_invert_mask;
     printf("%s\t", prefix);
     if (!(signals & IECLINE_ATN)) {
@@ -254,3 +297,5 @@ uint64_t get_world_tick() {
 }
 
 #endif // CHIPS_IMPL
+
+#endif // Z_IECBUS_H

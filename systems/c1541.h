@@ -49,7 +49,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "iecbus.h"
-#include "disass.h"
+// #include "disass.h"
 #include "gcr.h"
 
 #ifdef __cplusplus
@@ -57,8 +57,7 @@ extern "C" {
 #endif
 
 #define C1541_FREQUENCY (1000000)
-
-#define RUNTIME_LIMIT_TICKS 1000
+// #define C1541_FREQUENCY (985248)
 
 #define VIA2_STEPPER_LO_BIT_POS  0
 #define VIA2_STEPPER_HI_BIT_POS  1
@@ -113,7 +112,7 @@ typedef struct {
     uint16_t hundred_cycles_per_bit;
     bool rotor_active;
     uint8_t gcr_bytes[0x2000];
-    uint16_t gcr_size;
+    uint32_t gcr_size;
     uint16_t gcr_byte_pos;
     uint8_t gcr_bit_pos;
     uint8_t gcr_ones;
@@ -133,6 +132,10 @@ typedef struct {
 
 // initialize a new c1541_t instance
 void c1541_init(c1541_t* sys, const c1541_desc_t* desc);
+// connect the 1541 to the iec bus
+void c1541_iec_connect(c1541_t* sys);
+// connect the 1541 to the iec bus
+void c1541_iec_disconnect(c1541_t* sys);
 // discard a c1541_t instance
 void c1541_discard(c1541_t* sys);
 // reset a c1541_t instance
@@ -205,12 +208,20 @@ void c1541_init(c1541_t* sys, const c1541_desc_t* desc) {
     mem_map_ram(&sys->mem, 0, 0x0000, 0x0800, sys->ram);
     mem_map_rom(&sys->mem, 0, 0xC000, 0x4000, sys->rom);
 
-    sys->iec_bus = desc->iec_bus;
-    CHIPS_ASSERT(sys->iec_bus);
+    // sys->iec_bus = desc->iec_bus;
+    // CHIPS_ASSERT(sys->iec_bus);
+    //
+    // CHIPS_ASSERT(sys->iec_device);
+}
 
+void c1541_iec_connect(c1541_t* sys) {
     // Connect to IEC bus and tell it that we have inverter logic in our hardware
-    sys->iec_device = iec_connect(sys->iec_bus, true);
-    CHIPS_ASSERT(sys->iec_device);
+    sys->iec_device = iec_connect(&sys->iec_bus, true);
+}
+
+void c1541_iec_disconnect(c1541_t* sys) {
+    // Connect to IEC bus and tell it that we have inverter logic in our hardware
+    iec_disconnect(sys->iec_bus, sys->iec_device);
 }
 
 void c1541_discard(c1541_t* sys) {
@@ -227,15 +238,15 @@ void c1541_reset(c1541_t* sys) {
     m6522_reset(&sys->via_2);
 }
 
-static uint16_t _1541_last_cpu_address = 0;
-uint8_t last_via2_0_write = 0xff;
-uint8_t last_via2_1_write = 0xff;
-uint8_t last_via2_2_write = 0xff;
-uint8_t last_via2_3_write = 0xff;
+// static uint16_t _1541_last_cpu_address = 0;
+// uint8_t last_via2_0_write = 0xff;
+// uint8_t last_via2_1_write = 0xff;
+// uint8_t last_via2_2_write = 0xff;
+// uint8_t last_via2_3_write = 0xff;
 void _c1541_write(c1541_t* sys, uint16_t addr, uint8_t data) {
     char *area = "n/a";
     bool illegal = false;
-    bool changed = false;
+//    bool changed = false;
 
     if ((addr & 0xFC00) == 0x1800) {
         area = "via1";
@@ -248,39 +259,39 @@ void _c1541_write(c1541_t* sys, uint16_t addr, uint8_t data) {
             if (!sys->rotor_active) {
                 sys->hundred_cycles_rotor_active = 0;
             }
-	    // FIXME: use correct formula once the cpu frequency is decoupled from c64 and uses real 1MHz
-            // sys->hundred_cycles_per_bit = 400 - ((data & 3) * 25);
-            switch (data & 3) {
-                case 0:
-                    sys->hundred_cycles_per_bit = 394;
-                    break;
-                case 1:
-                    sys->hundred_cycles_per_bit = 369;
-                    break;
-                case 2:
-                    sys->hundred_cycles_per_bit = 345;
-                    break;
-                case 3:
-                    sys->hundred_cycles_per_bit = 320;
-                    break;
-            }
+    	    // FIXME: use correct formula once the cpu frequency is decoupled from c64 and uses real 1MHz
+            sys->hundred_cycles_per_bit = 400 - ((data & 3) * 25);
+            // switch (data & 3) {
+            //     case 0:
+            //         sys->hundred_cycles_per_bit = 394;
+            //         break;
+            //     case 1:
+            //         sys->hundred_cycles_per_bit = 369;
+            //         break;
+            //     case 2:
+            //         sys->hundred_cycles_per_bit = 345;
+            //         break;
+            //     case 3:
+            //         sys->hundred_cycles_per_bit = 320;
+            //         break;
+            // }
         }
-        if ((addr & 0x0f) == 0 && (data != last_via2_0_write)) {
-            last_via2_0_write = data;
-            changed = true;
-        }
-        if ((addr & 0x0f) == 1 && (data != last_via2_1_write)) {
-            last_via2_1_write = data;
-            changed = true;
-        }
-        if ((addr & 0x0f) == 2 && (data != last_via2_2_write)) {
-            last_via2_2_write = data;
-            changed = true;
-        }
-        if ((addr & 0x0f) == 3 && (data != last_via2_3_write)) {
-            last_via2_3_write = data;
-            changed = true;
-        }
+        // if ((addr & 0x0f) == 0 && (data != last_via2_0_write)) {
+        //     last_via2_0_write = data;
+        //     //changed = true;
+        // }
+        // if ((addr & 0x0f) == 1 && (data != last_via2_1_write)) {
+        //     last_via2_1_write = data;
+        //     //changed = true;
+        // }
+        // if ((addr & 0x0f) == 2 && (data != last_via2_2_write)) {
+        //     last_via2_2_write = data;
+        //     //changed = true;
+        // }
+        // if ((addr & 0x0f) == 3 && (data != last_via2_3_write)) {
+        //     last_via2_3_write = data;
+        //     //changed = true;
+        // }
 //	// FIXME: for debugging purpose only
 //        if (changed) {
 //            printf("%ld - 1541 - VIA2 Write $%04X = $%02X - CPU @ $%04X - Stepper=(%d%d[%d%d]) Rotor=(%d[%d]) LED=(%d[%d]) R/O=(%d[%d]) BitRate=(%d%d[%d%d]) Sync=(%d[%d])\n",
@@ -309,7 +320,7 @@ void _c1541_write(c1541_t* sys, uint16_t addr, uint8_t data) {
         _m6522_write(&sys->via_2, addr & 0xF, data);
     } else if (addr < 0x0800) {
         // Write to RAM
-        area = "ram";
+        // area = "ram";
         sys->ram[addr & 0x7FF] = data;
     } else {
         // Illegal access
@@ -317,40 +328,33 @@ void _c1541_write(c1541_t* sys, uint16_t addr, uint8_t data) {
         illegal = true;
     }
     if (illegal) {
-        printf("1541-write %s $%x $%x\n", area, addr, data);
+        printf("1541-write illegal %s $%x $%x\n", area, addr, data);
     }
 }
 
 #define XOR(a,b) (((a) && !(b)) || ((b) && !(a)))
 #define AND(a,b) ((a) && (b))
 
-void _c1541_write_iec_pins(c1541_t* sys, uint64_t pins) {
+void _c1541_write_iec_pins(c1541_t* sys, uint64_t pins, uint8_t iec_signals) {
     uint8_t out_signals = 0;
 
-    uint8_t iec_signals = iec_get_signals(sys->iec_bus, sys->iec_device);
+    // uint8_t iec_signals = iec_get_signals(sys->iec_bus, sys->iec_device);
 
     if ((pins & M6522_PB1) || (XOR(iec_signals & IECLINE_ATN, pins & M6522_PB4))) {
         // ATNA logic (UD3)
         out_signals |= IECLINE_DATA;
     }
 
-    if ((pins & M6522_PB3)) {
+    if (pins & M6522_PB3) {
         out_signals |= IECLINE_CLK;
     }
 
-    if (out_signals != sys->iec_device->signals) {
-        char message_prefix[256];
-//        sprintf(message_prefix, "%ld - 1541 - write-iec - CPU @ $%04X", get_world_tick(), _1541_last_cpu_address);
-        sys->iec_device->signals = out_signals;
-	// FIXME: for debugging purpose only
-// #ifdef __IEC_DEBUG
-//        iec_debug_print_device_signals(sys->iec_device, message_prefix);
-// #endif
-    }
+    sys->iec_device->signals = out_signals;
 }
 
 uint16_t _get_c1541_nearest_routine_address(uint16_t addr) {
-    uint16_t res = 0;
+    return 0;
+/*    uint16_t res = 0;
     if (addr >= 0xFF0D) res = 0xFF0D;
     else if(addr >= 0xFF01) res = 0xFF01;
     else if(addr >= 0xFEF3) res = 0xFEF3;
@@ -1426,11 +1430,12 @@ uint16_t _get_c1541_nearest_routine_address(uint16_t addr) {
     else if(addr >= 0xC123) res = 0xC123;
     else if(addr >= 0xC118) res = 0xC118;
     else if(addr >= 0xC100) res = 0xC100;
-    return res;
+    return res;*/
 }
 
 char* _get_c1541_routine_name(uint16_t addr) {
-    switch (addr) {
+    return "\0";
+/*    switch (addr) {
         case 0xC100: return "SETLDA"; break;
         case 0xC118: return "LEDSON"; break;
         case 0xC123: return "ERROFF"; break;
@@ -2508,7 +2513,7 @@ char* _get_c1541_routine_name(uint16_t addr) {
         case 0xFF0D: return "NNMI10"; break;
         default:
             return NULL;
-    }
+    }*/
 }
 
 #ifdef __IEC_DEBUG
@@ -2571,42 +2576,41 @@ static void _c1541_debug_out_processor_pc(c1541_t* sys, uint64_t pins) {
   ((byte) & 0x08 ? '1' : '0'), \
   ((byte) & 0x04 ? '1' : '0'), \
   ((byte) & 0x02 ? '1' : '0'), \
-  ((byte) & 0x01 ? '1' : '0') 
+  ((byte) & 0x01 ? '1' : '0')
 
-uint64_t _c1541_tick(c1541_t* sys, uint64_t pins) {
-#ifdef __IEC_DEBUG
-    _c1541_debug_out_processor_pc(sys, pins);
+uint64_t _c1541_tick_cpu(c1541_t *sys, const uint64_t input_pins, uint16_t* p_addr) {
+#ifdef PICO
+    uint32_t tick = get_ticks();
 #endif
-    iec_get_signals(sys->iec_bus, NULL);
-    
-    // FIXME: this code only exists for debugging purpose
-    if (sys->exit_countdown == 1) {
-        printf("\n\n*** sys->exit_countdown == 1 - c1541.h debug exit***\n");
-        exit(0);
-    } else if (sys->exit_countdown > 0) {
-        sys->exit_countdown--;
-    }
-
-    // FIXME: the start address of an instruction is only memorized for debugging purpose
-    uint16_t cpu_addr = M6502_GET_ADDR(pins);
-    bool is_cpu_sync = (pins & M6502_SYNC);
-    if (is_cpu_sync) {
-        _1541_last_cpu_address = cpu_addr;
-    }
+    const bool is_cpu_sync = (input_pins & M6502_SYNC);
 
     // s0 pin high workaround for injecting OV flag to the cpu on a new instruction
     if (is_cpu_sync && sys->byte_ready && (sys->via_2.pins & M6522_CA2)) {
         m6502_set_p(&sys->cpu, m6502_p(&sys->cpu)|M6502_VF);
     }
-    
-    pins = m6502_tick(&sys->cpu, pins);
-    const uint16_t addr = M6502_GET_ADDR(pins);
 
-    // those pins are set each tick by the CIAs and VIC
-    pins &= ~(M6502_IRQ);
+// #ifdef PICO
+//     uint32_t tick_cpu = get_ticks();
+// #endif
+    // printf("cpu pc: $%04x\n", sys->cpu.PC);
+#ifdef PICO
+    uint32_t chip_tick = get_ticks();
+#endif
+    uint64_t pins = m6502_tick(&sys->cpu, input_pins);
+#ifdef PICO
+    ticks_chip_cpu = get_elapsed_ticks(chip_tick);
+#endif
+// #ifdef PICO
+//     uint32_t dt_cpu = get_elapsed_ticks(tick_cpu);
+//     printf("chip_tick cpu: %ld sys tick(s)\n", dt_cpu);
+// #endif
 
-    uint64_t via1_pins = pins & M6502_PIN_MASK;
-    uint64_t via2_pins = pins & M6502_PIN_MASK;
+//    const uint16_t addr = M6502_GET_ADDR(pins);
+    const uint16_t addr = sys->cpu.bus_addr;
+    // if (*p_addr != addr) {
+    //     printf("addr: %d\n", addr);
+    // }
+    *p_addr = addr;
 
     if (pins & M6502_RW) {
         // memory read
@@ -2618,10 +2622,10 @@ uint64_t _c1541_tick(c1541_t* sys, uint64_t pins) {
         } else if ((addr & 0xFC00) == 0x1800) {
             // Read from VIA1
             read_data = _m6522_read(&sys->via_1, addr & 0xF);
-//	    // FIXME: debugging purpose
-//            if (addr == 0x1800) {
-//                printf("%ld - 1541 - Read VIA1 $1800 = $%02X - CPU @ $%04X\n", get_world_tick(), read_data, _1541_last_cpu_address);
-//            }
+            //	    // FIXME: debugging purpose
+            //            if (addr == 0x1800) {
+            //                printf("%ld - 1541 - Read VIA1 $1800 = $%02X - CPU @ $%04X\n", get_world_tick(), read_data, _1541_last_cpu_address);
+            //            }
         } else if ((addr & 0xFC00) == 0x1C00) {
             // Read from VIA2
             read_data = _m6522_read(&sys->via_2, addr & 0xF);
@@ -2634,70 +2638,97 @@ uint64_t _c1541_tick(c1541_t* sys, uint64_t pins) {
             valid_read = false;
         }
         if (valid_read) {
-            M6502_SET_DATA(pins, read_data);
+//            M6502_SET_DATA(pins, read_data);
+            sys->cpu.bus_data = read_data;
         }
     }
     else {
         // memory write
-        uint8_t write_data = M6502_GET_DATA(pins);
-//        // FIXME: debugging purpose
-//        if (addr == 0x1800) {
-//            printf("%ld - 1541 - Write VIA1 $1800 = $%02X - CPU @ $%04X\n", get_world_tick(), write_data, _1541_last_cpu_address);
-//        }
-        _c1541_write(sys, addr, write_data);
+        //         uint8_t write_data = M6502_GET_DATA(pins);
+        // //        // FIXME: debugging purpose
+        // //        if (addr == 0x1800) {
+        // //            printf("%ld - 1541 - Write VIA1 $1800 = $%02X - CPU @ $%04X\n", get_world_tick(), write_data, _1541_last_cpu_address);
+        // //        }
+        //         _c1541_write(sys, addr, write_data);
+//        _c1541_write(sys, addr, M6502_GET_DATA(pins));
+        _c1541_write(sys, addr, sys->cpu.bus_data);
     }
 
+#ifdef PICO
+    ticks_cpu = get_elapsed_ticks(tick);
+#endif
+    return pins;
+}
+
+// _c1541_tick_via1 returns if IRQ should be set
+uint8_t _c1541_tick_via1(c1541_t* sys, uint64_t pins, const uint16_t addr) {
+#ifdef PICO
+    uint32_t tick = get_ticks();
+#endif
     if ((addr & 0xFC00) == 0x1800) {
-        via1_pins |= M6522_CS1;
-    } else if ((addr & 0xFC00) == 0x1C00) {
-        via2_pins |= M6522_CS1;
+        pins |= M6522_CS1;
     }
 
-    // tick VIA1
-    {
-        uint8_t iec_lines = iec_get_signals(sys->iec_bus, sys->iec_device);
+    uint8_t iec_lines = iec_get_signals(sys->iec_bus, sys->iec_device);
 
-        via1_pins &= ~(M6522_PB0 | M6522_PB2 | M6522_PB7 | M6522_CA1);
-        if (iec_lines & IECLINE_ATN) {
-            via1_pins |= M6522_PB7;
-            via1_pins |= M6522_CA1;
-        }
-        if (iec_lines & IECLINE_CLK) {
-            via1_pins |= M6522_PB2;
-        }
-        if (sys->via_1.pins & M6522_PB3) {
-            via1_pins |= M6522_PB2;
-        }
-        if (iec_lines & IECLINE_DATA) {
-            via1_pins |= M6522_PB0;
-        }
-        if (XOR(sys->via_1.pins & M6522_PB4, iec_lines & IECLINE_ATN)) {
-            // ATNA logic (UD3) DATA read back. Note setting of ATN is done in _c1541_write_iec_pins()
-            via1_pins |= M6522_PB0;
-        }
-        if (sys->via_1.pins & M6522_PB1) {
-            via1_pins |= M6522_PB0;
-        }
-
-        via1_pins = m6522_tick(&sys->via_1, via1_pins);
-        
-        if (via1_pins & M6502_IRQ) {
-            pins |= M6502_IRQ;
-        }
-        
-        _c1541_write_iec_pins(sys, via1_pins);
+    pins &= ~(M6522_PB0 | M6522_PB2 | M6522_PB7 | M6522_CA1);
+    if (iec_lines & IECLINE_ATN) {
+        pins |= M6522_PB7;
+        pins |= M6522_CA1;
     }
-    
+    if (iec_lines & IECLINE_CLK) {
+        pins |= M6522_PB2;
+    }
+    if (sys->via_1.pins & M6522_PB3) {
+        pins |= M6522_PB2;
+    }
+    if (iec_lines & IECLINE_DATA) {
+        pins |= M6522_PB0;
+    }
+    if (XOR(sys->via_1.pins & M6522_PB4, iec_lines & IECLINE_ATN)) {
+        // ATNA logic (UD3) DATA read back. Note setting of ATN is done in _c1541_write_iec_pins()
+        pins |= M6522_PB0;
+    }
+    if (sys->via_1.pins & M6522_PB1) {
+        pins |= M6522_PB0;
+    }
 
-    bool was_byte_ready = sys->byte_ready;
-    bool via_output = false;
+#ifdef PICO
+    uint32_t chip_tick = get_ticks();
+#endif
+    pins = m6522_tick(&sys->via_1, pins);
+#ifdef PICO
+    ticks_chip_via1 = get_elapsed_ticks(chip_tick);
+#endif
+
+    _c1541_write_iec_pins(sys, pins, iec_lines);
+
+#ifdef PICO
+    ticks_via1 = get_elapsed_ticks(tick);
+#endif
+    return 0 != (pins & M6502_IRQ);
+}
+
+// _c1541_tick_via2 returns if IRQ should be set
+uint8_t _c1541_tick_via2(c1541_t* sys, uint64_t pins, const uint16_t addr) {
+#ifdef PICO
+    uint32_t tick = get_ticks();
+#endif
+    if ((addr & 0xFC00) == 0x1C00) {
+        pins |= M6522_CS1;
+    }
+
     {
         // Prepare VIA2 pins
+// #ifdef PICO
+//         uint32_t tick = get_ticks();
+// #endif
 
         bool output_enable = (sys->via_2.pins & M6522_CB2) != 0;
         bool motor_active = (sys->via_2.pins & M6522_PB2) != 0;
-        bool is_sync = (((sys->current_data + 1) & (1<<10)) != 0) && output_enable;
-        bool drive_ready = (sys->ram[0x20] & 0x80) == 0;
+        bool sync_bits_present = ((sys->current_data + 1) & (1<<10)) != 0;
+        bool is_sync = sync_bits_present && output_enable;
+//        bool drive_ready = (sys->ram[0x20] & 0x80) == 0;
         bool drive_on = (sys->ram[0x20] & 0x30) == 0x20;
 
         // Motor active?
@@ -2706,7 +2737,7 @@ uint64_t _c1541_tick(c1541_t* sys, uint64_t pins) {
             //if (sys->exit_countdown == 0) {
             //    sys->exit_countdown = C1541_FREQUENCY << 1;
             //}
-            via_output = true;
+//            via_output = true;
             sys->hundred_cycles_rotor_active += 100; // fixed point arithmetic - use 2 digits as fractional part
             if (sys->hundred_cycles_rotor_active >= sys->hundred_cycles_per_bit) {
                 sys->hundred_cycles_rotor_active -= sys->hundred_cycles_per_bit;
@@ -2753,7 +2784,7 @@ uint64_t _c1541_tick(c1541_t* sys, uint64_t pins) {
         }
 
         if (!is_sync) {
-            via2_pins |= M6522_PB7;
+            pins |= M6522_PB7;
         } else {
             sys->byte_ready = false;
         }
@@ -2761,23 +2792,40 @@ uint64_t _c1541_tick(c1541_t* sys, uint64_t pins) {
         if (sys->byte_ready) {
             sys->output_data = sys->current_data & 0xff;
             if (output_enable) {
-                via2_pins |= M6522_CA1;
+                pins |= M6522_CA1;
             }
         }
 
         if (output_enable) {
-            M6522_SET_PA(via2_pins, sys->output_data);
+            M6522_SET_PA(pins, sys->output_data);
         }
+// #ifdef PICO
+//         uint32_t dt = get_elapsed_ticks(tick);
+//         printf("chip_tick via2 prepare: %ld sys tick(s)\n", dt);
+// #endif
     }
 
     // tick VIA2
     {
-        via2_pins = m6522_tick(&sys->via_2, via2_pins);
-        if (via2_pins & M6502_IRQ) {
-            pins |= M6502_IRQ;
-        }
+// #ifdef PICO
+//         uint32_t tick = get_ticks();
+// #endif
+#ifdef PICO
+        uint32_t chip_tick = get_ticks();
+#endif
+        pins = m6522_tick(&sys->via_2, pins);
+#ifdef PICO
+        ticks_chip_via2 = get_elapsed_ticks(chip_tick);
+#endif
+// #ifdef PICO
+//         uint32_t dt = get_elapsed_ticks(tick);
+//         printf("chip_tick via2: %ld sys tick(s)\n", dt);
+// #endif
+        // if (pins & M6502_IRQ) {
+        //     pins |= M6502_IRQ;
+        // }
         // bool drive_stepping = (sys->ram[0x20] & 0x60) == 0x60;
-        int stepper_position = (via2_pins >> 56) & 3;
+        int stepper_position = (pins >> 56) & 3;
         static int last_position = 0;
         if (last_position != stepper_position) {
             if ((stepper_position - last_position) == -1 || (stepper_position + 4 - last_position) == -1) {
@@ -2795,13 +2843,41 @@ uint64_t _c1541_tick(c1541_t* sys, uint64_t pins) {
             last_position = stepper_position;
         }
     }
+#ifdef PICO
+    ticks_via2 = get_elapsed_ticks(tick);
+#endif
+    return 0 != (pins & M6502_IRQ);
+}
+
+uint64_t _c1541_tick(c1541_t* sys, const uint64_t input_pins) {
+    uint64_t pins = 0;
+    uint16_t addr = 0;
+    const uint64_t via_pin_mask = M6502_PIN_MASK;
+
+    pins = _c1541_tick_cpu(sys, input_pins, &addr);
+    pins &= ~(M6502_IRQ);
+
+    const uint64_t via_input_pins = pins & via_pin_mask;
+    
+    if (_c1541_tick_via1(sys, via_input_pins, addr)) {
+        pins |= M6502_IRQ;
+    }
+    
+    if (_c1541_tick_via2(sys, via_input_pins, addr)) {
+        pins |= M6502_IRQ;
+    }
 
     return pins;
 }
 
-void c1541_tick(c1541_t* sys) {
+void
+#ifdef PICO
+__not_in_flash_func(c1541_tick)
+#else
+c1541_tick
+#endif
+(c1541_t* sys) {
     sys->pins = _c1541_tick(sys, sys->pins);
-    return;
 }
 
 void c1541_insert_disc(c1541_t* sys, chips_range_t data) {

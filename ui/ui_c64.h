@@ -84,7 +84,7 @@ typedef struct {
     int dbg_scanline;
     ui_c64_boot_cb boot_cb;
     ui_m6502_t cpu;
-    ui_m6502_t c1541_cpu;
+    // ui_m6502_t c1541_cpu;
     ui_m6526_t cia[2];
     ui_m6581_t sid;
     ui_m6569_t vic;
@@ -95,7 +95,7 @@ typedef struct {
     ui_memedit_t memedit[4];
     ui_dasm_t dasm[4];
     ui_dbg_t dbg;
-    ui_dbg_t c1541_dbg;
+    // ui_dbg_t c1541_dbg;
     ui_snapshot_t snapshot;
 } ui_c64_t;
 
@@ -137,16 +137,16 @@ static void _ui_c64_draw_menu(ui_c64_t* ui) {
             if (ImGui::MenuItem("Reset")) {
                 c64_reset(ui->c64);
                 ui_dbg_reset(&ui->dbg);
-                if (ui->c64->c1541.valid) {
-                    ui_dbg_reset(&ui->c1541_dbg);
-                }
+                // if (ui->c64->c1541.valid) {
+                //     ui_dbg_reset(&ui->c1541_dbg);
+                // }
             }
             if (ImGui::MenuItem("Cold Boot")) {
                 ui->boot_cb(ui->c64);
                 ui_dbg_reboot(&ui->dbg);
-                if (ui->c64->c1541.valid) {
-                    ui_dbg_reboot(&ui->c1541_dbg);
-                }
+                // if (ui->c64->c1541.valid) {
+                //     ui_dbg_reboot(&ui->c1541_dbg);
+                // }
             }
             if (ImGui::BeginMenu("Joystick")) {
                 if (ImGui::MenuItem("None", 0, ui->c64->joystick_type == C64_JOYSTICKTYPE_NONE)) {
@@ -172,12 +172,12 @@ static void _ui_c64_draw_menu(ui_c64_t* ui) {
             ImGui::MenuItem("MOS 6526 #2 (CIA)", 0, &ui->cia[1].open);
             ImGui::MenuItem("MOS 6581 (SID)", 0, &ui->sid.open);
             ImGui::MenuItem("MOS 6569 (VIC-II)", 0, &ui->vic.open);
-            if (ui->c64->c1541.valid) {
-                if (ImGui::BeginMenu("VC-1541 (Floppy Drive)")) {
-                    ImGui::MenuItem("MOS 6502 (CPU)", 0, &ui->c1541_cpu.open);
-                    ImGui::EndMenu();
-                }
-            }
+            // if (ui->c64->c1541.valid) {
+            //     if (ImGui::BeginMenu("VC-1541 (Floppy Drive)")) {
+            //         ImGui::MenuItem("MOS 6502 (CPU)", 0, &ui->c1541_cpu.open);
+            //         ImGui::EndMenu();
+            //     }
+            // }
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Debug")) {
@@ -200,16 +200,16 @@ static void _ui_c64_draw_menu(ui_c64_t* ui) {
                 ImGui::MenuItem("Window #4", 0, &ui->dasm[3].open);
                 ImGui::EndMenu();
             }
-            if (ui->c64->c1541.valid) {
-                if (ImGui::BeginMenu("VC-1541 (Floppy Drive)")) {
-                    ImGui::MenuItem("CPU Debugger", 0, &ui->c1541_dbg.ui.open);
-                    ImGui::MenuItem("Stopwatch", 0, &ui->c1541_dbg.ui.stopwatch.open);
-                    ImGui::MenuItem("Breakpoints", 0, &ui->c1541_dbg.ui.breakpoints.open);
-                    ImGui::MenuItem("Execution History", 0, &ui->c1541_dbg.ui.history.open);
-                    ImGui::MenuItem("Memory Heatmap", 0, &ui->c1541_dbg.ui.heatmap.open);
-                    ImGui::EndMenu();
-                }
-            }
+            // if (ui->c64->c1541.valid) {
+            //     if (ImGui::BeginMenu("VC-1541 (Floppy Drive)")) {
+            //         ImGui::MenuItem("CPU Debugger", 0, &ui->c1541_dbg.ui.open);
+            //         ImGui::MenuItem("Stopwatch", 0, &ui->c1541_dbg.ui.stopwatch.open);
+            //         ImGui::MenuItem("Breakpoints", 0, &ui->c1541_dbg.ui.breakpoints.open);
+            //         ImGui::MenuItem("Execution History", 0, &ui->c1541_dbg.ui.history.open);
+            //         ImGui::MenuItem("Memory Heatmap", 0, &ui->c1541_dbg.ui.heatmap.open);
+            //         ImGui::EndMenu();
+            //     }
+            // }
             ImGui::EndMenu();
         }
         ui_util_options_menu();
@@ -231,12 +231,12 @@ static const char* _ui_c64_memlayer_names[_UI_C64_MEMLAYER_NUM] = {
     "CPU Mapped", "RAM Banks", "ROM Banks", "1541 Floppy", "VIC Mapped", "Color RAM"
 };
 
-static uint8_t _ui_c64_c1541_mem_read(int layer, uint16_t addr, void* user_data) {
-    (void)layer;
-    ui_c64_t* ui = (ui_c64_t*) user_data;
-    CHIPS_ASSERT(ui && ui->c64->c1541.valid);
-    return mem_rd(&ui->c64->c1541.mem, addr);
-}
+// static uint8_t _ui_c64_c1541_mem_read(int layer, uint16_t addr, void* user_data) {
+//     (void)layer;
+//     ui_c64_t* ui = (ui_c64_t*) user_data;
+//     CHIPS_ASSERT(ui && ui->c64->c1541.valid);
+//     return mem_rd(&ui->c64->c1541.mem, addr);
+// }
 
 static uint8_t _ui_c64_mem_read(int layer, uint16_t addr, void* user_data) {
     CHIPS_ASSERT(user_data);
@@ -265,12 +265,12 @@ static uint8_t _ui_c64_mem_read(int layer, uint16_t addr, void* user_data) {
             }
             break;
         case _UI_C64_MEMLAYER_1541:
-            if (ui->c64->c1541.valid) {
-                return mem_rd(&ui->c64->c1541.mem, addr);
-            }
-            else {
-                return 0xFF;
-            }
+            // if (ui->c64->c1541.valid) {
+            //     return mem_rd(&ui->c64->c1541.mem, addr);
+            // }
+            // else {
+            //     return 0xFF;
+            // }
             break;
         case _UI_C64_MEMLAYER_VIC:
             return mem_rd(&c64->mem_vic, addr);
@@ -313,9 +313,9 @@ static void _ui_c64_mem_write(int layer, uint16_t addr, uint8_t data, void* user
             }
             break;
         case _UI_C64_MEMLAYER_1541:
-            if (ui->c64->c1541.valid) {
-                mem_wr(&ui->c64->c1541.mem, addr, data);
-            }
+            // if (ui->c64->c1541.valid) {
+            //     mem_wr(&ui->c64->c1541.mem, addr, data);
+            // }
             break;
         case _UI_C64_MEMLAYER_VIC:
             mem_wr(&c64->mem_vic, addr, data);
@@ -578,20 +578,20 @@ void ui_c64_init(ui_c64_t* ui, const ui_c64_desc_t* ui_desc) {
         desc.user_breaktypes[2].label = "Next Badline";
         desc.user_breaktypes[3].label = "Next Frame";
         ui_dbg_init(&ui->dbg, &desc);
-        if (ui->c64->c1541.valid) {
-            x += dx; y += dy;
-            desc.title = "CPU Debugger (1541 Floppy)";
-            desc.m6502 = &ui->c64->c1541.cpu;
-            desc.x = x;
-            desc.y = y;
-            desc.read_cb = _ui_c64_c1541_mem_read;
-            desc.break_cb = 0;
-            desc.user_breaktypes[0].label = 0;
-            desc.user_breaktypes[1].label = 0;
-            desc.user_breaktypes[2].label = 0;
-            desc.user_breaktypes[3].label = 0;
-            ui_dbg_init(&ui->c1541_dbg, &desc);
-        }
+        // if (ui->c64->c1541.valid) {
+        //     x += dx; y += dy;
+        //     desc.title = "CPU Debugger (1541 Floppy)";
+        //     desc.m6502 = &ui->c64->c1541.cpu;
+        //     desc.x = x;
+        //     desc.y = y;
+        //     desc.read_cb = _ui_c64_c1541_mem_read;
+        //     desc.break_cb = 0;
+        //     desc.user_breaktypes[0].label = 0;
+        //     desc.user_breaktypes[1].label = 0;
+        //     desc.user_breaktypes[2].label = 0;
+        //     desc.user_breaktypes[3].label = 0;
+        //     ui_dbg_init(&ui->c1541_dbg, &desc);
+        // }
     }
     x += dx; y += dy;
     {
@@ -604,17 +604,17 @@ void ui_c64_init(ui_c64_t* ui, const ui_c64_desc_t* ui_desc) {
         UI_CHIP_INIT_DESC(&desc.chip_desc, "6510", 40, _ui_c64_cpu6510_pins);
         ui_m6502_init(&ui->cpu, &desc);
     }
-    if (ui->c64->c1541.valid) {
-        x += dx; y += dy;
-        ui_m6502_desc_t desc = {0};
-        desc.title = "MOS 6502 (1541 Floppy Drive)";
-        desc.cpu = &ui->c64->c1541.cpu;
-        desc.x = x;
-        desc.y = y;
-        desc.h = 390;
-        UI_CHIP_INIT_DESC(&desc.chip_desc, "6502", 32, _ui_c64_cpu6502_pins);
-        ui_m6502_init(&ui->c1541_cpu, &desc);
-    }
+    // if (ui->c64->c1541.valid) {
+    //     x += dx; y += dy;
+    //     ui_m6502_desc_t desc = {0};
+    //     desc.title = "MOS 6502 (1541 Floppy Drive)";
+    //     desc.cpu = &ui->c64->c1541.cpu;
+    //     desc.x = x;
+    //     desc.y = y;
+    //     desc.h = 390;
+    //     UI_CHIP_INIT_DESC(&desc.chip_desc, "6502", 32, _ui_c64_cpu6502_pins);
+    //     ui_m6502_init(&ui->c1541_cpu, &desc);
+    // }
     x += dx; y += dy;
     {
         ui_m6526_desc_t desc = {0};
@@ -727,9 +727,9 @@ void ui_c64_init(ui_c64_t* ui, const ui_c64_desc_t* ui_desc) {
 void ui_c64_discard(ui_c64_t* ui) {
     CHIPS_ASSERT(ui && ui->c64);
     ui_m6502_discard(&ui->cpu);
-    if (ui->c64->c1541.valid) {
-        ui_m6502_discard(&ui->c1541_cpu);
-    }
+    // if (ui->c64->c1541.valid) {
+    //     ui_m6502_discard(&ui->c1541_cpu);
+    // }
     ui_m6526_discard(&ui->cia[0]);
     ui_m6526_discard(&ui->cia[1]);
     ui_m6581_discard(&ui->sid);
@@ -743,9 +743,9 @@ void ui_c64_discard(ui_c64_t* ui) {
         ui_dasm_discard(&ui->dasm[i]);
     }
     ui_dbg_discard(&ui->dbg);
-    if (ui->c64->c1541.valid) {
-        ui_dbg_discard(&ui->c1541_dbg);
-    }
+    // if (ui->c64->c1541.valid) {
+    //     ui_dbg_discard(&ui->c1541_dbg);
+    // }
     ui->c64 = 0;
 }
 
@@ -759,9 +759,9 @@ void ui_c64_draw(ui_c64_t* ui, const ui_c64_frame_t* frame) {
     ui_display_draw(&ui->display, &frame->display);
     ui_kbd_draw(&ui->kbd);
     ui_m6502_draw(&ui->cpu);
-    if (ui->c64->c1541.valid) {
-        ui_m6502_draw(&ui->c1541_cpu);
-    }
+    // if (ui->c64->c1541.valid) {
+    //     ui_m6502_draw(&ui->c1541_cpu);
+    // }
     ui_m6526_draw(&ui->cia[0]);
     ui_m6526_draw(&ui->cia[1]);
     ui_m6581_draw(&ui->sid);
@@ -772,9 +772,9 @@ void ui_c64_draw(ui_c64_t* ui, const ui_c64_frame_t* frame) {
         ui_dasm_draw(&ui->dasm[i]);
     }
     ui_dbg_draw(&ui->dbg);
-    if (ui->c64->c1541.valid) {
-        ui_dbg_draw(&ui->c1541_dbg);
-    }
+    // if (ui->c64->c1541.valid) {
+    //     ui_dbg_draw(&ui->c1541_dbg);
+    // }
 }
 
 chips_debug_t ui_c64_get_debug(ui_c64_t* ui) {
@@ -789,10 +789,10 @@ chips_debug_t ui_c64_get_debug(ui_c64_t* ui) {
 void ui_c64_save_settings(ui_c64_t* ui, ui_settings_t* settings) {
     CHIPS_ASSERT(ui && settings);
     ui_m6502_save_settings(&ui->cpu, settings);
-    if (ui->c64->c1541.valid) {
-        ui_m6502_save_settings(&ui->c1541_cpu, settings);
-        ui_dbg_save_settings(&ui->c1541_dbg, settings);
-    }
+    // if (ui->c64->c1541.valid) {
+    //     ui_m6502_save_settings(&ui->c1541_cpu, settings);
+    //     ui_dbg_save_settings(&ui->c1541_dbg, settings);
+    // }
     for (int i = 0; i < 2; i++) {
         ui_m6526_save_settings(&ui->cia[i], settings);
     }
@@ -814,10 +814,10 @@ void ui_c64_save_settings(ui_c64_t* ui, ui_settings_t* settings) {
 void ui_c64_load_settings(ui_c64_t* ui, const ui_settings_t* settings) {
     CHIPS_ASSERT(ui && settings);
     ui_m6502_load_settings(&ui->cpu, settings);
-    if (ui->c64->c1541.valid) {
-        ui_m6502_load_settings(&ui->c1541_cpu, settings);
-        ui_dbg_load_settings(&ui->c1541_dbg, settings);
-    }
+    // if (ui->c64->c1541.valid) {
+    //     ui_m6502_load_settings(&ui->c1541_cpu, settings);
+    //     ui_dbg_load_settings(&ui->c1541_dbg, settings);
+    // }
     for (int i = 0; i < 2; i++) {
         ui_m6526_load_settings(&ui->cia[i], settings);
     }

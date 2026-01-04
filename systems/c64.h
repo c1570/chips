@@ -324,7 +324,7 @@ typedef enum {
 // config parameters for c64_init()
 typedef struct {
     bool c1530_enabled;     // true to enable the C1530 datassette emulation
-    bool c1541_enabled;     // true to enable the C1541 floppy drive emulation
+    // bool c1541_enabled;     // true to enable the C1541 floppy drive emulation
     c64_joystick_type_t joystick_type;  // default is C64_JOYSTICK_NONE
     chips_debug_t debug;    // optional debugging hook
     chips_audio_desc_t audio;   // audio output options
@@ -333,11 +333,11 @@ typedef struct {
         chips_range_t chars;     // 4 KByte character ROM dump
         chips_range_t basic;     // 8 KByte BASIC dump
         chips_range_t kernal;    // 8 KByte KERNAL dump
-        // optional C1514 ROM images
-        struct {
-            chips_range_t c000_dfff;
-            chips_range_t e000_ffff;
-        } c1541;
+        // // optional C1514 ROM images
+        // struct {
+        //     chips_range_t c000_dfff;
+        //     chips_range_t e000_ffff;
+        // } c1541;
     } roms;
 
 #ifdef __IEC_DEBUG
@@ -357,7 +357,7 @@ typedef struct {
     c64_joystick_type_t joystick_type;
     bool io_mapped;             // true when D000..DFFF has IO area mapped in
     uint8_t cas_port;           // cassette port, shared with c1530_t if datasette is connected
-    iecbus_t iec_bus;           // iec bus to connect peripherals
+    iecbus_t *iec_bus;           // iec bus to connect peripherals
     iecbus_device_t* iec_device; // the c64 device port on the IEC bus
     uint8_t cpu_port;           // last state of CPU port (for memory mapping)
     uint8_t kbd_joy1_mask;      // current joystick-1 state from keyboard-joystick emulation
@@ -387,7 +387,7 @@ typedef struct {
     alignas(64) uint8_t fb[M6569_FRAMEBUFFER_SIZE_BYTES];
 
     c1530_t c1530;      // optional datassette
-    c1541_t c1541;      // optional floppy drive
+    // c1541_t c1541;      // optional floppy drive
 
 #ifdef __IEC_DEBUG
     FILE* debug_file;
@@ -531,18 +531,18 @@ void c64_init(c64_t* sys, const c64_desc_t* desc) {
             .cas_port = &sys->cas_port,
         });
     }
-    if (desc->c1541_enabled) {
-        c1541_init(&sys->c1541, &(c1541_desc_t){
-            .iec_bus = &sys->iec_bus,
-            .roms = {
-                .c000_dfff = desc->roms.c1541.c000_dfff,
-                .e000_ffff = desc->roms.c1541.e000_ffff
-            },
-#ifdef __IEC_DEBUG
-            .debug_file = desc->debug_file,
-#endif
-        });
-    }
+//     if (desc->c1541_enabled) {
+//         c1541_init(&sys->c1541, &(c1541_desc_t){
+//             .iec_bus = sys->iec_bus,
+//             .roms = {
+//                 .c000_dfff = desc->roms.c1541.c000_dfff,
+//                 .e000_ffff = desc->roms.c1541.e000_ffff
+//             },
+// #ifdef __IEC_DEBUG
+//             .debug_file = desc->debug_file,
+// #endif
+//         });
+//     }
 }
 
 void c64_discard(c64_t* sys) {
@@ -551,9 +551,9 @@ void c64_discard(c64_t* sys) {
     if (sys->c1530.valid) {
         c1530_discard(&sys->c1530);
     }
-    if (sys->c1541.valid) {
-        c1541_discard(&sys->c1541);
-    }
+    // if (sys->c1541.valid) {
+    //     c1541_discard(&sys->c1541);
+    // }
 }
 
 void c64_reset(c64_t* sys) {
@@ -1781,11 +1781,11 @@ static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
 #ifdef __IEC_DEBUG
     _c64_debug_out_processor_pc(sys, pins);
 #endif
-    iec_get_signals(&sys->iec_bus, NULL);
+    iec_get_signals(sys->iec_bus, NULL);
     // tick the CPU
     pins = m6502_tick(&sys->cpu, pins);
     const uint16_t addr = M6502_GET_ADDR(pins);
-    const uint8_t iec_lines = iec_get_signals(&sys->iec_bus, sys->iec_device);
+    const uint8_t iec_lines = iec_get_signals(sys->iec_bus, sys->iec_device);
 
     // those pins are set each tick by the CIAs and VIC
     pins &= ~(M6502_IRQ|M6502_NMI|M6502_RDY|M6510_AEC);
@@ -2029,9 +2029,9 @@ static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
     if (sys->c1530.valid) {
         c1530_tick(&sys->c1530);
     }
-    if (sys->c1541.valid) {
-        c1541_tick(&sys->c1541);
-    }
+    // if (sys->c1541.valid) {
+    //     c1541_tick(&sys->c1541);
+    // }
     return pins;
 }
 
@@ -2252,6 +2252,7 @@ uint32_t c64_exec(c64_t* sys, uint32_t micro_seconds) {
             world_tick();
 // #endif
             pins = _c64_tick(sys, pins);
+            set_master_tick(sys->iec_bus);
         }
     }
     else {
@@ -2261,6 +2262,7 @@ uint32_t c64_exec(c64_t* sys, uint32_t micro_seconds) {
             world_tick();
 // #endif
             pins = _c64_tick(sys, pins);
+            set_master_tick(sys->iec_bus);
             sys->debug.callback.func(sys->debug.callback.user_data, pins);
         }
     }
@@ -2445,7 +2447,7 @@ uint32_t c64_save_snapshot(c64_t* sys, c64_t* dst) {
     mem_snapshot_onsave(&dst->mem_cpu, sys);
     mem_snapshot_onsave(&dst->mem_vic, sys);
     c1530_snapshot_onsave(&dst->c1530);
-    c1541_snapshot_onsave(&dst->c1541, sys);
+    // c1541_snapshot_onsave(&dst->c1541, sys);
     return C64_SNAPSHOT_VERSION;
 }
 
@@ -2463,7 +2465,7 @@ bool c64_load_snapshot(c64_t* sys, uint32_t version, c64_t* src) {
     mem_snapshot_onload(&im.mem_cpu, sys);
     mem_snapshot_onload(&im.mem_vic, sys);
     c1530_snapshot_onload(&im.c1530, &sys->c1530);
-    c1541_snapshot_onload(&im.c1541, &sys->c1541, sys);
+    // c1541_snapshot_onload(&im.c1541, &sys->c1541, sys);
     *sys = im;
     return true;
 }

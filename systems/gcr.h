@@ -35,16 +35,24 @@ uint16_t gcr_get_max_track_size(uint8_t *gcr_data) {
 }
 
 bool gcr_get_half_track_bytes(uint8_t *dst, uint8_t *gcr_data, const uint8_t half_track) {
-    const uint16_t size = gcr_get_max_track_size(gcr_data);
+    float full_track = ((float)(half_track + 1)) / 2;
+//    const uint16_t size = gcr_get_max_track_size(gcr_data);
     const uint8_t half_tracks = gcr_get_half_track_count(gcr_data);
     if (half_track < 1 || half_track > half_tracks) {
         return false;
     }
     const uint32_t half_track_data_offset = ((uint32_t *)(gcr_data + 0xc))[half_track - 1];
-    for (uint16_t i=0; i < size; i++) {
-        dst[i] = gcr_data[half_track_data_offset+i];
+    if (half_track_data_offset == 0) {
+        printf("missing half track: %d, full track: %g\n", half_track, full_track);
+        return true;
     }
-    dst[size] = 0; // mark track done, protection against memory garbage
+    printf("getting data of half track: %d, full track: %g\n", half_track, full_track);
+    const uint32_t data_size = ((uint32_t)gcr_data[half_track_data_offset+0]) + ((uint32_t)gcr_data[half_track_data_offset+1] << 8);
+    printf("data size: %ld\n", data_size);
+    for (uint16_t i=0; i < data_size; i++) {
+        dst[i] = gcr_data[half_track_data_offset+2+i];
+    }
+    dst[data_size] = 0; // mark track done, protection against memory garbage
     return true;
 }
 

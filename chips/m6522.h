@@ -192,6 +192,7 @@ extern "C" {
 #define M6522_CB2       (1ULL<<M6522_PIN_CB2)
 #define M6522_CA_PINS   (M6522_CA1|M6522_CA2)
 #define M6522_CB_PINS   (M6522_CB1|M6522_CB2)
+#define M6522_C_PINS    (M6522_CA_PINS|M6522_CB_PINS)
 #define M6522_PA0       (1ULL<<M6522_PIN_PA0)
 #define M6522_PA1       (1ULL<<M6522_PIN_PA1)
 #define M6522_PA2       (1ULL<<M6522_PIN_PA2)
@@ -292,6 +293,7 @@ typedef struct {
     uint8_t outr;
     uint8_t ddr;
     uint8_t pins;
+    uint32_t last_c;
     bool c1_in;
     bool c1_out;
     bool c1_triggered;
@@ -325,7 +327,7 @@ typedef struct {
     m6522_port_t pa;
     m6522_port_t pb;
     m6522_timer_t t1;
-    m6522_timer_t t2;
+    // m6522_timer_t t2;
     m6522_int_t intr;
     uint8_t acr;        /* auxilary control register */
     uint8_t pcr;        /* peripheral control register */
@@ -403,12 +405,12 @@ void m6522_init(m6522_t* c) {
     _m6522_init_port(&c->pa);
     _m6522_init_port(&c->pb);
     _m6522_init_timer(&c->t1, false);
-    _m6522_init_timer(&c->t2, false);
+    // _m6522_init_timer(&c->t2, false);
     _m6522_init_interrupt(&c->intr);
     c->acr = 0;
     c->pcr = 0;
     c->t1.latch = 0xFFFF;
-    c->t2.latch = 0xFFFF;
+    // c->t2.latch = 0xFFFF;
 }
 
 /*
@@ -422,7 +424,7 @@ void m6522_reset(m6522_t* c) {
     _m6522_init_port(&c->pa);
     _m6522_init_port(&c->pb);
     _m6522_init_timer(&c->t1, true);
-    _m6522_init_timer(&c->t2, true);
+    // _m6522_init_timer(&c->t2, true);
     _m6522_init_interrupt(&c->intr);
     c->acr = 0;
     c->pcr = 0;
@@ -440,18 +442,72 @@ void m6522_reset(m6522_t* c) {
 
 /*--- port implementation ---*/
 static inline void _m6522_read_port_pins(m6522_t* c, uint64_t pins) {
+// #ifdef PICO
+//     uint32_t tick = get_ticks();
+// #endif
     /* check CA1/CA2/CB1/CB2 triggered */
     bool new_ca1 = 0 != (pins & M6522_CA1);
     bool new_ca2 = 0 != (pins & M6522_CA2);
     bool new_cb1 = 0 != (pins & M6522_CB1);
     bool new_cb2 = 0 != (pins & M6522_CB2);
-    c->pa.c1_triggered = (c->pa.c1_in != new_ca1) && ((new_ca1 && M6522_PCR_CA1_LOW_TO_HIGH(c)) || (!new_ca1 && M6522_PCR_CA1_HIGH_TO_LOW(c)));
-    c->pa.c2_triggered = (c->pa.c2_in != new_ca2) && ((new_ca2 && M6522_PCR_CA2_LOW_TO_HIGH(c)) || (!new_ca2 && M6522_PCR_CA2_HIGH_TO_LOW(c)));
-    // FIXME: copy paste error? new_ca1
-    // c->pb.c1_triggered = (c->pb.c1_in != new_cb1) && ((new_cb1 && M6522_PCR_CB1_LOW_TO_HIGH(c)) || (!new_ca1 && M6522_PCR_CB1_HIGH_TO_LOW(c)));
-    // c->pb.c2_triggered = (c->pb.c2_in != new_cb2) && ((new_cb2 && M6522_PCR_CB2_LOW_TO_HIGH(c)) || (!new_ca2 && M6522_PCR_CB2_HIGH_TO_LOW(c)));
-    c->pb.c1_triggered = (c->pb.c1_in != new_cb1) && ((new_cb1 && M6522_PCR_CB1_LOW_TO_HIGH(c)) || (!new_cb1 && M6522_PCR_CB1_HIGH_TO_LOW(c)));
-    c->pb.c2_triggered = (c->pb.c2_in != new_cb2) && ((new_cb2 && M6522_PCR_CB2_LOW_TO_HIGH(c)) || (!new_cb2 && M6522_PCR_CB2_HIGH_TO_LOW(c)));
+
+    c->pa.c1_triggered = false;
+    if (c->pa.c1_in != new_ca1) {
+        if (new_ca1) {
+            if (M6522_PCR_CA1_LOW_TO_HIGH(c)) {
+                c->pa.c1_triggered = true;
+            }
+        } else {
+            if (M6522_PCR_CA1_HIGH_TO_LOW(c)) {
+                c->pa.c1_triggered = true;
+            }
+        }
+    }
+
+    c->pa.c2_triggered = false;
+    if (c->pa.c2_in != new_ca2) {
+        if (new_ca2) {
+            if (M6522_PCR_CA2_LOW_TO_HIGH(c)) {
+                c->pa.c2_triggered = true;
+            }
+        } else {
+            if (M6522_PCR_CA2_HIGH_TO_LOW(c)) {
+                c->pa.c2_triggered = true;
+            }
+        }
+    }
+
+    c->pb.c1_triggered = false;
+    if (c->pb.c1_in != new_cb1) {
+        if (new_cb1) {
+            if (M6522_PCR_CB1_LOW_TO_HIGH(c)) {
+                c->pb.c1_triggered = true;
+            }
+        } else {
+            if (M6522_PCR_CB1_HIGH_TO_LOW(c)) {
+                c->pb.c1_triggered = true;
+            }
+        }
+    }
+
+    c->pb.c2_triggered = false;
+    if (c->pb.c2_in != new_cb2) {
+        if (new_cb2) {
+            if (M6522_PCR_CB2_LOW_TO_HIGH(c)) {
+                c->pb.c2_triggered = true;
+            }
+        } else {
+            if (M6522_PCR_CB2_HIGH_TO_LOW(c)) {
+                c->pb.c2_triggered = true;
+            }
+        }
+    }
+
+    // c->pa.c1_triggered = (c->pa.c1_in != new_ca1) && ((new_ca1 && M6522_PCR_CA1_LOW_TO_HIGH(c)) || (!new_ca1 && M6522_PCR_CA1_HIGH_TO_LOW(c)));
+    // c->pa.c2_triggered = (c->pa.c2_in != new_ca2) && ((new_ca2 && M6522_PCR_CA2_LOW_TO_HIGH(c)) || (!new_ca2 && M6522_PCR_CA2_HIGH_TO_LOW(c)));
+    // c->pb.c1_triggered = (c->pb.c1_in != new_cb1) && ((new_cb1 && M6522_PCR_CB1_LOW_TO_HIGH(c)) || (!new_cb1 && M6522_PCR_CB1_HIGH_TO_LOW(c)));
+    // c->pb.c2_triggered = (c->pb.c2_in != new_cb2) && ((new_cb2 && M6522_PCR_CB2_LOW_TO_HIGH(c)) || (!new_cb2 && M6522_PCR_CB2_HIGH_TO_LOW(c)));
+
     c->pa.c1_in = new_ca1;
     c->pa.c2_in = new_cb2;
     c->pb.c1_in = new_cb1;
@@ -474,6 +530,105 @@ static inline void _m6522_read_port_pins(m6522_t* c, uint64_t pins) {
     else {
         c->pb.inpr = M6522_GET_PB(pins);
     }
+// #ifdef PICO
+//     uint32_t dt = get_elapsed_ticks(tick);
+//     printf("chip_tick m6522 read port pins: %ld sys tick(s) on %s\n", dt, c->chip_name);
+// #endif
+}
+
+static inline void _m6522_read_port_pins_pico(m6522_t* c, uint8_t pa, uint8_t pb, uint8_t c_pins) {
+// #ifdef PICO
+//     uint32_t tick = get_ticks();
+// #endif
+    /* check CA1/CA2/CB1/CB2 triggered */
+    bool new_ca1 = 0 != (c_pins & (1 << 0));
+    bool new_ca2 = 0 != (c_pins & (1 << 1));
+    bool new_cb1 = 0 != (c_pins & (1 << 2));
+    bool new_cb2 = 0 != (c_pins & (1 << 3));
+
+    c->pa.c1_triggered = false;
+    if (c->pa.c1_in != new_ca1) {
+        if (new_ca1) {
+            if (M6522_PCR_CA1_LOW_TO_HIGH(c)) {
+                c->pa.c1_triggered = true;
+            }
+        } else {
+            if (M6522_PCR_CA1_HIGH_TO_LOW(c)) {
+                c->pa.c1_triggered = true;
+            }
+        }
+    }
+
+    c->pa.c2_triggered = false;
+    if (c->pa.c2_in != new_ca2) {
+        if (new_ca2) {
+            if (M6522_PCR_CA2_LOW_TO_HIGH(c)) {
+                c->pa.c2_triggered = true;
+            }
+        } else {
+            if (M6522_PCR_CA2_HIGH_TO_LOW(c)) {
+                c->pa.c2_triggered = true;
+            }
+        }
+    }
+
+    c->pb.c1_triggered = false;
+    if (c->pb.c1_in != new_cb1) {
+        if (new_cb1) {
+            if (M6522_PCR_CB1_LOW_TO_HIGH(c)) {
+                c->pb.c1_triggered = true;
+            }
+        } else {
+            if (M6522_PCR_CB1_HIGH_TO_LOW(c)) {
+                c->pb.c1_triggered = true;
+            }
+        }
+    }
+
+    c->pb.c2_triggered = false;
+    if (c->pb.c2_in != new_cb2) {
+        if (new_cb2) {
+            if (M6522_PCR_CB2_LOW_TO_HIGH(c)) {
+                c->pb.c2_triggered = true;
+            }
+        } else {
+            if (M6522_PCR_CB2_HIGH_TO_LOW(c)) {
+                c->pb.c2_triggered = true;
+            }
+        }
+    }
+
+    // c->pa.c1_triggered = (c->pa.c1_in != new_ca1) && ((new_ca1 && M6522_PCR_CA1_LOW_TO_HIGH(c)) || (!new_ca1 && M6522_PCR_CA1_HIGH_TO_LOW(c)));
+    // c->pa.c2_triggered = (c->pa.c2_in != new_ca2) && ((new_ca2 && M6522_PCR_CA2_LOW_TO_HIGH(c)) || (!new_ca2 && M6522_PCR_CA2_HIGH_TO_LOW(c)));
+    // c->pb.c1_triggered = (c->pb.c1_in != new_cb1) && ((new_cb1 && M6522_PCR_CB1_LOW_TO_HIGH(c)) || (!new_cb1 && M6522_PCR_CB1_HIGH_TO_LOW(c)));
+    // c->pb.c2_triggered = (c->pb.c2_in != new_cb2) && ((new_cb2 && M6522_PCR_CB2_LOW_TO_HIGH(c)) || (!new_cb2 && M6522_PCR_CB2_HIGH_TO_LOW(c)));
+
+    c->pa.c1_in = new_ca1;
+    c->pa.c2_in = new_cb2;
+    c->pb.c1_in = new_cb1;
+    c->pb.c2_in = new_cb2;
+
+    /* with latching enabled, only update input register when CA1 / CB1 goes active */
+    if (M6522_ACR_PA_LATCH_ENABLE(c)) {
+        if (c->pa.c1_triggered) {
+            c->pa.inpr = pa;
+        }
+    }
+    else {
+        c->pa.inpr = pa;
+    }
+    if (M6522_ACR_PB_LATCH_ENABLE(c)) {
+        if (c->pb.c1_triggered) {
+            c->pb.inpr = pb;
+        }
+    }
+    else {
+        c->pb.inpr = pb;
+    }
+// #ifdef PICO
+//     uint32_t dt = get_elapsed_ticks(tick);
+//     printf("chip_tick m6522 read port pins: %ld sys tick(s) on %s\n", dt, c->chip_name);
+// #endif
 }
 
 static inline uint8_t _m6522_merge_pb7(m6522_t* c, uint8_t data) {
@@ -487,6 +642,9 @@ static inline uint8_t _m6522_merge_pb7(m6522_t* c, uint8_t data) {
 }
 
 static inline uint64_t _m6522_write_port_pins(m6522_t* c, uint64_t pins) {
+// #ifdef PICO
+//     uint32_t tick = get_ticks();
+// #endif
     c->pa.pins = (c->pa.inpr & ~c->pa.ddr) | (c->pa.outr & c->pa.ddr);
     c->pb.pins = _m6522_merge_pb7(c, (c->pb.inpr & ~c->pb.ddr) | (c->pb.outr & c->pb.ddr));
     M6522_SET_PAB(pins, c->pa.pins, c->pb.pins);
@@ -504,6 +662,10 @@ static inline uint64_t _m6522_write_port_pins(m6522_t* c, uint64_t pins) {
     if (c->pb.c2_out) {
         pins |= M6522_CB2;
     }
+// #ifdef PICO
+//     uint32_t dt = get_elapsed_ticks(tick);
+//     printf("chip_tick m6522 write port pins: %ld sys tick(s) on %s\n", dt, c->chip_name);
+// #endif
     return pins;
 }
 
@@ -590,37 +752,37 @@ static void _m6522_tick_t1(m6522_t* c) {
 }
 
 
-static void _m6522_tick_t2(m6522_t* c, uint64_t pins) {
-    m6522_timer_t* t = &c->t2;
-
-    /* either decrement on PB6, or on tick */
-    if (M6522_ACR_T2_COUNT_PB6(c)) {
-        /* count falling edge of PB6 */
-        if (M6522_PB6 & (~pins & (pins ^ c->pins))) {
-            t->counter--;
-        }
-    }
-    else if (_M6522_PIP_TEST(t->pip, M6522_PIP_TIMER_COUNT, 0)) {
-        t->counter--;
-    }
-
-    /* underflow? */
-    t->t_out = (0xFFFF == t->counter);
-    if (t->t_out) {
-        /* t2 is always oneshot */
-        if (!t->t_bit) {
-            /* FIXME: 6526-style "Timer B Bug"? */
-            _m6522_set_intr(c, M6522_IRQ_T2);
-            t->t_bit = true;
-        }
-        /* NOTE: T2 never reloads from latch on hitting zero */
-    }
-}
+// static void _m6522_tick_t2(m6522_t* c, uint64_t pins) {
+//     m6522_timer_t* t = &c->t2;
+//
+//     /* either decrement on PB6, or on tick */
+//     if (M6522_ACR_T2_COUNT_PB6(c)) {
+//         /* count falling edge of PB6 */
+//         if (M6522_PB6 & (~pins & (pins ^ c->pins))) {
+//             t->counter--;
+//         }
+//     }
+//     else if (_M6522_PIP_TEST(t->pip, M6522_PIP_TIMER_COUNT, 0)) {
+//         t->counter--;
+//     }
+//
+//     /* underflow? */
+//     t->t_out = (0xFFFF == t->counter);
+//     if (t->t_out) {
+//         /* t2 is always oneshot */
+//         if (!t->t_bit) {
+//             /* FIXME: 6526-style "Timer B Bug"? */
+//             _m6522_set_intr(c, M6522_IRQ_T2);
+//             t->t_bit = true;
+//         }
+//         /* NOTE: T2 never reloads from latch on hitting zero */
+//     }
+// }
 
 static void _m6522_tick_pipeline(m6522_t* c) {
     /* feed counter pipelines, both counters are always counting */
     _M6522_PIP_SET(c->t1.pip, M6522_PIP_TIMER_COUNT, 2);
-    _M6522_PIP_SET(c->t2.pip, M6522_PIP_TIMER_COUNT, 2);
+    // _M6522_PIP_SET(c->t2.pip, M6522_PIP_TIMER_COUNT, 2);
 
     /* interrupt pipeline */
     if (c->intr.ifr & c->intr.ier) {
@@ -629,7 +791,7 @@ static void _m6522_tick_pipeline(m6522_t* c) {
 
     /* tick pipelines forward */
     c->t1.pip = (c->t1.pip >> 1) & 0x7F7F;
-    c->t2.pip = (c->t2.pip >> 1) & 0x7F7F;
+    // c->t2.pip = (c->t2.pip >> 1) & 0x7F7F;
     c->intr.pip = (c->intr.pip >> 1) & 0x7F7F;
 }
 
@@ -674,10 +836,17 @@ static uint64_t _m6522_update_irq(m6522_t* c, uint64_t pins) {
 
 /* perform a tick */
 static uint64_t _m6522_tick(m6522_t* c, uint64_t pins) {
-    _m6522_read_port_pins(c, pins);
+    uint8_t pa = M6522_GET_PA(pins);
+    uint8_t pb = M6522_GET_PB(pins);
+    uint8_t c_pins = (pins >> M6522_PIN_CA1) & ((1 << 4) - 1);
+#ifdef PICO
+    _m6522_read_port_pins_pico(c, pa, pb, c_pins);
+#else
+     _m6522_read_port_pins(c, pins);
+#endif
     _m6522_update_cab(c);
     _m6522_tick_t1(c);
-    _m6522_tick_t2(c, pins);
+    // _m6522_tick_t2(c, pins);
     pins = _m6522_update_irq(c, pins);
     pins = _m6522_write_port_pins(c, pins);
     _m6522_tick_pipeline(c);
@@ -740,12 +909,12 @@ static uint8_t _m6522_read(m6522_t* c, uint8_t addr) {
             break;
 
         case M6522_REG_T2CL:
-            data = c->t2.counter & 0xFF;
+            data = 0; //c->t2.counter & 0xFF;
             _m6522_clear_intr(c, M6522_IRQ_T2);
             break;
 
         case M6522_REG_T2CH:
-            data = c->t2.counter >> 8;
+            data = 0; //c->t2.counter >> 8;
             break;
 
         case M6522_REG_SR:
@@ -828,14 +997,14 @@ static void _m6522_write(m6522_t* c, uint8_t addr, uint8_t data) {
             break;
 
         case M6522_REG_T2CL:
-            c->t2.latch = (c->t2.latch & 0xFF00) | data;
+            // c->t2.latch = (c->t2.latch & 0xFF00) | data;
             break;
 
         case M6522_REG_T2CH:
-            c->t2.latch = (data << 8) | (c->t2.latch & 0x00FF);
+            // c->t2.latch = (data << 8) | (c->t2.latch & 0x00FF);
             _m6522_clear_intr(c, M6522_IRQ_T2);
-            c->t2.t_bit = false;
-            c->t2.counter = c->t2.latch;
+            // c->t2.t_bit = false;
+            // c->t2.counter = c->t2.latch;
             break;
 
         case M6522_REG_SR:
@@ -853,9 +1022,9 @@ static void _m6522_write(m6522_t* c, uint8_t addr, uint8_t data) {
             }
             */
             /* FIXME(?) this properly transitions T2 from counting PB6 to clock counter mode */
-            if (!M6522_ACR_T2_COUNT_PB6(c)) {
-                _M6522_PIP_CLR(c->t2.pip, M6522_PIP_TIMER_COUNT, 0)
-            }
+            // if (!M6522_ACR_T2_COUNT_PB6(c)) {
+            //     _M6522_PIP_CLR(c->t2.pip, M6522_PIP_TIMER_COUNT, 0)
+            // }
             break;
 
         case M6522_REG_PCR:
