@@ -2706,7 +2706,7 @@ uint8_t _c1541_tick_via1(c1541_t* sys, uint64_t pins, const uint16_t addr) {
 #ifdef PICO
     ticks_via1 = get_elapsed_ticks(tick);
 #endif
-    return 0 != (pins & M6502_IRQ);
+    return 0 != (pins & M6522_IRQ);
 }
 
 // _c1541_tick_via2 returns if IRQ should be set
@@ -2846,7 +2846,7 @@ uint8_t _c1541_tick_via2(c1541_t* sys, uint64_t pins, const uint16_t addr) {
 #ifdef PICO
     ticks_via2 = get_elapsed_ticks(tick);
 #endif
-    return 0 != (pins & M6502_IRQ);
+    return 0 != (pins & M6522_IRQ);
 }
 
 uint64_t _c1541_tick(c1541_t* sys, const uint64_t input_pins) {
