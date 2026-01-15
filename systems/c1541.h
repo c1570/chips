@@ -101,8 +101,8 @@ typedef struct {
     mem_t mem;
     uint8_t ram[0x0800];
     uint8_t rom[0x4000];
-    uint16_t hundred_cycles_rotor_active;
-    uint16_t hundred_cycles_per_bit;
+    uint32_t rotor_nanoseconds_counter;
+    uint32_t nanoseconds_per_bit;
     bool rotor_active;
     uint8_t gcr_bytes[0x2000];
     uint32_t gcr_size;
@@ -159,6 +159,8 @@ void c1541_snapshot_onload(c1541_t* snapshot, c1541_t* sys, void* base);
 //#include "../docs/1541_test_demo_track18gcr.h"
 #include "../docs/1541_test_demo.h"
 
+const uint32_t c1541_speedzone[] = { 4000, 3750, 3500, 3250 }; // nanoseconds per bit
+
 void c1541_init(c1541_t* sys, const c1541_desc_t* desc) {
     CHIPS_ASSERT(sys && desc);
 
@@ -173,8 +175,8 @@ void c1541_init(c1541_t* sys, const c1541_desc_t* desc) {
     sys->gcr_bit_pos = 0;
     sys->current_byte = 0;
     sys->current_bit_pos = 0;
-    sys->hundred_cycles_per_bit = 369;
-    sys->hundred_cycles_rotor_active = 0;
+    sys->nanoseconds_per_bit = c1541_speedzone[1];
+    sys->rotor_nanoseconds_counter = 0;
     sys->half_track = gcr_full_track_to_half_track(initial_full_track);
 
     // copy ROM images
@@ -247,24 +249,9 @@ void _c1541_write(c1541_t* sys, uint16_t addr, uint8_t data) {
         if (addr == 0x1C00) {
             sys->rotor_active = (data & VIA2_ROTOR) != 0;
             if (!sys->rotor_active) {
-                sys->hundred_cycles_rotor_active = 0;
+                sys->rotor_nanoseconds_counter = 0;
             }
-    	    // FIXME: use correct formula once the cpu frequency is decoupled from c64 and uses real 1MHz
-            sys->hundred_cycles_per_bit = 400 - ((data & 3) * 25);
-            // switch (data & 3) {
-            //     case 0:
-            //         sys->hundred_cycles_per_bit = 394;
-            //         break;
-            //     case 1:
-            //         sys->hundred_cycles_per_bit = 369;
-            //         break;
-            //     case 2:
-            //         sys->hundred_cycles_per_bit = 345;
-            //         break;
-            //     case 3:
-            //         sys->hundred_cycles_per_bit = 320;
-            //         break;
-            // }
+            sys->nanoseconds_per_bit = c1541_speedzone[data & 3];
         }
         // if ((addr & 0x0f) == 0 && (data != last_via2_0_write)) {
         //     last_via2_0_write = data;
@@ -494,9 +481,9 @@ uint8_t _c1541_tick_via2(c1541_t* sys) {
             //    sys->exit_countdown = C1541_FREQUENCY << 1;
             //}
 //            via_output = true;
-            sys->hundred_cycles_rotor_active += 100; // fixed point arithmetic - use 2 digits as fractional part
-            if (sys->hundred_cycles_rotor_active >= sys->hundred_cycles_per_bit) {
-                sys->hundred_cycles_rotor_active -= sys->hundred_cycles_per_bit;
+            sys->rotor_nanoseconds_counter += 1000;
+            if (sys->rotor_nanoseconds_counter >= sys->nanoseconds_per_bit) {
+                sys->rotor_nanoseconds_counter -= sys->nanoseconds_per_bit;
                 
                 // we are going to read new bits, so deactivate byte_ready
                 sys->byte_ready = false;
