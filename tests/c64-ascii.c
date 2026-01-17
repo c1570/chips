@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <ctype.h>
 #include <signal.h>
+#include <string.h>
 #define CHIPS_IMPL
 #include "../chips/chips_common.h"
 #include "../chips/m6502.h"
@@ -77,7 +78,29 @@ static void init_c64_colors(void) {
 }
 
 int main(int argc, char* argv[]) {
-    (void)argc; (void)argv;
+    const char* disk_filename = NULL;
+
+    // Parse command line arguments
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--disk") == 0) {
+            if (i + 1 < argc) {
+                disk_filename = argv[++i];
+            } else {
+                fprintf(stderr, "Error: %s requires a filename argument\n", argv[i]);
+                return 1;
+            }
+        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            printf("Usage: %s [-d|--disk FILENAME] [-h|--help]\n", argv[0]);
+            printf("  -d, --disk FILENAME  Attach G64 disk image\n");
+            printf("  -h, --help           Show this help message\n");
+            return 0;
+        } else {
+            fprintf(stderr, "Error: Unknown option '%s'\n", argv[i]);
+            fprintf(stderr, "Usage: %s [-d|--disk FILENAME] [-h|--help]\n", argv[0]);
+            return 1;
+        }
+    }
+
     c64_init(&c64, &(c64_desc_t){
         .roms = {
             .chars = { .ptr=dump_c64_char_bin, .size=sizeof(dump_c64_char_bin) },
@@ -90,6 +113,13 @@ int main(int argc, char* argv[]) {
         },
         .c1541_enabled = 1
     });
+
+    // Attach disk image if specified
+    if (disk_filename != NULL) {
+        if (!c1541_attach_disk(&c64.c1541, disk_filename)) {
+            fprintf(stderr, "Warning: Failed to attach disk image: %s\n", disk_filename);
+        }
+    }
 
     // install a Ctrl-C signal handler
     signal(SIGINT, catch_sigint);

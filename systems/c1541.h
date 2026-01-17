@@ -49,8 +49,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "iecbus.h"
+#include "disk_helpers.h"
 // #include "disass.h"
-#include "gcr.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -58,6 +58,11 @@ extern "C" {
 
 #define C1541_FREQUENCY (1000000)
 // #define C1541_FREQUENCY (985248)
+
+// Convert full track number (1-42) to half-track number (1, 3, 5, ...)
+static inline uint8_t c1541_full_track_to_half_track(uint8_t full_track) {
+    return (full_track << 1) - 1; // 1 -> 1, 2 -> 3, 3 -> 5, ...
+}
 
 #define VIA2_STEPPER_LO_BIT_POS  0
 #define VIA2_STEPPER_HI_BIT_POS  1
@@ -129,7 +134,9 @@ typedef struct {
     uint32_t exit_countdown;
     uint8_t half_track;
 
-    uint8_t *gcr_disk_data;
+    char disk_filename[256];
+    bool disk_loaded;
+    uint8_t disk_type;  // 0=none, 1=G64, 2=D64
 } c1541_t;
 
 // initialize a new c1541_t instance
@@ -148,6 +155,10 @@ void c1541_remove_disc(c1541_t* sys);
 void c1541_snapshot_onsave(c1541_t* snapshot, void* base);
 // prepare a c1541_t snapshot for loading
 void c1541_snapshot_onload(c1541_t* snapshot, c1541_t* sys, void* base);
+// attach disk image file (quick validation only, stores filename)
+bool c1541_attach_disk(c1541_t* sys, const char* filename);
+// fetch track data for current half-track position (opens file, reads offsets, reads track)
+bool c1541_fetch_track(c1541_t* sys);
 
 #ifdef __cplusplus
 } // extern "C"
@@ -161,9 +172,6 @@ void c1541_snapshot_onload(c1541_t* snapshot, c1541_t* sys, void* base);
     #define CHIPS_ASSERT(c) assert(c)
 #endif
 
-//#include "../docs/1541_test_demo_track18gcr.h"
-#include "../docs/1541_test_demo.h"
-
 const uint32_t c1541_speedzone[] = { 4000, 3750, 3500, 3250 }; // nanoseconds per bit
 
 void c1541_init(c1541_t* sys, const c1541_desc_t* desc) {
@@ -173,16 +181,19 @@ void c1541_init(c1541_t* sys, const c1541_desc_t* desc) {
 
     memset(sys, 0, sizeof(c1541_t));
     sys->valid = true;
-    sys->gcr_disk_data = (uint8_t*) gcr_1541_test_demo_g64;
-    sys->gcr_size = gcr_1541_test_demo_g64_len;
-    gcr_get_half_track_bytes(sys->gcr_bytes, sys->gcr_disk_data, gcr_full_track_to_half_track(initial_full_track));
+    // Initialize as empty drive
+    sys->disk_filename[0] = '\0';
+    sys->disk_loaded = false;
+    sys->disk_type = 0;
+    sys->gcr_size = 0;
+    sys->gcr_bytes[0] = 0;
     sys->gcr_byte_pos = 0;
     sys->gcr_bit_pos = 0;
     sys->current_byte = 0;
     sys->current_bit_pos = 0;
     sys->nanoseconds_per_bit = c1541_speedzone[1];
     sys->rotor_nanoseconds_counter = 0;
-    sys->half_track = gcr_full_track_to_half_track(initial_full_track);
+    sys->half_track = c1541_full_track_to_half_track(initial_full_track);
 
     // copy ROM images
     CHIPS_ASSERT(desc->roms.c000_dfff.ptr && (0x2000 == desc->roms.c000_dfff.size));
@@ -218,6 +229,7 @@ void c1541_init(c1541_t* sys, const c1541_desc_t* desc) {
 
 void c1541_discard(c1541_t* sys) {
     CHIPS_ASSERT(sys && sys->valid);
+    c1541_remove_disc(sys);
     iec_disconnect(sys->iec_bus, sys->iec_device);
     sys->iec_device = NULL;
     sys->valid = false;
@@ -502,7 +514,7 @@ uint8_t _c1541_tick_via2(c1541_t* sys) {
                     if (sys->gcr_byte_pos >= sys->gcr_size || sys->gcr_bytes[sys->gcr_byte_pos] == 0) {
                         sys->gcr_byte_pos = 0;
 			// FIXME: debug output
-                        printf("%ld - 1541 - disk cycle complete\n", get_world_tick());
+                        //printf("%ld - 1541 - disk cycle complete\n", get_world_tick());
                     }
                 }
 
@@ -581,7 +593,7 @@ uint8_t _c1541_tick_via2(c1541_t* sys) {
                 }
                 //printf("Moving outward, track: %g\n", ((float)sys->half_track + 1) / 2);
             }
-            gcr_get_half_track_bytes(sys->gcr_bytes, sys->gcr_disk_data, sys->half_track);
+            c1541_fetch_track(sys);
             last_position = stepper_position;
         }
     }
@@ -625,9 +637,229 @@ void c1541_insert_disc(c1541_t* sys, chips_range_t data) {
     (void)data;
 }
 
+bool c1541_attach_disk(c1541_t* sys, const char* filename) {
+    CHIPS_ASSERT(sys && sys->valid);
+    CHIPS_ASSERT(filename);
+
+    c1541_remove_disc(sys);
+
+    // Check file extension
+    const char* ext = strrchr(filename, '.');
+    bool is_d64 = (ext && strcmp(ext, ".d64") == 0);
+
+    FILE* fp = fopen(filename, "rb");
+    if (!fp) {
+        printf("c1541: failed to open disk image: %s\n", filename);
+        return false;
+    }
+
+    if (is_d64) {
+        // D64: check file size (minimum 35-track D64 = 683 sectors * 256 bytes)
+        fseek(fp, 0, SEEK_END);
+        long file_size = ftell(fp);
+        fclose(fp);
+
+        if (file_size < 683 * 256) {
+            printf("c1541: file too small for D64: %s\n", filename);
+            return false;
+        }
+
+        sys->disk_type = 2;  // D64
+    } else {
+        // G64: verify signature
+        uint8_t signature[9];
+        if (fread(signature, 1, 9, fp) != 9) {
+            fclose(fp);
+            return false;
+        }
+        fclose(fp);
+
+        const uint8_t* expected = (uint8_t*)"GCR-1541";
+        for (int i = 0; i < 8; i++) {
+            if (signature[i] != expected[i]) {
+                printf("c1541: invalid G64 format: %s\n", filename);
+                return false;
+            }
+        }
+
+        sys->disk_type = 1;  // G64
+    }
+
+    // Store filename
+    strncpy(sys->disk_filename, filename, sizeof(sys->disk_filename) - 1);
+    sys->disk_filename[sizeof(sys->disk_filename) - 1] = '\0';
+    sys->disk_loaded = true;
+
+    printf("c1541: attached disk image: %s (%s)\n", filename,
+           is_d64 ? "D64" : "G64");
+    return true;
+}
+
+bool c1541_fetch_track(c1541_t* sys) {
+    CHIPS_ASSERT(sys && sys->valid);
+
+    if (!sys->disk_loaded || sys->disk_filename[0] == '\0') {
+        sys->gcr_size = 0;
+        sys->gcr_bytes[0] = 0;
+        return false;
+    }
+
+    // D64 handling: convert sectors to GCR on-demand
+    if (sys->disk_type == 2) {
+        // Get full track number from half-track
+        uint8_t full_track = (sys->half_track + 1) / 2;
+        if (full_track < 1 || full_track > MAX_TRACKS_1541) {
+            return false;
+        }
+
+        // Only process odd half-tracks (actual tracks)
+        if (sys->half_track % 2 == 0) {
+            // Even half-tracks have no data in D64
+            sys->gcr_size = 0;
+            sys->gcr_bytes[0] = 0;
+            return true;
+        }
+
+        // Open D64 file
+        FILE* fp = fopen(sys->disk_filename, "rb");
+        if (!fp) {
+            return false;
+        }
+
+        // Read disk ID from BAM (track 18, sector 0, offset 0xA2)
+        // Track 18 starts after tracks 1-17: 17 tracks * 21 sectors * 256 bytes = 91728
+        // Disk ID is at offset 0xA2 within sector 0: 91728 + 162 = 91890
+        uint8_t disk_id[2] = {'0', '0'};  // Default
+        uint32_t bam_offset = d64_track_offset(18) + 0xA2;
+        if (fseek(fp, bam_offset, SEEK_SET) == 0) {
+            if (fread(disk_id, 1, 2, fp) == 2) {
+                // Successfully read disk ID
+            }
+        }
+
+        // Seek to track start
+        uint32_t track_offset = d64_track_offset(full_track);
+        if (fseek(fp, track_offset, SEEK_SET) != 0) {
+            fclose(fp);
+            return false;
+        }
+
+        // Read and convert sectors to GCR
+        uint8_t *ptr = sys->gcr_bytes;
+        uint8_t sector_buffer[256];
+        uint16_t sector_size = SYNC_LENGTH + HEADER_LENGTH + HEADER_GAP_LENGTH +
+                               SYNC_LENGTH + DATA_LENGTH;
+
+        uint8_t num_sectors = sector_map[full_track];
+        for (uint8_t sector = 0; sector < num_sectors; sector++) {
+            if (fread(sector_buffer, 1, 256, fp) != 256) {
+                fclose(fp);
+                return false;
+            }
+
+            convert_sector_to_GCR(sector_buffer, ptr, full_track, sector, disk_id);
+            ptr += sector_size + sector_gap_length[full_track];
+        }
+
+        fclose(fp);
+
+        // Calculate actual data written and expected track capacity
+        uint16_t actual_size = (uint16_t)(ptr - sys->gcr_bytes);
+        uint8_t speed_zone = speed_map[full_track];
+        uint16_t expected_size = track_capacity[speed_zone];
+
+        // Pad remaining space with gap bytes (0x55) to match expected track size
+        if (actual_size < expected_size && actual_size < sizeof(sys->gcr_bytes)) {
+            memset(ptr, 0x55, expected_size - actual_size);
+            actual_size = expected_size;
+        }
+
+        if (actual_size > sizeof(sys->gcr_bytes) - 1) {
+            actual_size = sizeof(sys->gcr_bytes) - 1;
+        }
+        sys->gcr_size = actual_size;
+        sys->gcr_bytes[sys->gcr_size] = 0;  // Mark end of track
+        return true;
+    }
+
+    // G64 handling (existing code)
+    FILE* fp = fopen(sys->disk_filename, "rb");
+    if (!fp) {
+        return false;
+    }
+
+    // Read header
+    uint8_t header[12];
+    if (fread(header, 1, 12, fp) != 12) {
+        fclose(fp);
+        return false;
+    }
+
+    uint8_t half_track_count = header[9];
+    if (sys->half_track < 1 || sys->half_track > half_track_count) {
+        fclose(fp);
+        return false;
+    }
+
+    // Read track offset for this half-track
+    uint32_t track_offset;
+    if (fseek(fp, 0xc + (sys->half_track - 1) * 4, SEEK_SET) != 0) {
+        fclose(fp);
+        return false;
+    }
+    if (fread(&track_offset, 4, 1, fp) != 1) {
+        fclose(fp);
+        return false;
+    }
+
+    if (track_offset == 0) {
+        // Empty track
+        sys->gcr_size = 0;
+        sys->gcr_bytes[0] = 0;
+        fclose(fp);
+        return true;
+    }
+
+    // Seek to track data
+    if (fseek(fp, track_offset, SEEK_SET) != 0) {
+        fclose(fp);
+        return false;
+    }
+
+    // Read track size (2 bytes, little-endian)
+    uint8_t size_bytes[2];
+    if (fread(size_bytes, 1, 2, fp) != 2) {
+        fclose(fp);
+        return false;
+    }
+    uint16_t data_size = size_bytes[0] | (size_bytes[1] << 8);
+
+    if (data_size > sizeof(sys->gcr_bytes)) {
+        data_size = sizeof(sys->gcr_bytes);
+    }
+
+    // Read track data
+    if (fread(sys->gcr_bytes, 1, data_size, fp) != data_size) {
+        fclose(fp);
+        return false;
+    }
+
+    fclose(fp);
+
+    sys->gcr_size = data_size;
+    sys->gcr_bytes[data_size] = 0;  // Mark end of track
+
+    return true;
+}
+
 void c1541_remove_disc(c1541_t* sys) {
-    // FIXME
-    (void)sys;
+    CHIPS_ASSERT(sys && sys->valid);
+
+    sys->disk_filename[0] = '\0';
+    sys->disk_loaded = false;
+    sys->disk_type = 0;
+    sys->gcr_size = 0;
+    sys->gcr_bytes[0] = 0;
 }
 
 void c1541_snapshot_onsave(c1541_t* snapshot, void* base) {
