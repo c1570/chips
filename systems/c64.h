@@ -385,6 +385,7 @@ typedef struct {
 
     c1530_t c1530;      // optional datassette
     c1541_t c1541;      // optional floppy drive
+    uint c1541_subtick; // 1541 clock frequency correction
 
 } c64_t;
 
@@ -810,7 +811,11 @@ static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
         c1530_tick(&sys->c1530);
     }
     if (sys->c1541.valid) {
-        c1541_tick(&sys->c1541);
+        sys->c1541_subtick += 101497; // 1.01497*985250kHz (C64 clock) = 999997kHz = ~1MHz (1541 clock)
+        do {
+            c1541_tick(&sys->c1541);
+            sys->c1541_subtick -= 100000;
+        } while (sys->c1541_subtick > 100000);
     }
     return pins;
 }
