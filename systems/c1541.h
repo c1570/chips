@@ -207,12 +207,10 @@ void c1541_init(c1541_t* sys, const c1541_desc_t* desc) {
 }
 
 void c1541_iec_connect(c1541_t* sys) {
-    // Connect to IEC bus and tell it that we have inverter logic in our hardware
-    sys->iec_device = iec_connect(&sys->iec_bus, true);
+    sys->iec_device = iec_connect(&sys->iec_bus);
 }
 
 void c1541_iec_disconnect(c1541_t* sys) {
-    // Connect to IEC bus and tell it that we have inverter logic in our hardware
     iec_disconnect(sys->iec_bus, sys->iec_device);
 }
 
@@ -409,18 +407,18 @@ uint8_t _c1541_tick_via1(c1541_t* sys) {
     uint64_t pins = sys->via_1.pins;
 
     // 1. "Tick" the IEC bus (reflects back active outputs).
-    uint8_t iec_lines = iec_get_signals(sys->iec_bus, sys->iec_device);
+    uint8_t iec_lines = iec_get_signals(sys->iec_bus);
 
     // 2. Write IEC signals to VIA inputs.
     pins &= ~(M6522_PB0 | M6522_PB2 | M6522_PB7 | M6522_CA1);
-    if (iec_lines & IECLINE_ATN) {
+    if (IEC_ATN_ACTIVE(iec_lines)) {
         pins |= M6522_PB7; // ATN IN
         pins |= M6522_CA1;
     }
-    if (iec_lines & IECLINE_CLK) {
+    if (IEC_CLK_ACTIVE(iec_lines)) {
         pins |= M6522_PB2; // CLK IN
     }
-    if (iec_lines & IECLINE_DATA) {
+    if (IEC_DATA_ACTIVE(iec_lines)) {
         pins |= M6522_PB0; // DATA IN
     }
 
@@ -434,20 +432,20 @@ uint8_t _c1541_tick_via1(c1541_t* sys) {
     #endif
 
     // 4. Write VIA outputs to IEC bus.
-    uint8_t out_signals = 0;
+    uint8_t out_signals = ~0;
     if (pins & M6522_PB3) {
-        out_signals |= IECLINE_CLK;
+        out_signals &= ~IECLINE_CLK;
     }
     if (pins & M6522_PB1) {
-        out_signals |= IECLINE_DATA;
+        out_signals &= ~IECLINE_DATA;
     } else {
         // ATNA logic (UD3) may set DATA out, too
-        if (XOR(iec_lines & IECLINE_ATN, pins & M6522_PB4)) {
+        if (XOR(IEC_ATN_ACTIVE(iec_lines), pins & M6522_PB4)) {
             // printf("ATNA activates DATA ATN(%d) ATNA(%d)\n", !!(iec_lines & IECLINE_ATN), !!(pins & M6522_PB4));
-            out_signals |= IECLINE_DATA;
+            out_signals &= ~IECLINE_DATA;
         }
     }
-    sys->iec_device->signals = out_signals;
+    iec_set_signals(sys->iec_bus, sys->iec_device, out_signals);
 
 #ifdef PICO
     ticks_via1 = get_elapsed_ticks(tick);

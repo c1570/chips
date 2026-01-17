@@ -514,8 +514,7 @@ void c64_init(c64_t* sys, const c64_desc_t* desc) {
     });
     _c64_init_key_map(sys);
     _c64_init_memory_map(sys);
-    // Connect to IEC bus and tell it that we have inverter logic in our hardware
-    sys->iec_device = iec_connect(&sys->iec_bus, true);
+    sys->iec_device = iec_connect(&sys->iec_bus);
     CHIPS_ASSERT(sys->iec_device);
     if (desc->c1530_enabled) {
         c1530_init(&sys->c1530, &(c1530_desc_t){
@@ -564,11 +563,10 @@ void c64_reset(c64_t* sys) {
 
 static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
     static uint16_t last_cpu_address = 0;
-    iec_get_signals(sys->iec_bus, NULL);
     // tick the CPU
     pins = m6502_tick(&sys->cpu, pins);
     const uint16_t addr = M6502_GET_ADDR(pins);
-    const uint8_t iec_lines = iec_get_signals(sys->iec_bus, sys->iec_device);
+    const uint8_t iec_lines = iec_get_signals(sys->iec_bus);
 
     // those pins are set each tick by the CIAs and VIC
     pins &= ~(M6502_IRQ|M6502_NMI|M6502_RDY|M6510_AEC);
@@ -657,7 +655,7 @@ static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
         const uint8_t pa = ~(sys->kbd_joy2_mask|sys->joy_joy2_mask);
         const uint8_t pb = ~(kbd_scan_columns(&sys->kbd) | sys->kbd_joy1_mask | sys->joy_joy1_mask);
         M6526_SET_PAB(cia1_pins, pa, pb);
-        if (sys->cas_port & C64_CASPORT_READ || iec_lines & IECLINE_SRQIN) {
+        if (sys->cas_port & C64_CASPORT_READ || IEC_SRQIN_ACTIVE(iec_lines)) {
             cia1_pins |= M6526_FLAG;
         }
         cia1_pins = m6526_tick(&sys->cia_1, cia1_pins);
@@ -702,10 +700,10 @@ static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
 
         // clear CLK and DATA pins
         cia2_pa &= ~(3 << 6);
-        if ((iec_lines & IECLINE_CLK) == 0) {
+        if (!IEC_CLK_ACTIVE(iec_lines)) {
             cia2_pa |= 1 << 6;
         }
-        if ((iec_lines & IECLINE_DATA) == 0) {
+        if (!IEC_DATA_ACTIVE(iec_lines)) {
             cia2_pa |= 1<< 7;
         }
 
@@ -727,28 +725,27 @@ static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
             }
         }
         {
-            uint8_t signals = sys->iec_device->signals & ~(IECLINE_ATN | IECLINE_CLK | IECLINE_DATA);
-            
             cia2_pa = M6526_GET_PA(cia2_pins);
-
+            uint8_t iec_signals = ~0;
             if (cia2_pins & M6522_PA3) {
-                signals |= IECLINE_ATN;
+                iec_signals &= ~IECLINE_ATN;
             }
             if (cia2_pins & M6522_PA4) {
-                signals |= IECLINE_CLK;
+                iec_signals &= ~IECLINE_CLK;
             }
             if (cia2_pins & M6522_PA5) {
-                signals |= IECLINE_DATA;
+                iec_signals &= ~IECLINE_DATA;
             }
-
-            if (signals != sys->iec_device->signals) {
+            iec_set_signals(sys->iec_bus, sys->iec_device, iec_signals);
+/*
+            if (iec_signals != sys->iec_device->signals) {
                 char message_prefix[256];
-//                sprintf(message_prefix, "%ld - c64 - write-iec - cpu @ $%04X", get_world_tick(), last_cpu_address);
-                sys->iec_device->signals = signals;
-// #ifdef __IEC_DEBUG
-//                iec_debug_print_device_signals(sys->iec_device, message_prefix);
-// #endif
+                sprintf(message_prefix, "%ld - c64 - write-iec - cpu @ $%04X", get_world_tick(), last_cpu_address);
+                #ifdef __IEC_DEBUG
+                iec_debug_print_device_signals(sys->iec_device, message_prefix);
+                #endif
             }
+*/
         }
     }
 

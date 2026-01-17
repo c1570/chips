@@ -1130,21 +1130,7 @@ static void _c1541_debug_out_processor_pc(uint tick, c1541_t* sys, uint64_t cpu_
         iec_get_status_text(sys->iec_bus, iec_status);
         iec_get_device_status_text(sys->iec_device, local_iec_status);
 
-        uint8_t iec_lines = iec_get_signals(sys->iec_bus, sys->iec_device);
-        via1_pins &= ~(M6522_PB0 | M6522_PB2 | M6522_PB7 | M6522_CA1);
-        if (iec_lines & IECLINE_ATN) {
-            via1_pins |= M6522_PB7;
-            via1_pins |= M6522_CA1;
-        }
-        if (iec_lines & IECLINE_CLK) {
-            via1_pins |= M6522_PB2;
-        }
-        if (iec_lines & IECLINE_DATA /*|| ((via1_pb & (1<<7)) >> 3) ^ (via1_pb & (1<<4))*/) {
-            via1_pins |= M6522_PB0;
-        }
-        via1_pins = (via1_pins >> M6522_PIN_PB0) & 0xff;
-
-        printf("tick:%10ld\taddr:%04x\tsys:c1541\tport-via1-b:%02x\tbus-iec:%s\tlocal-iec:%s\tlabel:%s+%x\n", tick, cpu_pc, via1_pins, iec_status, local_iec_status, function_name, address_diff);
+        printf("tick:%10ld\taddr:%04x\tsys:c1541\tbus-iec:%s\tlocal-iec:%s\tlabel:%s+%x\n", tick, cpu_pc, iec_status, local_iec_status, function_name, address_diff);
 
 /*
         if(cpu_pc==0xf4da) {

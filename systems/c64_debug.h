@@ -627,12 +627,6 @@ static void _c64_debug_out_processor_pc(c64_t* sys, uint64_t pins) {
         iec_get_status_text(&sys->iec_bus, iec_status);
         iec_get_device_status_text(sys->iec_device, local_iec_status);
 
-        const uint8_t iec_lines = iec_get_signals(&sys->iec_bus, sys->iec_device);
-        uint8_t cia2_pa = M6526_GET_PA(sys->cia_2.pins);
-        // CIA2 input receives logic HIGH if IEC voltage is high (meaning IEC logic LOW)
-        cia2_pa = (cia2_pa & ~(1 << 6)) | (((iec_lines & IECLINE_CLK) == 0) ? (1<<6) : 0);
-        cia2_pa = (cia2_pa & ~(1 << 7)) | (((iec_lines & IECLINE_DATA) == 0) ? (1<<7) : 0);
-
-        fprintf(sys->debug_file, "tick:%10ld\taddr:%04x\tsys:c64 \tport-cia2-a:%02x\tbus-iec:%s\tlocal-iec:%s\tlabel:%s+%x\n", get_world_tick(), cpu_pc, cia2_pa, iec_status, local_iec_status, function_name, address_diff);
+        fprintf(sys->debug_file, "tick:%10ld\taddr:%04x\tsys:c64 \tbus-iec:%s\tlocal-iec:%s\tlabel:%s+%x\n", get_world_tick(), cpu_pc, iec_status, local_iec_status, function_name, address_diff);
     }
 }
