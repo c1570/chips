@@ -125,18 +125,21 @@ iecbus_device_t* iec_connect(iecbus_t** iec_bus) {
     iecbus_device_t* bus_device = NULL;
     iecbus_t *bus = NULL;
 
-    #ifdef IECBUS_USE_SHM
-    int fd = shm_open("/iec_bus", O_CREAT | O_RDWR, 0600);
-    struct stat st;
-    fstat(fd, &st);
-    if (st.st_size == 0) {
-        ftruncate(fd, sizeof(**iec_bus));
+    if (!(*iec_bus)) {
+      // iec_bus hasn't been instantiated yet: create one
+      #ifdef IECBUS_USE_SHM
+      int fd = shm_open("/iec_bus", O_CREAT | O_RDWR, 0600);
+      struct stat st;
+      fstat(fd, &st);
+      if (st.st_size == 0) {
+          ftruncate(fd, sizeof(**iec_bus));
+      }
+      *iec_bus = (iecbus_t*) mmap(NULL, sizeof(iecbus_t), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+      #else
+      *iec_bus = malloc(sizeof(iecbus_t));
+      CHIPS_ASSERT(iec_bus);
+      #endif
     }
-    *iec_bus = (iecbus_t*) mmap(NULL, sizeof(iecbus_t), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    #else
-    *iec_bus = malloc(sizeof(iecbus_t));
-    CHIPS_ASSERT(iec_bus);
-    #endif
 
     bus = *iec_bus;
 

@@ -125,10 +125,6 @@ typedef struct {
 
 // initialize a new c1541_t instance
 void c1541_init(c1541_t* sys, const c1541_desc_t* desc);
-// connect the 1541 to the iec bus
-void c1541_iec_connect(c1541_t* sys);
-// connect the 1541 to the iec bus
-void c1541_iec_disconnect(c1541_t* sys);
 // discard a c1541_t instance
 void c1541_discard(c1541_t* sys);
 // reset a c1541_t instance
@@ -200,18 +196,15 @@ void c1541_init(c1541_t* sys, const c1541_desc_t* desc) {
     mem_map_ram(&sys->mem, 0, 0x0000, 0x0800, sys->ram);
     mem_map_rom(&sys->mem, 0, 0xC000, 0x4000, sys->rom);
 
-    // sys->iec_bus = desc->iec_bus;
-    // CHIPS_ASSERT(sys->iec_bus);
-    //
-    // CHIPS_ASSERT(sys->iec_device);
-}
+    // use iec_bus instance if we got passed one
+    if(desc->iec_bus) {
+      sys->iec_bus = desc->iec_bus;
+      CHIPS_ASSERT(sys->iec_bus);
+    }
 
-void c1541_iec_connect(c1541_t* sys) {
+    // this will create an iec_bus instance if we don't have one yet
     sys->iec_device = iec_connect(&sys->iec_bus);
-}
-
-void c1541_iec_disconnect(c1541_t* sys) {
-    iec_disconnect(sys->iec_bus, sys->iec_device);
+    CHIPS_ASSERT(sys->iec_device);
 }
 
 void c1541_discard(c1541_t* sys) {
