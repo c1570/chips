@@ -77,6 +77,15 @@ extern "C" {
 #define VIA2_BIT_RATE_HI         (1<<VIA2_BIT_RATE_HI_BIT_POS)
 #define VIA2_SYNC                (1<<VIA2_SYNC_BIT_POS)
 
+#ifdef HAVE_CONNOMORE_M6502H
+#define C1541_GET_ADDR(pins,sys) (sys->cpu.bus_addr)
+#define C1541_GET_DATA(pins,sys) (sys->cpu.bus_data)
+#define C1541_SET_DATA(pins,sys,data) sys->cpu.bus_data=data
+#else
+#define C1541_GET_ADDR(pins,sys) M6502_GET_ADDR(pins)
+#define C1541_GET_DATA(pins,sys) M6502_GET_DATA(pins)
+#define C1541_SET_DATA(pins,sys,data) M6502_SET_DATA(pins,data)
+#endif
 
 // config params for c1541_init()
 typedef struct {
@@ -341,8 +350,7 @@ uint64_t _c1541_tick_cpu(c1541_t *sys, const uint64_t input_pins) {
 //     printf("chip_tick cpu: %ld sys tick(s)\n", dt_cpu);
 // #endif
 
-//    const uint16_t addr = M6502_GET_ADDR(pins);
-    const uint16_t addr = sys->cpu.bus_addr;
+    const uint16_t addr = C1541_GET_ADDR(pins, sys);
 
     if (pins & M6502_RW) {
         // memory read
@@ -370,20 +378,17 @@ uint64_t _c1541_tick_cpu(c1541_t *sys, const uint64_t input_pins) {
             valid_read = false;
         }
         if (valid_read) {
-//            M6502_SET_DATA(pins, read_data);
-            sys->cpu.bus_data = read_data;
+            C1541_SET_DATA(pins, sys, read_data);
         }
     }
     else {
         // memory write
-        //         uint8_t write_data = M6502_GET_DATA(pins);
+        //         uint8_t write_data = C1541_GET_DATA(pins, sys);
         // //        // FIXME: debugging purpose
         // //        if (addr == 0x1800) {
         // //            printf("%ld - 1541 - Write VIA1 $1800 = $%02X - CPU @ $%04X\n", get_world_tick(), write_data, _1541_last_cpu_address);
         // //        }
-        //         _c1541_write(sys, addr, write_data);
-//        _c1541_write(sys, addr, M6502_GET_DATA(pins));
-        _c1541_write(sys, addr, sys->cpu.bus_data);
+        _c1541_write(sys, addr, C1541_GET_DATA(pins, sys));
     }
 
 #ifdef PICO

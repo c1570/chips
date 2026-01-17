@@ -40,6 +40,8 @@
 extern "C" {
 #endif
 
+#define HAVE_CONNOMORE_M6502H
+
 // control pins
 #define M6502_PIN_RW    (0)      // out: memory read or write access
 #define M6502_PIN_SYNC  (1)      // out: start of a new instruction
