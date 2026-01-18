@@ -44,7 +44,9 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <fcntl.h>
+#ifdef IECBUS_USE_SHM
 #include <sys/mman.h>
+#endif
 #include <sys/stat.h>
 #include <unistd.h>
 
