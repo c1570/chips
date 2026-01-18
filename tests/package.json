@@ -1,0 +1,13 @@
+{
+  "name": "rp2040-c1541-test",
+  "version": "1.0.0",
+  "description": "RP2040 C1541 test harness",
+  "type": "module",
+  "scripts": {
+    "test": "node rp2_test_runner.js"
+  },
+  "dependencies": {
+    "koffi": "^2.15.0",
+    "uf2": "^2.0.0"
+  }
+}
