@@ -18,7 +18,7 @@
     ~~~
         your own assert macro (default: assert(c))
 
-    You need to include the following headers before including c64.h:
+    You need to include the following headers before including c1541.h:
 
     - chips/chips_common.h
     - chips/m6502.h
@@ -57,7 +57,16 @@ extern "C" {
 #endif
 
 #define C1541_FREQUENCY (1000000)
-// #define C1541_FREQUENCY (985248)
+
+#ifndef C1541_LED_CHANGED_HOOK
+#define C1541_LED_CHANGED_HOOK(s,b)
+#endif
+#ifndef C1541_MOTOR_CHANGED_HOOK
+#define C1541_MOTOR_CHANGED_HOOK(s,b)
+#endif
+#ifndef C1541_TRACK_CHANGED_HOOK
+#define C1541_TRACK_CHANGED_HOOK(s,v)
+#endif
 
 // Convert full track number (1-42) to half-track number (1, 3, 5, ...)
 static inline uint8_t c1541_full_track_to_half_track(uint8_t full_track) {
@@ -306,6 +315,16 @@ void _c1541_write(c1541_t* sys, uint16_t addr, uint8_t data) {
 //                last_via2_2_write & (1<<7) ? 1 : 0
 //            );
 //        }
+        if((addr & 0xF) == 0) {
+            // $1c00 write
+            uint8_t changed_bits = sys->via_2.pb.outr ^ data;
+            if(changed_bits & 0b1000) {
+                C1541_LED_CHANGED_HOOK(sys, !!(data & 0b1000));
+            }
+            if(changed_bits & 0b100) {
+                C1541_MOTOR_CHANGED_HOOK(sys, !!(data & 0b100));
+            }
+        }
         _m6522_write(&sys->via_2, addr & 0xF, data);
     } else if (addr < 0x0800) {
         // Write to RAM
@@ -579,7 +598,7 @@ uint8_t _c1541_tick_via2(c1541_t* sys) {
         //     pins |= M6502_IRQ;
         // }
         // bool drive_stepping = (sys->ram[0x20] & 0x60) == 0x60;
-        int stepper_position = (pins >> 56) & 3;
+        int stepper_position = (pins >> M6522_PIN_PB0) & 3;
         static int last_position = 0;
         if (last_position != stepper_position) {
             if ((stepper_position - last_position) == -1 || (stepper_position + 4 - last_position) == -1) {
@@ -593,7 +612,8 @@ uint8_t _c1541_tick_via2(c1541_t* sys) {
                 }
                 //printf("Moving outward, track: %g\n", ((float)sys->half_track + 1) / 2);
             }
-            c1541_fetch_track(sys);
+            C1541_TRACK_CHANGED_HOOK(sys, sys->half_track);
+            c1541_fetch_track(sys); //TODO do this in background/only after the head settled
             last_position = stepper_position;
         }
     }
