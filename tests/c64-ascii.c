@@ -24,6 +24,12 @@
 #include "../chips/clk.h"
 #include "../systems/c1530.h"
 #include "../chips/m6522.h"
+static bool drive_led_status = 0;
+static bool drive_motor_status = 1;
+static int drive_current_track = 0;
+#define C1541_TRACK_CHANGED_HOOK(s,v) drive_current_track=v
+#define C1541_MOTOR_CHANGED_HOOK(s,v) drive_motor_status=v
+#define C1541_LED_CHANGED_HOOK(s,v) drive_led_status=v
 #include "../systems/c1541.h"
 #include "../systems/c64.h"
 #include "c64-roms.h"
@@ -214,6 +220,11 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
+        mvaddch(25+BORDER_VERT+3, 99, drive_led_status ? 'X' : '.');
+        mvaddch(25+BORDER_VERT+3, 97, drive_motor_status ? 'O' : '.');
+        char str_track[10];
+        sprintf(str_track, "%2.1f", ((float)drive_current_track)/2);
+        mvaddstr(25+BORDER_VERT+3, 92, str_track);
         refresh();
 
         // pause until next frame

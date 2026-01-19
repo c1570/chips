@@ -202,6 +202,7 @@ void c1541_init(c1541_t* sys, const c1541_desc_t* desc) {
     sys->current_bit_pos = 0;
     sys->nanoseconds_per_bit = c1541_speedzone[1];
     sys->rotor_nanoseconds_counter = 0;
+    sys->rotor_active = 1;
     sys->half_track = c1541_full_track_to_half_track(initial_full_track);
 
     // copy ROM images
@@ -216,6 +217,10 @@ void c1541_init(c1541_t* sys, const c1541_desc_t* desc) {
     sys->pins = m6502_init(&sys->cpu, &cpu_desc);
     m6522_init(&sys->via_1);
     m6522_init(&sys->via_2);
+    // not entirely sure with those inits but on the real drive after reset,
+    // the motor is active briefly (yet no seek happens when 00 bits are written
+    // to the stepper once the motor gets turned off...)
+    M6522_SET_PAB(sys->via_2.pins, 0x00, 0x04);
 
     sys->via_1.chip_name = "via1";
     sys->via_2.chip_name = "via2";
