@@ -1,6 +1,8 @@
 #!/bin/bash
 # Build script for RP2040 C1541 floppy drive emulator
 
+set -o errexit
+
 # Set PICO_SDK_PATH if not already set
 if [ -z "$PICO_SDK_PATH" ]; then
     export PICO_SDK_PATH=$HOME/pico-sdk

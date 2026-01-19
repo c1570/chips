@@ -12,7 +12,3 @@ if [ ! -e c1541-roms.h ]; then
   # patch: skip RAM/ROM check
   perl -i -pe 's/0x8a, 0x95, 0x00, 0xe8,/0x4c, 0x22, 0xeb, 0xe8,/gm' c1541-roms.h
 fi
-
-gcc -o c64-ascii c64-ascii.c -lncurses
-
-./c64-ascii $@

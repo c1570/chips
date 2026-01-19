@@ -31,9 +31,8 @@ static bool drive_motor_status = 1;
 static int drive_current_track = 0;
 #define C1541_TRACK_CHANGED_HOOK(s,v) {cycle_info("track");drive_current_track=v;}
 #define C1541_MOTOR_CHANGED_HOOK(s,v) gpio_put(MOTOR_STATUS_PIN,v)
-#define C1541_LED_CHANGED_HOOK(s,v) {cycle_info("led ");gpio_put(LED_PIN,v);}
+#define C1541_LED_CHANGED_HOOK(s,v) {cycle_info("led");gpio_put(LED_PIN,v);}
 #include "../systems/c1541.h"
-#include "../systems/c1541_debug.h"
 #include "../tests/c1541-roms.h"
 
 #include <time.h>
@@ -181,7 +180,7 @@ int main(int argc, char **argv) {
         //printf("1541 iec output - DATA(%d) CLK(%d), input - ATN(%d) DATA(%d) CLK(%d)\n", IEC_DATA_ACTIVE(out_signals), IEC_CLK_ACTIVE(out_signals), IEC_ATN_ACTIVE(in_signals), IEC_DATA_ACTIVE(in_signals), IEC_CLK_ACTIVE(in_signals));
         write_iec_signals(out_new_signals);
       }
-      _c1541_debug_out_processor_pc(tick, &state.c1541, state.c1541.pins, state.c1541.via_1.pins);
+      //_c1541_debug_out_processor_pc(tick, &state.c1541, state.c1541.pins, state.c1541.via_1.pins);
       cycle_info("tick "); // rp2040js catches these and ticks the c64 emulation
     } while (state.keep_running);
 
