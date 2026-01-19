@@ -4,6 +4,7 @@
 
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
+#include "cycle_tracing.h"
 
 // GPIO pin assignments
 #define IEC_PIN_DATA    2   // GPIO for DATA line
@@ -11,7 +12,6 @@
 #define IEC_PIN_ATN     4   // GPIO for ATN line
 #define IEC_PIN_SRQ     5   // GPIO for SRQIN line (input only, reserved for future)
 #define IEC_PIN_RESET   6   // GPIO for RESET line
-#define DEVICE_STROBE   7
 #define MOTOR_STATUS_PIN 8
 #define LED_PIN 25
 
@@ -29,9 +29,9 @@
 static bool drive_led_status = 0;
 static bool drive_motor_status = 1;
 static int drive_current_track = 0;
-#define C1541_TRACK_CHANGED_HOOK(s,v) drive_current_track=v
+#define C1541_TRACK_CHANGED_HOOK(s,v) {cycle_info("track");drive_current_track=v;}
 #define C1541_MOTOR_CHANGED_HOOK(s,v) gpio_put(MOTOR_STATUS_PIN,v)
-#define C1541_LED_CHANGED_HOOK(s,v) gpio_put(LED_PIN,v)
+#define C1541_LED_CHANGED_HOOK(s,v) {cycle_info("led ");gpio_put(LED_PIN,v);}
 #include "../systems/c1541.h"
 #include "../systems/c1541_debug.h"
 #include "../tests/c1541-roms.h"
@@ -155,9 +155,6 @@ int main(int argc, char **argv) {
     uint in_signals = 0;
     // Initialize RP2040 GPIOs for IEC bus (open collector logic)
     init_iec_gpio();
-    gpio_init(DEVICE_STROBE);
-    gpio_set_dir(DEVICE_STROBE, 1); // output
-    gpio_put(DEVICE_STROBE, 0);
     gpio_init(MOTOR_STATUS_PIN);
     gpio_set_dir(MOTOR_STATUS_PIN, 1); // output
     gpio_put(MOTOR_STATUS_PIN, drive_motor_status);
@@ -185,10 +182,7 @@ int main(int argc, char **argv) {
         write_iec_signals(out_new_signals);
       }
       _c1541_debug_out_processor_pc(tick, &state.c1541, state.c1541.pins, state.c1541.via_1.pins);
-
-      gpio_put(DEVICE_STROBE, 1);
-      busy_wait_at_least_cycles(5);
-      gpio_put(DEVICE_STROBE, 0);
+      cycle_info("tick "); // rp2040js catches these and ticks the c64 emulation
     } while (state.keep_running);
 
     c1541_discard(&state.c1541);

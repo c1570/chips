@@ -43,7 +43,6 @@ const IEC_GPIO_CLK    = 3;
 const IEC_GPIO_ATN    = 4;
 const IEC_GPIO_SRQ    = 5;
 const IEC_GPIO_RESET  = 6;
-const DEVICE_STROBE   = 7;  // STROBE pin - C64 ticked on rising edge
 
 // IEC line definitions (must match iecbus.h)
 const IECLINE_DATA  = 1 << 0;
@@ -72,6 +71,26 @@ console.log('Initializing RP2040...');
 const mcu = new RP2040();
 mcu.loadBootrom(bootromB1);
 
+let doTickC64 = false;
+
+mcu.onTrace = function(coreNumber, pc, tag) {
+  if(tag == "tick ") {
+    doTickC64 = true;
+  } else {
+    console.log(`${mcu.cycles} PC 0x${pc.toString(16)} tag ${tag}`);
+  }
+}
+
+function getOffsetForVariable(var_name) {
+  const filename = FIRMWARE_PATH.replace(".uf2", ".elf.map");
+  const content = fs.readFileSync(filename, 'utf-8');
+  const search = var_name.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
+  const re = new RegExp(search + ".*\n *(0x[0-9a-f]+) ");
+  const res = re.exec(content);
+  if(res == null) throw new Error(`Could not find offset of variable ${var_name} in map file ${filename}`);
+  return parseInt(res[1]);
+}
+
 // Load C1541 firmware
 if (fs.existsSync(FIRMWARE_PATH)) {
   console.log(`Loading firmware from ${FIRMWARE_PATH}`);
@@ -93,9 +112,8 @@ mcu.core0.PC = INITIAL_PC;
 
 // GPIO tracking for IEC signals
 let lastIecState = 0xFF;
-let lastStrobeState = false;
 
-function syncIECGPIO() {
+function tickC64() {
   // Read RP2040 IEC GPIO outputs
   // GPIO value: Low=active (0), High=inactive (1)
   // IEC format uses: 0=active, 1=inactive - same as GPIO direction logic!
@@ -137,27 +155,25 @@ function runEmulation() {
   // Run RP2040 for one frame worth of cycles
   const targetCycles = 125000000 / 20;
   let cyclesRun = 0;
-  let strobeCount = 0;
+  let c64TickCount = 0;
 
   while (cyclesRun < targetCycles) {
     const startCycles = mcu.cycles;
     mcu.step();
     const elapsed = mcu.cycles - startCycles;
 
-    // Check STROBE pin (GPIO 7) - tick C64 on rising edge
-    const strobeState = mcu.gpio[DEVICE_STROBE].value === GPIOPinState.High;
-    if (strobeState && !lastStrobeState) {
-      syncIECGPIO();
-      strobeCount++;
+    if (doTickC64) {
+      tickC64();
+      c64TickCount++;
+      doTickC64 = false;
     }
-    lastStrobeState = strobeState;
 
     cyclesRun += elapsed;
   }
 
   if (frameCount % 10 === 0) {
     c64_print_screen();
-    console.log(`${(cyclesRun/strobeCount)>>0} RP2 cycles per C64 µs`);
+    console.log(`${(cyclesRun/c64TickCount)>>0} RP2 cycles per C64 µs`);
     console.log(`Motor: ${mcu.gpio[8].value}  LED: ${mcu.gpio[25].value}`);
   }
 
