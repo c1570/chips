@@ -256,73 +256,22 @@ void c1541_reset(c1541_t* sys) {
     m6522_reset(&sys->via_2);
 }
 
-// static uint16_t _1541_last_cpu_address = 0;
-// uint8_t last_via2_0_write = 0xff;
-// uint8_t last_via2_1_write = 0xff;
-// uint8_t last_via2_2_write = 0xff;
-// uint8_t last_via2_3_write = 0xff;
 void _c1541_write(c1541_t* sys, uint16_t addr, uint8_t data) {
-    char *area = "n/a";
-    bool illegal = false;
-//    bool changed = false;
-
-    if ((addr & 0xFC00) == 0x1800) {
-        area = "via1";
+    // UC7 decodes A15/A12/A11/A10 only
+    const uint uc7_input = (addr >> 8) & 0b10011100;
+    if (uc7_input == 0x18) {
+        // Write to VIA1
         _m6522_write(&sys->via_1, addr & 0xF, data);
-    } else if ((addr & 0xFC00) == 0x1C00) {
+    } else if (uc7_input == 0x1C) {
         // Write to VIA2
-        area = "via2";
-        if (addr == 0x1C00) {
+        if ((addr & 0xf) == 0) {
             sys->rotor_active = (data & VIA2_ROTOR) != 0;
             if (!sys->rotor_active) {
                 sys->rotor_nanoseconds_counter = 0;
             }
             sys->nanoseconds_per_bit = c1541_speedzone[data & 3];
-        }
-        // if ((addr & 0x0f) == 0 && (data != last_via2_0_write)) {
-        //     last_via2_0_write = data;
-        //     //changed = true;
-        // }
-        // if ((addr & 0x0f) == 1 && (data != last_via2_1_write)) {
-        //     last_via2_1_write = data;
-        //     //changed = true;
-        // }
-        // if ((addr & 0x0f) == 2 && (data != last_via2_2_write)) {
-        //     last_via2_2_write = data;
-        //     //changed = true;
-        // }
-        // if ((addr & 0x0f) == 3 && (data != last_via2_3_write)) {
-        //     last_via2_3_write = data;
-        //     //changed = true;
-        // }
-//	// FIXME: for debugging purpose only
-//        if (changed) {
-//            printf("%ld - 1541 - VIA2 Write $%04X = $%02X - CPU @ $%04X - Stepper=(%d%d[%d%d]) Rotor=(%d[%d]) LED=(%d[%d]) R/O=(%d[%d]) BitRate=(%d%d[%d%d]) Sync=(%d[%d])\n",
-//                get_world_tick(),
-//                addr,
-//                data,
-//                _1541_last_cpu_address,
-//                last_via2_0_write & (1<<1) ? 1 : 0,
-//                last_via2_0_write & (1<<0) ? 1 : 0,
-//                last_via2_2_write & (1<<1) ? 1 : 0,
-//                last_via2_2_write & (1<<0) ? 1 : 0,
-//                last_via2_0_write & (1<<2) ? 1 : 0,
-//                last_via2_2_write & (1<<2) ? 1 : 0,
-//                last_via2_0_write & (1<<3) ? 1 : 0,
-//                last_via2_2_write & (1<<3) ? 1 : 0,
-//                last_via2_0_write & (1<<4) ? 1 : 0,
-//                last_via2_2_write & (1<<4) ? 1 : 0,
-//                last_via2_0_write & (1<<6) ? 1 : 0,
-//                last_via2_0_write & (1<<5) ? 1 : 0,
-//                last_via2_2_write & (1<<6) ? 1 : 0,
-//                last_via2_2_write & (1<<5) ? 1 : 0,
-//                last_via2_0_write & (1<<7) ? 1 : 0,
-//                last_via2_2_write & (1<<7) ? 1 : 0
-//            );
-//        }
-        if((addr & 0xF) == 0) {
-            // $1c00 write
-            uint8_t changed_bits = sys->via_2.pb.outr ^ data;
+
+            uint changed_bits = sys->via_2.pb.outr ^ data;
             if(changed_bits & 0b1000) {
                 C1541_LED_CHANGED_HOOK(sys, !!(data & 0b1000));
             }
@@ -331,17 +280,12 @@ void _c1541_write(c1541_t* sys, uint16_t addr, uint8_t data) {
             }
         }
         _m6522_write(&sys->via_2, addr & 0xF, data);
-    } else if (addr < 0x0800) {
+    } else if (uc7_input <= (1<<2)) {
         // Write to RAM
-        // area = "ram";
         sys->ram[addr & 0x7FF] = data;
     } else {
         // Illegal access
-        area = "illegal";
-        illegal = true;
-    }
-    if (illegal) {
-        printf("1541-write illegal %s $%x $%x\n", area, addr, data);
+        printf("1541 illegal write of $%02x to $%04x at CPU PC %04x\n", data, addr, sys->cpu.PC);
     }
 }
 
@@ -392,25 +336,27 @@ uint64_t _c1541_tick_cpu(c1541_t *sys, const uint64_t input_pins) {
         // memory read
         bool valid_read = true;
         uint8_t read_data = 0;
-        if ((addr & 0xC000) == 0xC000) {
+        // UC7 decodes A15/A12/A11/A10 only
+        const uint uc7_input = (addr >> 8) & 0b10011100;
+        if (addr >= 0x8000) { // UC6
             // Read from ROM
             read_data = sys->rom[addr & 0x3FFF];
-        } else if ((addr & 0xFC00) == 0x1800) {
+        } else if (uc7_input == 0x18) {
             // Read from VIA1
             read_data = _m6522_read(&sys->via_1, addr & 0xF);
             //	    // FIXME: debugging purpose
             //            if (addr == 0x1800) {
             //                printf("%ld - 1541 - Read VIA1 $1800 = $%02X - CPU @ $%04X\n", get_world_tick(), read_data, _1541_last_cpu_address);
             //            }
-        } else if ((addr & 0xFC00) == 0x1C00) {
+        } else if (uc7_input == 0x1C) {
             // Read from VIA2
             read_data = _m6522_read(&sys->via_2, addr & 0xF);
-        } else if (addr < 0x0800) {
+        } else if (uc7_input <= (1<<2)) {
             // Read from RAM
             read_data = sys->ram[addr & 0x7FF];
         } else {
             // Illegal access
-            printf("Illegal read! $%04x\n", addr);
+            printf("Illegal read of $%04x at PC $%04x\n", addr, sys->cpu.PC);
             valid_read = false;
         }
         if (valid_read) {
