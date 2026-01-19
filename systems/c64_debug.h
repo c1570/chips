@@ -616,17 +616,27 @@ static void _c64_debug_out_processor_pc(c64_t* sys, uint64_t pins) {
     if (pins & M6502_SYNC) {
         uint16_t cpu_pc = m6502_pc(&sys->cpu);
         c64_rom_routine_t* in_c64_rom_routine = _get_c64_in_rom_routine(cpu_pc);
-        if (in_c64_rom_routine == NULL) {
-            return;
-        }
         uint16_t function_address = in_c64_rom_routine->address;
         uint16_t address_diff = cpu_pc - function_address;
         const char* function_name = in_c64_rom_routine->name;
+        if (in_c64_rom_routine == NULL) {
+            function_address = 0;
+            address_diff = 0;
+            function_name = "?";
+        } else {
+            function_address = in_c64_rom_routine->address;
+            address_diff = cpu_pc - function_address;
+            function_name = in_c64_rom_routine->name;
+        }
+
+/*
         char iec_status[5];
         char local_iec_status[5];
         iec_get_status_text(&sys->iec_bus, iec_status);
         iec_get_device_status_text(sys->iec_device, local_iec_status);
+*/
 
-        fprintf(sys->debug_file, "tick:%10ld\taddr:%04x\tsys:c64 \tbus-iec:%s\tlocal-iec:%s\tlabel:%s+%x\n", get_world_tick(), cpu_pc, iec_status, local_iec_status, function_name, address_diff);
+        printf("tick:%10ld\taddr:%04x\tsys:c64 \tbus-iec:%s\tlocal-iec:%s\tlabel:%s+%x\n", get_world_tick(), cpu_pc, iec_status, local_iec_status, function_name, address_diff);
+
     }
 }

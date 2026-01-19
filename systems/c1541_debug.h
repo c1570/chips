@@ -1114,34 +1114,42 @@ c1541_routine_t* _get_c1541_in_routine(uint16_t addr) {
     return (c1541_routine_t*) &c1541_routines[right];
 }
 
-static void _c1541_debug_out_processor_pc(uint tick, c1541_t* sys, uint64_t cpu_pins, uint64_t via1_pins) {
+static void _c1541_debug_out_processor_pc(uint tick, c1541_t* sys, uint64_t cpu_pins, uint64_t via1_pins, bool with_disass) {
     if (cpu_pins & M6502_SYNC) {
         uint16_t cpu_pc = m6502_pc(&sys->cpu);
         c1541_routine_t* in_c1541_routine = _get_c1541_in_routine(cpu_pc);
+        uint16_t function_address;
+        uint16_t address_diff;
+        const char* function_name;
         if (in_c1541_routine == NULL) {
-            return;
+            function_address = 0;
+            address_diff = 0;
+            function_name = "?";
+        } else {
+            function_address = in_c1541_routine->address;
+            address_diff = cpu_pc - function_address;
+            function_name = in_c1541_routine->name;
         }
-        uint16_t function_address = in_c1541_routine->address;
-        uint16_t address_diff = cpu_pc - function_address;
-        const char* function_name = in_c1541_routine->name;
 
+/*
         char iec_status[5];
         char local_iec_status[5];
         iec_get_status_text(sys->iec_bus, iec_status);
         iec_get_device_status_text(sys->iec_device, local_iec_status);
-
-        printf("tick:%10ld\taddr:%04x\tsys:c1541\tbus-iec:%s\tlocal-iec:%s\tlabel:%s+%x\n", tick, cpu_pc, iec_status, local_iec_status, function_name, address_diff);
-
-/*
-        if(cpu_pc==0xf4da) {
-          if ((cpu_pc & 0xC000) == 0xC000) { // ROM
-            _show_debug_trace('8', &sys->cpu, get_world_tick(),
-                              sys->rom[(cpu_pc+0) & 0x3FFF], sys->rom[(cpu_pc+1) & 0x3FFF], sys->rom[(cpu_pc+2) & 0x3FFF]);
-          } else if (cpu_pc < 0x0800) { // RAM
-            _show_debug_trace('8', &sys->cpu, get_world_tick(),
-                              sys->ram[(cpu_pc+0) & 0x07FF], sys->ram[(cpu_pc+1) & 0x07FF], sys->ram[(cpu_pc+2) & 0x07FF]);
-          }
-        }
 */
+        char* iec_status = "?";
+        char* local_iec_status = "?";
+
+        //printf("tick:%10ld\taddr:%04x\tsys:c1541\tbus-iec:%s\tlocal-iec:%s\tlabel:%s+%x\n", tick, cpu_pc, iec_status, local_iec_status, function_name, address_diff);
+
+        if (with_disass) {
+            if ((cpu_pc & 0xC000) == 0xC000) { // ROM
+                _show_debug_trace('8', &sys->cpu, get_world_tick(),
+                                  sys->rom[(cpu_pc+0) & 0x3FFF], sys->rom[(cpu_pc+1) & 0x3FFF], sys->rom[(cpu_pc+2) & 0x3FFF]);
+            } else if (cpu_pc < 0x0800) { // RAM
+                _show_debug_trace('8', &sys->cpu, get_world_tick(),
+                                  sys->ram[(cpu_pc+0) & 0x07FF], sys->ram[(cpu_pc+1) & 0x07FF], sys->ram[(cpu_pc+2) & 0x07FF]);
+            }
+        }
     }
 }

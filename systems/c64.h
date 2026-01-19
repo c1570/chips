@@ -616,9 +616,18 @@ static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
             }
         }
     }
+    #ifdef C64_ENABLE_DEBUG
+    static uint _c64_debug_ticks = 0;
+    #endif
     if (pins & M6502_SYNC) {
+        #ifdef C64_ENABLE_DEBUG
+        _show_debug_trace('C', &sys->cpu, _c64_debug_ticks, mem_rd(&sys->mem_cpu, addr), mem_rd(&sys->mem_cpu, addr+1), mem_rd(&sys->mem_cpu, addr+2));
+        #endif
         last_cpu_address = addr;
     }
+    #ifdef C64_ENABLE_DEBUG
+    _c64_debug_ticks++;
+    #endif
 
     // tick the SID
     {
@@ -814,6 +823,10 @@ static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
         sys->c1541_subtick += 101497; // 1.01497*985250kHz (C64 clock) = 999997kHz = ~1MHz (1541 clock)
         do {
             c1541_tick(&sys->c1541);
+            #ifdef C1541_ENABLE_DEBUG
+            static uint c1541_ticks = 0;
+            _c1541_debug_out_processor_pc(c1541_ticks++, &sys->c1541, sys->c1541.cpu.PINS, 0, 1);
+            #endif
             sys->c1541_subtick -= 100000;
         } while (sys->c1541_subtick > 100000);
     }
