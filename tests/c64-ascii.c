@@ -88,8 +88,67 @@ void set_keybuf(char* str) {
     for(uint i=0; i<c64.ram[198]; i++) { c64.ram[631+i]=str[i]; };
 }
 
+void update_screen(c64_t c64) {
+    int cur_color_pair = -1;
+    int bg = c64.vic.gunit.bg[0] & 0xF;
+    int bc = c64.vic.brd.bc & 0xF;
+    for (uint32_t yy = 0; yy < 25+2*BORDER_VERT; yy++) {
+        for (uint32_t xx = 0; xx < 40+2*BORDER_HORI; xx++) {
+            if ((xx < BORDER_HORI) || (xx >= 40+BORDER_HORI) ||
+                (yy < BORDER_VERT) || (yy >= 25+BORDER_VERT))
+            {
+                // border area
+                int color_pair = bc+1;
+                if (color_pair != cur_color_pair) {
+                    attron(COLOR_PAIR(color_pair));
+                    cur_color_pair = color_pair;
+                }
+                mvaddch(yy, xx*2, ' ');
+                mvaddch(yy, xx*2+1, ' ');
+            }
+            else {
+                // bitmap area (not border)
+                int x = xx - BORDER_HORI;
+                int y = yy - BORDER_VERT;
+
+                // get color byte (only lower 4 bits wired)
+                int fg = c64.color_ram[y*40+x] & 15;
+                int color_pair = (fg*16+bg)+1;
+                if (color_pair != cur_color_pair) {
+                    attron(COLOR_PAIR(color_pair));
+                    cur_color_pair = color_pair;
+                }
+
+                // get character index
+                uint16_t addr = 0x0400 + y*40 + x;
+                uint8_t font_code = mem_rd(&c64.mem_vic, addr);
+                char chr = font_map[font_code & 63];
+                // invert upper half of character set
+                if (font_code > 127) {
+                    attron(A_REVERSE);
+                }
+                // padding to get proper aspect ratio
+                mvaddch(yy, xx*2, ' ');
+                // character
+                mvaddch(yy, xx*2+1, chr);
+                // invert upper half of character set
+                if (font_code > 127) {
+                    attroff(A_REVERSE);
+                }
+            }
+        }
+    }
+    mvaddch(25+BORDER_VERT+3, 99, drive_led_status ? 'X' : '.');
+    mvaddch(25+BORDER_VERT+3, 97, drive_motor_status ? 'O' : '.');
+    char str_track[10];
+    sprintf(str_track, "%2.1f", ((float)drive_current_track+1)/2);
+    mvaddstr(25+BORDER_VERT+3, 92, str_track);
+    refresh();
+}
+
 int main(int argc, char* argv[]) {
     const char* disk_filename = NULL;
+    bool enable_curses = 1;
 
     // Parse command line arguments
     for (int i = 1; i < argc; i++) {
@@ -100,9 +159,12 @@ int main(int argc, char* argv[]) {
                 fprintf(stderr, "Error: %s requires a filename argument\n", argv[i]);
                 return 1;
             }
+        } else if (strcmp(argv[i], "-c") == 0) {
+            enable_curses = 0;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             printf("Usage: %s [-d|--disk FILENAME] [-h|--help]\n", argv[0]);
             printf("  -d, --disk FILENAME  Attach G64 disk image\n");
+            printf("  -c,                  Disable ncurses\n");
             printf("  -h, --help           Show this help message\n");
             return 0;
         } else {
@@ -136,14 +198,16 @@ int main(int argc, char* argv[]) {
     signal(SIGINT, catch_sigint);
 
     // setup curses
-    initscr();
-    init_c64_colors();
-    noecho();
-    curs_set(FALSE);
-    cbreak();
-    nodelay(stdscr, TRUE);
-    keypad(stdscr, TRUE);
-    attron(A_BOLD);
+    if (enable_curses) {
+        initscr();
+        init_c64_colors();
+        noecho();
+        curs_set(FALSE);
+        cbreak();
+        nodelay(stdscr, TRUE);
+        keypad(stdscr, TRUE);
+        attron(A_BOLD);
+    }
     uint c64_ticks = 0;
     uint keysim_state = 0;
 
@@ -185,66 +249,15 @@ int main(int argc, char* argv[]) {
                 c64_key_up(&c64, ch);
             }
         }
-        // render the PETSCII buffer
-        int cur_color_pair = -1;
-        int bg = c64.vic.gunit.bg[0] & 0xF;
-        int bc = c64.vic.brd.bc & 0xF;
-        for (uint32_t yy = 0; yy < 25+2*BORDER_VERT; yy++) {
-            for (uint32_t xx = 0; xx < 40+2*BORDER_HORI; xx++) {
-                if ((xx < BORDER_HORI) || (xx >= 40+BORDER_HORI) ||
-                    (yy < BORDER_VERT) || (yy >= 25+BORDER_VERT))
-                {
-                    // border area
-                    int color_pair = bc+1;
-                    if (color_pair != cur_color_pair) {
-                        attron(COLOR_PAIR(color_pair));
-                        cur_color_pair = color_pair;
-                    }
-                    mvaddch(yy, xx*2, ' ');
-                    mvaddch(yy, xx*2+1, ' ');
-                }
-                else {
-                    // bitmap area (not border)
-                    int x = xx - BORDER_HORI;
-                    int y = yy - BORDER_VERT;
-
-                    // get color byte (only lower 4 bits wired)
-                    int fg = c64.color_ram[y*40+x] & 15;
-                    int color_pair = (fg*16+bg)+1;
-                    if (color_pair != cur_color_pair) {
-                        attron(COLOR_PAIR(color_pair));
-                        cur_color_pair = color_pair;
-                    }
-
-                    // get character index
-                    uint16_t addr = 0x0400 + y*40 + x;
-                    uint8_t font_code = mem_rd(&c64.mem_vic, addr);
-                    char chr = font_map[font_code & 63];
-                    // invert upper half of character set
-                    if (font_code > 127) {
-                        attron(A_REVERSE);
-                    }
-                    // padding to get proper aspect ratio
-                    mvaddch(yy, xx*2, ' ');
-                    // character
-                    mvaddch(yy, xx*2+1, chr);
-                    // invert upper half of character set
-                    if (font_code > 127) {
-                        attroff(A_REVERSE);
-                    }
-                }
-            }
+        if (enable_curses) {
+            update_screen(c64);
         }
-        mvaddch(25+BORDER_VERT+3, 99, drive_led_status ? 'X' : '.');
-        mvaddch(25+BORDER_VERT+3, 97, drive_motor_status ? 'O' : '.');
-        char str_track[10];
-        sprintf(str_track, "%2.1f", ((float)drive_current_track+1)/2);
-        mvaddstr(25+BORDER_VERT+3, 92, str_track);
-        refresh();
 
         // pause until next frame
         //usleep(FRAME_USEC);
     }
-    endwin();
+    if (enable_curses) {
+        endwin();
+    }
     return 0;
 }
