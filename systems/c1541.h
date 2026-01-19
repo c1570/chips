@@ -449,11 +449,9 @@ uint8_t _c1541_tick_via2(c1541_t* sys) {
         bool motor_active = (sys->via_2.pins & M6522_PB2) != 0;
         bool sync_bits_present = ((sys->current_data + 1) & (1<<10)) != 0;
         bool is_sync = sync_bits_present && output_enable;
-//        bool drive_ready = (sys->ram[0x20] & 0x80) == 0;
-        bool drive_on = (sys->ram[0x20] & 0x30) == 0x20;
 
         // Motor active?
-        if (motor_active && drive_on) {
+        if (motor_active) {
             //// FIXME: for debugging purpose the countdown runs for 2 simulated seconds and terminates the program afterward
             //if (sys->exit_countdown == 0) {
             //    sys->exit_countdown = C1541_FREQUENCY << 1;
