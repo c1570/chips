@@ -158,6 +158,7 @@ function runEmulation() {
   if (frameCount % 10 === 0) {
     c64_print_screen();
     console.log(`${(cyclesRun/strobeCount)>>0} RP2 cycles per C64 µs`);
+    console.log(`Motor: ${mcu.gpio[8].value}  LED: ${mcu.gpio[25].value}`);
   }
 
   frameCount++;

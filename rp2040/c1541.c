@@ -2,6 +2,19 @@
 // Created by crazydee on 26.12.25.
 //
 
+#include "pico/stdlib.h"
+#include "hardware/gpio.h"
+
+// GPIO pin assignments
+#define IEC_PIN_DATA    2   // GPIO for DATA line
+#define IEC_PIN_CLK     3   // GPIO for CLK line
+#define IEC_PIN_ATN     4   // GPIO for ATN line
+#define IEC_PIN_SRQ     5   // GPIO for SRQIN line (input only, reserved for future)
+#define IEC_PIN_RESET   6   // GPIO for RESET line
+#define DEVICE_STROBE   7
+#define MOTOR_STATUS_PIN 8
+#define LED_PIN 25
+
 #define CHIPS_IMPL
 #include <time.h>
 #include <signal.h>
@@ -13,23 +26,17 @@
 #include "../chips/m6522.h"
 #include "../chips/clk.h"
 #include "../chips/mem.h"
+static bool drive_led_status = 0;
+static bool drive_motor_status = 1;
+static int drive_current_track = 0;
+#define C1541_TRACK_CHANGED_HOOK(s,v) drive_current_track=v
+#define C1541_MOTOR_CHANGED_HOOK(s,v) gpio_put(MOTOR_STATUS_PIN,v)
+#define C1541_LED_CHANGED_HOOK(s,v) gpio_put(LED_PIN,v)
 #include "../systems/c1541.h"
 #include "../systems/c1541_debug.h"
 #include "../tests/c1541-roms.h"
 
-// Pico SDK includes for GPIO
-#include "pico/stdlib.h"
-#include "hardware/gpio.h"
-
 #include <time.h>
-
-// IEC bus GPIO pin assignments
-#define IEC_PIN_DATA    2   // GPIO for DATA line
-#define IEC_PIN_CLK     3   // GPIO for CLK line
-#define IEC_PIN_ATN     4   // GPIO for ATN line
-#define IEC_PIN_SRQ     5   // GPIO for SRQIN line (input only, reserved for future)
-#define IEC_PIN_RESET   6   // GPIO for RESET line
-#define DEVICE_STROBE   7
 
 static struct {
     c1541_t c1541;
@@ -38,11 +45,6 @@ static struct {
 
 void cleanup(int signal) {
     state.keep_running = false;
-}
-
-void init_signals() {
-    signal(SIGINT, cleanup);
-    signal(SIGTERM, cleanup);
 }
 
 // Initialize GPIO pins for IEC bus open-collector operation
@@ -147,11 +149,6 @@ int main(int argc, char **argv) {
     floppy_desc.roms.e000_ffff.size = 8192;
     floppy_desc.iec_bus = NULL;
 
-    init_signals();
-
-    c1541_init(&state.c1541, &floppy_desc);
-    iecbus_device_t* host_iec = iec_connect(&state.c1541.iec_bus);
-
     uint tick = 0;
     uint ftick = 0;
     uint out_signals = 0;
@@ -161,6 +158,15 @@ int main(int argc, char **argv) {
     gpio_init(DEVICE_STROBE);
     gpio_set_dir(DEVICE_STROBE, 1); // output
     gpio_put(DEVICE_STROBE, 0);
+    gpio_init(MOTOR_STATUS_PIN);
+    gpio_set_dir(MOTOR_STATUS_PIN, 1); // output
+    gpio_put(MOTOR_STATUS_PIN, drive_motor_status);
+    gpio_init(LED_PIN);
+    gpio_set_dir(LED_PIN, 1); // output
+    gpio_put(LED_PIN, drive_led_status);
+
+    c1541_init(&state.c1541, &floppy_desc);
+    iecbus_device_t* host_iec = iec_connect(&state.c1541.iec_bus);
 
     do {
       // Read IEC incoming signals from GPIOs and update the IEC bus
