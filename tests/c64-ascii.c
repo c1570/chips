@@ -83,6 +83,11 @@ static void init_c64_colors(void) {
     }
 }
 
+void set_keybuf(char* str) {
+    c64.ram[198] = strlen(str);
+    for(uint i=0; i<c64.ram[198]; i++) { c64.ram[631+i]=str[i]; };
+}
+
 int main(int argc, char* argv[]) {
     const char* disk_filename = NULL;
 
@@ -139,11 +144,20 @@ int main(int argc, char* argv[]) {
     nodelay(stdscr, TRUE);
     keypad(stdscr, TRUE);
     attron(A_BOLD);
+    uint c64_ticks = 0;
+    uint keysim_state = 0;
 
     // run the emulation/input/render loop
     while (!quit_requested) {
         // tick the emulator for 1 frame
-        c64_exec(&c64, FRAME_USEC);
+        c64_ticks += c64_exec(&c64, FRAME_USEC);
+
+/*
+        if(c64_ticks > 150000 && keysim_state == 0) {
+            keysim_state++;
+            set_keybuf("L\x6f\"$\",8\r");
+        }
+*/
 
         // keyboard input
         int ch = getch();
@@ -228,7 +242,7 @@ int main(int argc, char* argv[]) {
         refresh();
 
         // pause until next frame
-        usleep(FRAME_USEC);
+        //usleep(FRAME_USEC);
     }
     endwin();
     return 0;

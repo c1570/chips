@@ -9,6 +9,8 @@ if [ ! -e c64-roms.h ]; then
 fi
 if [ ! -e c1541-roms.h ]; then
   wget https://raw.githubusercontent.com/floooh/chips-test/refs/heads/master/examples/roms/c1541-roms.h
+  # patch: skip RAM/ROM check
+  perl -i -pe 's/0x8a, 0x95, 0x00, 0xe8,/0x4c, 0x22, 0xeb, 0xe8,/gm' c1541-roms.h
 fi
 
 gcc -o c64-ascii c64-ascii.c -lncurses
