@@ -164,6 +164,7 @@ int main(int argc, char* argv[]) {
         if (ch != ERR) {
             switch (ch) {
                 case 10:  ch = 0x0D; break; // ENTER
+                case 263:
                 case 127: ch = 0x01; break; // BACKSPACE
                 case 27:  ch = 0x03; break; // ESCAPE
                 case 260: ch = 0x08; break; // LEFT
@@ -237,7 +238,7 @@ int main(int argc, char* argv[]) {
         mvaddch(25+BORDER_VERT+3, 99, drive_led_status ? 'X' : '.');
         mvaddch(25+BORDER_VERT+3, 97, drive_motor_status ? 'O' : '.');
         char str_track[10];
-        sprintf(str_track, "%2.1f", ((float)drive_current_track)/2);
+        sprintf(str_track, "%2.1f", ((float)drive_current_track+1)/2);
         mvaddstr(25+BORDER_VERT+3, 92, str_track);
         refresh();
 
