@@ -2,6 +2,14 @@
 
 ## Building
 
+For the ASCII debug version:
+
+1. `git clone https://github.com/c1570/chips`
+2. `cd chips/tests`
+3. `./run_pc_version.sh -d DISKIMAGE.D64`
+
+For the Sokol GUI version:
+
 1. `mkdir fips-workspace && cd fips-workspace`
 2. `git clone https://github.com/floooh/chips-test`
 3. `cd chips-test && git checkout 5bd6333 && curl -o fips.yml https://raw.githubusercontent.com/c1570/chips/refs/heads/c1541/chips-test-fips.yml`
@@ -13,7 +21,7 @@
 * [Ultimate Commodore 1541 Drive Talk](https://www.youtube.com/watch?v=_1jXExwse08)
 * [Hardware-Aufbau der 1541](https://www.c64-wiki.de/wiki/Hardware-Aufbau_der_1541)
 * [Gate Array](/docs/PN325572.png)
-* [ROM disassembly](https://g3sl.github.io/c1541rom.html)
+* [ROM disassembly](https://g3sl.github.io/c1541rom.html) note this is for 901229-01, chips uses 901229-05 or 06
 * [G64 documentation](http://www.unusedino.de/ec64/technical/formats/g64.html)
 * Denise source code: [mechanics.cpp](https://bitbucket.org/piciji/denise/src/master/emulation/libc64/disk/drive/mechanics.cpp) - see via2.ca1In and cpu.triggerSO - and [opcodes.cpp](https://bitbucket.org/piciji/denise/src/master/emulation/libc64/disk/cpu/opcodes.cpp) - see soBlock
 * [AAY1541](http://unusedino.de/ec64/technical/aay/c1541/index.htm) - see [VIA registers](http://unusedino.de/ec64/technical/aay/c1541/viamain.htm)
@@ -23,10 +31,10 @@
 
 1. DONE: Get drive CPU to reset and run to idle ($ec12..$ec2d)
 2. DONE: Connect drive and host (reading error channel from BASIC should return `73, CBM DOS V2.6 1541, 0, 0`)
-3. Read directory from GCR data (i.e., keep passing [track 18 GCR data](/docs/1541_test_demo_track18gcr.h) to VIA, handle SYNC and SO CPU line, needs m6502.h changes, see Denise source)
-4. Read full disk from G64 image (implement stepper motor)
-5. Read full disk from D64 image (on the fly encoding from D64 to GCR, see [nibtools](https://github.com/rittwage/nibtools/) fileio.c/gcr.c for conversion code)
-6. Write support (on the fly encoding from GCR to D64. Again, see nibtools)
+3. DONE: Read directory from GCR data (i.e., keep passing [track 18 GCR data](/docs/1541_test_demo_track18gcr.h) to VIA, handle SYNC and SO CPU line, needs m6502.h changes, see Denise source)
+4. DONE: Read full disk from G64 image (implement stepper motor)
+5. DONE: Read full disk from D64 image (on the fly encoding from D64 to GCR, see [nibtools](https://github.com/rittwage/nibtools/) fileio.c/gcr.c for conversion code)
+6. RP2 variant, disk write, speeder compatibility (e.g., Transwarp doesn't work)
 
 # chips
 
