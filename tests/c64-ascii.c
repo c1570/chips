@@ -30,7 +30,11 @@ static int drive_current_track = 0;
 #define C1541_TRACK_CHANGED_HOOK(s,v) drive_current_track=v
 #define C1541_MOTOR_CHANGED_HOOK(s,v) drive_motor_status=v
 #define C1541_LED_CHANGED_HOOK(s,v) drive_led_status=v
+//#define C64_ENABLE_DEBUG
+//#define C1541_ENABLE_DEBUG
 #include "../systems/c1541.h"
+#include "../systems/disass.h"
+#include "../systems/c1541_debug.h"
 #include "../systems/c64.h"
 #include "c64-roms.h"
 #include "c1541-roms.h"
@@ -88,10 +92,10 @@ void set_keybuf(char* str) {
     for(uint i=0; i<c64.ram[198]; i++) { c64.ram[631+i]=str[i]; };
 }
 
-void update_screen(c64_t c64) {
+void update_screen(c64_t* c64) {
     int cur_color_pair = -1;
-    int bg = c64.vic.gunit.bg[0] & 0xF;
-    int bc = c64.vic.brd.bc & 0xF;
+    int bg = c64->vic.gunit.bg[0] & 0xF;
+    int bc = c64->vic.brd.bc & 0xF;
     for (uint32_t yy = 0; yy < 25+2*BORDER_VERT; yy++) {
         for (uint32_t xx = 0; xx < 40+2*BORDER_HORI; xx++) {
             if ((xx < BORDER_HORI) || (xx >= 40+BORDER_HORI) ||
@@ -112,7 +116,7 @@ void update_screen(c64_t c64) {
                 int y = yy - BORDER_VERT;
 
                 // get color byte (only lower 4 bits wired)
-                int fg = c64.color_ram[y*40+x] & 15;
+                int fg = c64->color_ram[y*40+x] & 15;
                 int color_pair = (fg*16+bg)+1;
                 if (color_pair != cur_color_pair) {
                     attron(COLOR_PAIR(color_pair));
@@ -121,7 +125,7 @@ void update_screen(c64_t c64) {
 
                 // get character index
                 uint16_t addr = 0x0400 + y*40 + x;
-                uint8_t font_code = mem_rd(&c64.mem_vic, addr);
+                uint8_t font_code = mem_rd(&c64->mem_vic, addr);
                 char chr = font_map[font_code & 63];
                 // invert upper half of character set
                 if (font_code > 127) {
@@ -250,7 +254,7 @@ int main(int argc, char* argv[]) {
             }
         }
         if (enable_curses) {
-            update_screen(c64);
+            update_screen(&c64);
         }
 
         // pause until next frame
@@ -259,5 +263,6 @@ int main(int argc, char* argv[]) {
     if (enable_curses) {
         endwin();
     }
+    printf("Stopped at tick %d\n", c64_ticks);
     return 0;
 }
