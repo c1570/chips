@@ -93,7 +93,7 @@ EVENTS = {
 }
 
 
-def extract_pc_cycle(line: str) -> Tuple[Optional[str], int]:
+def extract_pc_cycle(line: str) -> Tuple[Optional[str], str]:
     """
     Extract program counter address from a canonical format line.
 
@@ -111,14 +111,14 @@ def extract_pc_cycle(line: str) -> Tuple[Optional[str], int]:
     if not re.match(r'^[0-9A-F]{4}$', addr):
         return None, 0
 
-    cycle = int(parts[-1][4:]) if parts[-1].startswith("CYC:") else 0
+    cycle = parts[-1][4:] if parts[-1].startswith("CYC:") else "0"
 
     return addr, cycle
 
 
 class StashEntry:
     """Represents a stash context with collected formatted events."""
-    def __init__(self, enter_event: str, start_line: int, cycle: int, matching_leave: str):
+    def __init__(self, enter_event: str, start_line: int, cycle: str, matching_leave: str):
         self.enter_event = enter_event
         self.start_line = start_line
         self.cycle = cycle

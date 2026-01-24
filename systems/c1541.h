@@ -285,7 +285,9 @@ void _c1541_write(c1541_t* sys, uint16_t addr, uint8_t data) {
         sys->ram[addr & 0x7FF] = data;
     } else {
         // Illegal access
+        #ifdef C1541_ENABLE_DEBUG
         printf("1541 illegal write of $%02x to $%04x at CPU PC %04x\n", data, addr, sys->cpu.PC);
+        #endif
     }
 }
 
@@ -357,7 +359,9 @@ uint64_t _c1541_tick_cpu(c1541_t *sys, const uint64_t input_pins) {
             read_data = sys->ram[addr & 0x7FF];
         } else {
             // Illegal access
+            #ifdef C1541_ENABLE_DEBUG
             printf("Illegal read of $%04x at PC $%04x\n", addr, sys->cpu.PC);
+            #endif
             valid_read = false;
         }
         if (valid_read) {

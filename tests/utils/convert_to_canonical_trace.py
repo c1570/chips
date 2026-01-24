@@ -24,7 +24,7 @@ class Instruction:
     x: int              # X register (0-255)
     y: int              # Y register (0-255)
     sp: int             # Stack pointer (0-255)
-    cycle: int          # Cycle count
+    cycle: str          # Cycle count
 
 
 def parse_rp2_line(line: str) -> Optional[Instruction]:
@@ -92,8 +92,8 @@ def parse_rp2_line(line: str) -> Optional[Instruction]:
             sp = int(part[3:], 16)
         elif re.match(r'^[\.\-NVCBIDZ]{8}$', part):
             pass  # Flags ignored
-        elif part.isdigit():
-            cycle = int(part)
+        elif part.replace('.','',1).isdigit():
+            cycle = part
 
     return Instruction(
         addr=addr,

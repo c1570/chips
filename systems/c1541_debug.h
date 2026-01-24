@@ -1114,7 +1114,7 @@ c1541_routine_t* _get_c1541_in_routine(uint16_t addr) {
     return (c1541_routine_t*) &c1541_routines[right];
 }
 
-static void _c1541_debug_out_processor_pc(uint tick, c1541_t* sys, uint64_t cpu_pins, uint64_t via1_pins, bool with_disass) {
+static void _c1541_debug_out_processor_pc(float microseconds, c1541_t* sys, uint64_t cpu_pins, uint64_t via1_pins, bool with_disass) {
     if (cpu_pins & M6502_SYNC) {
         uint16_t cpu_pc = m6502_pc(&sys->cpu);
         c1541_routine_t* in_c1541_routine = _get_c1541_in_routine(cpu_pc);
@@ -1144,11 +1144,13 @@ static void _c1541_debug_out_processor_pc(uint tick, c1541_t* sys, uint64_t cpu_
 
         if (with_disass) {
             if ((cpu_pc & 0xC000) == 0xC000) { // ROM
-                _show_debug_trace('8', &sys->cpu, get_world_tick(),
+                _show_debug_trace('8', &sys->cpu, microseconds,
                                   sys->rom[(cpu_pc+0) & 0x3FFF], sys->rom[(cpu_pc+1) & 0x3FFF], sys->rom[(cpu_pc+2) & 0x3FFF]);
             } else if (cpu_pc < 0x0800) { // RAM
-                _show_debug_trace('8', &sys->cpu, get_world_tick(),
+                _show_debug_trace('8', &sys->cpu, microseconds,
                                   sys->ram[(cpu_pc+0) & 0x07FF], sys->ram[(cpu_pc+1) & 0x07FF], sys->ram[(cpu_pc+2) & 0x07FF]);
+            } else {
+                printf("illegal drive PC: $%04x\n", cpu_pc);
             }
         }
     }

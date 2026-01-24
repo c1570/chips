@@ -272,7 +272,7 @@ static const char* opcode_list[] = {
     /* fe */  "%1$02X %2$02X %3$02X    INC $%3$02X%2$02X,X   ",
     /* ff */  "%1$02X %2$02X %3$02X    ISB $%3$02X%2$02X,X   "
 };
-static void _show_debug_trace(char device, m6502_t *cpu, uint cur_tick, uint8_t a, uint8_t b, uint8_t c) {
+static void _show_debug_trace(char device, m6502_t *cpu, float timestamp, uint8_t a, uint8_t b, uint8_t c) {
   // .C:08a9  CD 12 D0    CMP $D012     A:6f X:1b Y:00 SP:f6 ..-..I..      6795806
   char flags[] = "NV-.DIZC";
   for(int i = 0; i < 8; i++) {
@@ -285,5 +285,5 @@ static void _show_debug_trace(char device, m6502_t *cpu, uint cur_tick, uint8_t 
   sprintf(debug_opc_decoded,
           ".%c:%04x  %s A:%02x X:%02x Y:%02x SP:%02x %s",
           device, cpu->PC, opc_decoded, cpu->A, cpu->X, cpu->Y, cpu->S, flags);
-  printf("%s   %10d\n", debug_opc_decoded, cur_tick);
+  printf("%s   %10.3f\n", debug_opc_decoded, timestamp);
 }

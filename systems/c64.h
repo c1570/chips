@@ -385,8 +385,9 @@ typedef struct {
 
     c1530_t c1530;      // optional datassette
     c1541_t c1541;      // optional floppy drive
-    uint c1541_subtick; // 1541 clock frequency correction
 
+    float c64_microseconds;
+    float c1541_microseconds;
 } c64_t;
 
 // initialize a new C64 instance
@@ -566,8 +567,8 @@ static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
 #endif
     // tick the CPU
     pins = m6502_tick(&sys->cpu, pins);
+    sys->c64_microseconds += 1.0f/0.985248f;
     const uint16_t addr = M6502_GET_ADDR(pins);
-    const uint8_t iec_lines = iec_get_signals(sys->iec_bus);
 
     // those pins are set each tick by the CIAs and VIC
     pins &= ~(M6502_IRQ|M6502_NMI|M6502_RDY|M6510_AEC);
@@ -621,7 +622,7 @@ static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
     #endif
     if (pins & M6502_SYNC) {
         #ifdef C64_ENABLE_DEBUG
-        _show_debug_trace('C', &sys->cpu, _c64_debug_ticks, mem_rd(&sys->mem_cpu, addr), mem_rd(&sys->mem_cpu, addr+1), mem_rd(&sys->mem_cpu, addr+2));
+        _show_debug_trace('C', &sys->cpu, sys->c64_microseconds, mem_rd(&sys->mem_cpu, addr), mem_rd(&sys->mem_cpu, addr+1), mem_rd(&sys->mem_cpu, addr+2));
         #endif
         last_cpu_address = addr;
     }
@@ -665,6 +666,7 @@ static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
         const uint8_t pa = ~(sys->kbd_joy2_mask|sys->joy_joy2_mask);
         const uint8_t pb = ~(kbd_scan_columns(&sys->kbd) | sys->kbd_joy1_mask | sys->joy_joy1_mask);
         M6526_SET_PAB(cia1_pins, pa, pb);
+        const uint8_t iec_lines = iec_get_signals(sys->iec_bus);
         if (sys->cas_port & C64_CASPORT_READ || IEC_SRQIN_ACTIVE(iec_lines)) {
             cia1_pins |= M6526_FLAG;
         }
@@ -704,21 +706,62 @@ static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
         CIA-2 IRQ pin connected to CPU NMI pin
     */
     {
-        // handle IEC communication
-        uint8_t cia2_pa = M6526_GET_PA(sys->cia_2.pins);
-        uint8_t cia2_pb = M6526_GET_PB(sys->cia_2.pins);
+        // handle IEC communication and C1541 synchronization
 
-        // clear CLK and DATA pins
+        void _c1541_tick() {
+            c1541_tick(&sys->c1541);
+            sys->c1541_microseconds += 1;
+            #ifdef C1541_ENABLE_DEBUG
+            _c1541_debug_out_processor_pc(sys->c1541_microseconds, &sys->c1541, sys->c1541.cpu.PINS, 0, 1);
+            #endif
+        }
+
+        if (sys->c1541.valid) {
+            if((cia2_pins & M6526_CS) && ((cia2_pins & M6526_RS) == 0)) {
+                // C64 read/write of IEC status ($DD00). Need to sync with drive.
+                // CIA/VIA writes to the bus are visible earlier than reads sample the bus.
+                if (cia2_pins & M6526_RW) {
+                    // CIA reads IEC: advance drive emulation up to (current CPU time - 450ns)
+                    while ((sys->c1541_microseconds + 1) < (sys->c64_microseconds - 0.45)) {
+                        _c1541_tick(&sys->c1541);
+                    }
+                } else {
+                    // CIA writes IEC: advance drive emulation up to (current CPU time + 450ns)
+                    while ((sys->c1541_microseconds + 1) < (sys->c64_microseconds + 0.45)) {
+                        _c1541_tick(&sys->c1541);
+                    }
+                }
+            } else {
+                // don't let the C1541 fall back too much anyways.
+                while ((sys->c1541_microseconds + 10) < sys->c64_microseconds) {
+                    _c1541_tick(&sys->c1541);
+                }
+            }
+
+            if(sys->c1541_microseconds > 1000) {
+                // avoid overflow
+                sys->c64_microseconds -= 950;
+                sys->c1541_microseconds -= 950;
+            }
+        }
+
+        const uint8_t iec_lines = iec_get_signals(sys->iec_bus);
+        uint8_t cia2_pa = (~(sys->cia_2.pa.ddr)) | sys->cia_2.pa.reg;
         cia2_pa &= ~(3 << 6);
         if (!IEC_CLK_ACTIVE(iec_lines)) {
             cia2_pa |= 1 << 6;
         }
         if (!IEC_DATA_ACTIVE(iec_lines)) {
-            cia2_pa |= 1<< 7;
+            cia2_pa |= 1 << 7;
         }
 
+        const uint8_t cia2_pb = (~(sys->cia_2.pb.ddr)) | sys->cia_2.pb.reg; // nothing on the userport
+
         M6526_SET_PAB(cia2_pins, cia2_pa, cia2_pb);
+
+        // Tick! Reads IEC line status into CIA2 registers.
         cia2_pins = m6526_tick(&sys->cia_2, cia2_pins);
+
         sys->vic_bank_select = ((~M6526_GET_PA(cia2_pins))&3)<<14;
         if (cia2_pins & M6502_IRQ) {
             pins |= M6502_NMI;
@@ -726,13 +769,9 @@ static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
         if (cia2_pins & M6526_CS) {
             if (cia2_pins & M6526_RW) {
                 pins = M6502_COPY_DATA(pins, cia2_pins);
-            } else {
-                if (addr == 0xdd00) {
-                    // write
-                    uint8_t write_data = M6502_GET_DATA(cia2_pins);
-//                    printf("%ld - c64 - Write CIA2 $DD00 = $%02X - CPU @ $%04X\n", get_world_tick(), write_data, last_cpu_address);
-                }
+                //if ((addr & 0xf) < 4) { printf("%ld - c64 - Read CIA2 $%04x = $%02X - CPU @ $%04X\n", get_world_tick(), addr, M6502_GET_DATA(cia2_pins), last_cpu_address); }
             }
+            //else if ((addr & 0xf) < 4) { printf("%ld - c64 - Write CIA2 $%04x = $%02X - CPU @ $%04X\n", get_world_tick(), addr, M6502_GET_DATA(cia2_pins), last_cpu_address); }
         }
         {
             cia2_pa = M6526_GET_PA(cia2_pins);
@@ -800,36 +839,20 @@ static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
             // memory read
             uint8_t read_data = mem_rd(&sys->mem_cpu, addr);
             M6502_SET_DATA(pins, read_data);
-            // FIXME: for debugging purpose only
-            if (addr == 0xdd00) {
-                printf("%ld - c64 - Read CIA2 $DD00 = $%02X - CPU @ $%04X\n", get_world_tick(), read_data, last_cpu_address);
-            }
         }
         else {
             // memory write
             uint8_t write_data = M6502_GET_DATA(pins);
             mem_wr(&sys->mem_cpu, addr, write_data);
-            // FIXME: for debugging purpose only
-            if (addr == 0xdd00) {
-                printf("%ld - c64 - Write CIA2 $DD00 = $%02X - CPU @ $%04X\n", get_world_tick(), write_data, last_cpu_address);
-            }
         }
     }
 
     if (sys->c1530.valid) {
         c1530_tick(&sys->c1530);
     }
-    if (sys->c1541.valid) {
-        sys->c1541_subtick += 101497; // 1.01497*985250kHz (C64 clock) = 999997kHz = ~1MHz (1541 clock)
-        do {
-            c1541_tick(&sys->c1541);
-            #ifdef C1541_ENABLE_DEBUG
-            static uint c1541_ticks = 0;
-            _c1541_debug_out_processor_pc(c1541_ticks++, &sys->c1541, sys->c1541.cpu.PINS, 0, 1);
-            #endif
-            sys->c1541_subtick -= 100000;
-        } while (sys->c1541_subtick > 100000);
-    }
+
+    // C1541 gets ticked in CIA2 tick
+
     return pins;
 }
 
