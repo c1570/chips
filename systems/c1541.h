@@ -139,7 +139,7 @@ typedef struct {
     uint16_t current_data;
     uint8_t output_data;
     uint8_t output_bit_counter;
-    bool byte_ready;
+    int byte_ready_countdown;
     uint32_t exit_countdown;
     uint8_t half_track;
 
@@ -310,7 +310,8 @@ uint64_t _c1541_tick_cpu(c1541_t *sys, const uint64_t input_pins) {
     const bool is_cpu_sync = (input_pins & M6502_SYNC);
 
     // s0 pin high workaround for injecting OV flag to the cpu on a new instruction
-    if (is_cpu_sync && sys->byte_ready && (sys->via_2.pins & M6522_CA2)) {
+    if (is_cpu_sync && (sys->byte_ready_countdown == 0) && (sys->via_2.pins & M6522_CA2)) {
+        sys->byte_ready_countdown--;
         m6502_set_p(&sys->cpu, m6502_p(&sys->cpu)|M6502_VF);
     }
 
@@ -449,6 +450,7 @@ uint8_t _c1541_tick_via2(c1541_t* sys) {
         bool motor_active = (sys->via_2.pins & M6522_PB2) != 0;
         bool sync_bits_present = ((sys->current_data + 1) & (1<<10)) != 0;
         bool is_sync = sync_bits_present && output_enable;
+        bool latch_data = false;
 
         // Motor active?
         if (motor_active) {
@@ -461,9 +463,6 @@ uint8_t _c1541_tick_via2(c1541_t* sys) {
             if (sys->rotor_nanoseconds_counter >= sys->nanoseconds_per_bit) {
                 sys->rotor_nanoseconds_counter -= sys->nanoseconds_per_bit;
                 
-                // we are going to read new bits, so deactivate byte_ready
-                sys->byte_ready = false;
-
                 // shift in next gcr bit
                 sys->current_data <<= 1;
                 sys->current_data &= (1<<10)-1;
@@ -494,23 +493,24 @@ uint8_t _c1541_tick_via2(c1541_t* sys) {
                     sys->output_bit_counter++;
                     if (sys->output_bit_counter > 7) {
                         sys->output_bit_counter = 0;
-                        sys->byte_ready = true;
+                        sys->byte_ready_countdown = 2;
+                        latch_data = true;
                     }
                 }
             }
-        } else {
-            sys->byte_ready = false;
         }
 
         pins &= ~M6522_PB7;
         if (!is_sync) {
             pins |= M6522_PB7;
-        } else {
-            sys->byte_ready = false;
+        }
+
+        if(sys->byte_ready_countdown > 0) {
+            sys->byte_ready_countdown--;
         }
 
         pins &= ~M6522_CA1;
-        if (sys->byte_ready) {
+        if (latch_data) {
             sys->output_data = sys->current_data & 0xff;
             if (output_enable) {
                 pins |= M6522_CA1;
