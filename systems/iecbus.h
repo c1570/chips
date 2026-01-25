@@ -61,23 +61,23 @@ extern "C" {
 #define IECLINE_ATN   (1<<2)
 #define IECLINE_SRQIN (1<<3)
 #define IECLINE_RESET (1<<4)
+#define IECLINE_ATNA  (1<<5)
 
 #define IEC_DATA_ACTIVE(a) (!((a)&IECLINE_DATA))
 #define IEC_CLK_ACTIVE(a) (!((a)&IECLINE_CLK))
 #define IEC_ATN_ACTIVE(a) (!((a)&IECLINE_ATN))
 #define IEC_SRQIN_ACTIVE(a) (!((a)&IECLINE_SRQIN))
 #define IEC_RESET_ACTIVE(a) (!((a)&IECLINE_RESET))
+#define IEC_ATNA_ACTIVE(a) (!!((a)&IECLINE_ATNA))
 
-#define IEC_ALL_LINES   (IECLINE_RESET|IECLINE_SRQIN|IECLINE_DATA|IECLINE_CLK|IECLINE_ATN)
+#define IEC_ALL_LINES   (IECLINE_ATNA|IECLINE_RESET|IECLINE_SRQIN|IECLINE_DATA|IECLINE_CLK|IECLINE_ATN)
 
 #define IEC_BUS_MAX_DEVICES 4
 
 typedef struct {
     // Each connected device pulls on its own end of the lines
     uint8_t signals;
-    // // for debug purposes
-    // uint8_t last_signals;
-    // ...
+    bool have_atna_logic;
     uint8_t id;
 } iecbus_device_t;
 
@@ -90,7 +90,7 @@ typedef struct {
 } iecbus_t;
 
 // Attach device to virtual IEC bus
-iecbus_device_t* iec_connect(iecbus_t** iec_bus);
+iecbus_device_t* iec_connect(iecbus_t** iec_bus, bool have_atna_logic);
 // Remove device from virtual IEC bus
 void iec_disconnect(iecbus_t* iec_bus, iecbus_device_t* iec_device);
 // Get total bus line status (active low)
@@ -122,7 +122,7 @@ void clear_master_tick(iecbus_t *iec_bus) {
     iec_bus->master_tick = 0;
 }
 
-iecbus_device_t* iec_connect(iecbus_t** iec_bus) {
+iecbus_device_t* iec_connect(iecbus_t** iec_bus, bool have_atna_logic) {
     uint8_t i = 0;
     iecbus_device_t* bus_device = NULL;
     iecbus_t *bus = NULL;
@@ -160,6 +160,7 @@ iecbus_device_t* iec_connect(iecbus_t** iec_bus) {
             // Initialize lines as inactive/high
             bus_device->signals = IEC_ALL_LINES;
             bus_device->id = i;
+            bus_device->have_atna_logic = have_atna_logic;
         }
     }
 
@@ -200,6 +201,19 @@ uint8_t iec_get_signals(iecbus_t* iec_bus) {
         if (iec_bus->usage_map & (1<<i)) {
             // Active/low device signals pull down lines on the bus
             signals &= iec_bus->devices[i].signals;
+        }
+    }
+    if (IEC_DATA_ACTIVE(signals)) {
+        // no need to check ATNA logic if DATA is already active
+        return signals;
+    }
+    for (uint i = 0; i < IEC_BUS_MAX_DEVICES; i++) {
+        if (iec_bus->usage_map & (1<<i)) {
+            if (iec_bus->devices[i].have_atna_logic) {
+                if (IEC_ATN_ACTIVE(signals) ^ IEC_ATNA_ACTIVE(iec_bus->devices[i].signals)) {
+                    signals &= ~IECLINE_DATA;
+                }
+            }
         }
     }
     return signals;

@@ -516,7 +516,7 @@ void c64_init(c64_t* sys, const c64_desc_t* desc) {
     });
     _c64_init_key_map(sys);
     _c64_init_memory_map(sys);
-    sys->iec_device = iec_connect(&sys->iec_bus);
+    sys->iec_device = iec_connect(&sys->iec_bus, false);
     CHIPS_ASSERT(sys->iec_device);
     if (desc->c1530_enabled) {
         c1530_init(&sys->c1530, &(c1530_desc_t){

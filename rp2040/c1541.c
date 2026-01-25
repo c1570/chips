@@ -71,12 +71,10 @@ uint8_t read_iec_signals(void) {
     uint8_t signals = 0xFF;  // Start with all inactive (high)
 
     // GPIO reads return 1 when HIGH (inactive), 0 when LOW (active)
-    // IEC bus is active-low, so we need to invert the logic
     if (!gpio_get(IEC_PIN_ATN))   signals &= ~IECLINE_ATN;
     if (!gpio_get(IEC_PIN_DATA))  signals &= ~IECLINE_DATA;
     if (!gpio_get(IEC_PIN_CLK))   signals &= ~IECLINE_CLK;
     if (!gpio_get(IEC_PIN_RESET)) signals &= ~IECLINE_RESET;
-    // SRQIN read-only for now (input only, never driven by 1541)
     if (!gpio_get(IEC_PIN_SRQ))   signals &= ~IECLINE_SRQIN;
 
     return signals;
@@ -115,7 +113,7 @@ void write_iec_signals(uint8_t signals) {
         gpio_set_dir(IEC_PIN_RESET, GPIO_OUT);// Pull low (active)
     }
 
-    // SRQIN - never driven by 1541, always input (read-only)
+    // always input for now
     gpio_set_dir(IEC_PIN_SRQ, GPIO_IN);
 }
 
@@ -162,7 +160,7 @@ int main(int argc, char **argv) {
     gpio_put(LED_PIN, drive_led_status);
 
     c1541_init(&state.c1541, &floppy_desc);
-    iecbus_device_t* host_iec = iec_connect(&state.c1541.iec_bus);
+    iecbus_device_t* host_iec = iec_connect(&state.c1541.iec_bus, false);
 
     do {
       // Read IEC incoming signals from GPIOs and update the IEC bus

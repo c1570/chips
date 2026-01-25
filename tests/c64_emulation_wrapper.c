@@ -45,7 +45,7 @@ void c64_emulation_init() {
     });
 
     // Connect C64 as an IEC device (same pattern as rp2040/c1541.c)
-    host_iec = iec_connect(&c64.iec_bus);
+    host_iec = iec_connect(&c64.iec_bus, false);
     initialized = true;
 }
 

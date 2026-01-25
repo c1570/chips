@@ -237,7 +237,7 @@ void c1541_init(c1541_t* sys, const c1541_desc_t* desc) {
     }
 
     // this will create an iec_bus instance if we don't have one yet
-    sys->iec_device = iec_connect(&sys->iec_bus);
+    sys->iec_device = iec_connect(&sys->iec_bus, true);
     CHIPS_ASSERT(sys->iec_device);
 }
 
@@ -406,6 +406,7 @@ uint8_t _c1541_tick_via1(c1541_t* sys) {
     if (IEC_DATA_ACTIVE(iec_lines)) {
         pins |= M6522_PB0; // DATA IN
     }
+    // note ATNA logic (activates DATA dependent on ATN and PB4) gets handled by iecbus.h
 
     // 3. Tick VIA1
     #ifdef PICO
@@ -423,12 +424,9 @@ uint8_t _c1541_tick_via1(c1541_t* sys) {
     }
     if (pins & M6522_PB1) {
         out_signals &= ~IECLINE_DATA;
-    } else {
-        // ATNA logic (UD3) may set DATA out, too
-        if (XOR(IEC_ATN_ACTIVE(iec_lines), pins & M6522_PB4)) {
-            // printf("ATNA activates DATA ATN(%d) ATNA(%d)\n", !!(iec_lines & IECLINE_ATN), !!(pins & M6522_PB4));
-            out_signals &= ~IECLINE_DATA;
-        }
+    }
+    if (!(pins & M6522_PB4)) {
+        out_signals &= ~IECLINE_ATNA;
     }
     iec_set_signals(sys->iec_bus, sys->iec_device, out_signals);
 
