@@ -142,11 +142,14 @@ void update_screen(c64_t* c64) {
             }
         }
     }
+    attron(A_REVERSE);
+    attron(COLOR_PAIR(231*16));
     mvaddch(25+BORDER_VERT+3, 99, drive_led_status ? 'X' : '.');
     mvaddch(25+BORDER_VERT+3, 97, drive_motor_status ? 'O' : '.');
     char str_track[10];
     sprintf(str_track, "%2.1f", ((float)drive_current_track+1)/2);
     mvaddstr(25+BORDER_VERT+3, 92, str_track);
+    attroff(A_REVERSE);
     refresh();
 }
 
@@ -220,12 +223,12 @@ int main(int argc, char* argv[]) {
         // tick the emulator for 1 frame
         c64_ticks += c64_exec(&c64, FRAME_USEC);
 
-/*
+        #ifdef PRGDEBUG
         if(c64_ticks > 150000 && keysim_state == 0) {
             keysim_state++;
-            set_keybuf("L\x6f\"$\",8\r");
+            set_keybuf("L\x6f\"*\",8,1\r");
         }
-*/
+        #endif
 
         // keyboard input
         int ch = getch();
@@ -259,6 +262,9 @@ int main(int argc, char* argv[]) {
 
         // pause until next frame
         //usleep(FRAME_USEC);
+        #ifdef PRGDEBUG
+        if(c64_ticks>9000000) quit_requested = 1;
+        #endif
     }
     if (enable_curses) {
         endwin();
