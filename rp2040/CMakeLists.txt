@@ -1,8 +1,8 @@
 # RP2040 Commodore 1541 Floppy Drive Emulator
-cmake_minimum_required(VERSION 3.13)
+cmake_minimum_required(VERSION 3.12)
 
-# Initialize the SDK directly from local path
-include($ENV{HOME}/pico-sdk/pico_sdk_init.cmake)
+include(pico_sdk_import.cmake)
+include(pico_extras_import_optional.cmake)
 
 project(c1541_rp2040 C CXX ASM)
 
