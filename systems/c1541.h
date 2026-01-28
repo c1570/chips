@@ -68,11 +68,6 @@ extern "C" {
 #define C1541_TRACK_CHANGED_HOOK(s,v)
 #endif
 
-// Convert full track number (1-42) to half-track number (1, 3, 5, ...)
-static inline uint8_t c1541_full_track_to_half_track(uint8_t full_track) {
-    return (full_track << 1) - 1; // 1 -> 1, 2 -> 3, 3 -> 5, ...
-}
-
 #define VIA2_STEPPER_LO_BIT_POS  0
 #define VIA2_STEPPER_HI_BIT_POS  1
 #define VIA2_ROTOR_BIT_POS       2
@@ -140,12 +135,16 @@ typedef struct {
     uint8_t output_data;
     uint8_t output_bit_counter;
     int byte_ready_countdown;
-    uint32_t exit_countdown;
-    uint8_t half_track;
+
+    uint8_t half_track;          // Track 1 = 0b10=2, Track 1.5 = 0b11=3, Track 2 = 0b100=4, ...
+    uint8_t stepper_position;    // 0..3
+    uint8_t coil_dir;            // 0..1
 
     char disk_filename[256];
     bool disk_loaded;
     uint8_t disk_type;  // 0=none, 1=G64, 2=D64
+
+    uint32_t exit_countdown;
 } c1541_t;
 
 // initialize a new c1541_t instance
@@ -186,8 +185,6 @@ const uint32_t c1541_speedzone[] = { 4000, 3750, 3500, 3250 }; // nanoseconds pe
 void c1541_init(c1541_t* sys, const c1541_desc_t* desc) {
     CHIPS_ASSERT(sys && desc);
 
-    uint8_t initial_full_track = 1;
-
     memset(sys, 0, sizeof(c1541_t));
     sys->valid = true;
     // Initialize as empty drive
@@ -200,10 +197,11 @@ void c1541_init(c1541_t* sys, const c1541_desc_t* desc) {
     sys->gcr_bit_pos = 0;
     sys->current_byte = 0;
     sys->current_bit_pos = 0;
-    sys->nanoseconds_per_bit = c1541_speedzone[1];
     sys->rotor_nanoseconds_counter = 0;
     sys->rotor_active = 1;
-    sys->half_track = c1541_full_track_to_half_track(initial_full_track);
+    const uint8_t initial_full_track = 18;
+    sys->nanoseconds_per_bit = c1541_speedzone[2];
+    sys->half_track = initial_full_track * 2;
 
     // copy ROM images
     CHIPS_ASSERT(desc->roms.c000_dfff.ptr && (0x2000 == desc->roms.c000_dfff.size));
@@ -549,23 +547,51 @@ uint8_t _c1541_tick_via2(c1541_t* sys) {
         //     pins |= M6502_IRQ;
         // }
         // bool drive_stepping = (sys->ram[0x20] & 0x60) == 0x60;
-        int stepper_position = (pins >> M6522_PIN_PB0) & 3;
-        static int last_position = 0;
-        if (last_position != stepper_position) {
-            if ((stepper_position - last_position) == -1 || (stepper_position + 4 - last_position) == -1) {
-                if (sys->half_track > 1) {
-                    sys->half_track--;
-                }
-                //printf("Moving inward, track: %g\n", ((float)sys->half_track + 1) / 2);
-            } else {
-                if (sys->half_track < 42 * 2) {
+
+        // code from PiCiJi/Denise
+        bool updateStepper(uint8_t step) {
+            if (step == 1) {
+                if (sys->half_track < ((MAX_TRACKS_1541 * 2) - 1)) {
                     sys->half_track++;
+                    sys->coil_dir = 1;
+                    return true;
                 }
-                //printf("Moving outward, track: %g\n", ((float)sys->half_track + 1) / 2);
+                sys->coil_dir = 0;
+            } else if (step == 3) {
+                if (sys->half_track > 0) {
+                    sys->half_track--;
+                    sys->coil_dir = 0;
+                   return true;
+                }
+                sys->coil_dir = 1;
+            } else if (step == 2) {
+                // Primitive 7 Sins uses this method
+                if (sys->coil_dir) {
+                    if (sys->half_track & 1) {
+                        if (updateStepper(1))
+                            return updateStepper(1);
+                    }
+                } else {
+                    if ((sys->half_track & 1) == 0) {
+                        if (updateStepper(3))
+                            return updateStepper(3);
+                    }
+                }
             }
-            C1541_TRACK_CHANGED_HOOK(sys, sys->half_track);
-            c1541_fetch_track(sys); //TODO do this in background/only after the head settled
-            last_position = stepper_position;
+            return false;
+        }
+
+        if (sys->rotor_active) {
+            // TODO if stepper has settled...
+            const uint8_t new_stepper_position = (((pins >> M6522_PIN_PB0) & 3) - (sys->half_track & 3)) & 3;
+            if (new_stepper_position != 0) {
+                updateStepper(new_stepper_position);
+                C1541_TRACK_CHANGED_HOOK(sys, sys->half_track);
+                c1541_fetch_track(sys); //TODO do this in background/only after the head settled
+                sys->gcr_byte_pos = 0;
+                sys->gcr_bit_pos = 0;
+                sys->stepper_position = new_stepper_position;
+            }
         }
     }
 #ifdef PICO
@@ -660,6 +686,7 @@ bool c1541_attach_disk(c1541_t* sys, const char* filename) {
     strncpy(sys->disk_filename, filename, sizeof(sys->disk_filename) - 1);
     sys->disk_filename[sizeof(sys->disk_filename) - 1] = '\0';
     sys->disk_loaded = true;
+    c1541_fetch_track(sys);
 
     printf("c1541: attached disk image: %s (%s)\n", filename,
            is_d64 ? "D64" : "G64");
@@ -678,13 +705,13 @@ bool c1541_fetch_track(c1541_t* sys) {
     // D64 handling: convert sectors to GCR on-demand
     if (sys->disk_type == 2) {
         // Get full track number from half-track
-        uint8_t full_track = (sys->half_track + 1) / 2;
+        uint8_t full_track = sys->half_track >> 1;
         if (full_track < 1 || full_track > MAX_TRACKS_1541) {
             return false;
         }
 
         // Only process odd half-tracks (actual tracks)
-        if (sys->half_track % 2 == 0) {
+        if (sys->half_track % 2 == 1) {
             // Even half-tracks have no data in D64
             sys->gcr_size = 0;
             sys->gcr_bytes[0] = 0;
@@ -753,7 +780,7 @@ bool c1541_fetch_track(c1541_t* sys) {
         return true;
     }
 
-    // G64 handling (existing code)
+    // G64 handling
     FILE* fp = fopen(sys->disk_filename, "rb");
     if (!fp) {
         return false;
@@ -774,7 +801,7 @@ bool c1541_fetch_track(c1541_t* sys) {
 
     // Read track offset for this half-track
     uint32_t track_offset;
-    if (fseek(fp, 0xc + (sys->half_track - 1) * 4, SEEK_SET) != 0) {
+    if (fseek(fp, 0xc + (sys->half_track - 2) * 4, SEEK_SET) != 0) {
         fclose(fp);
         return false;
     }
