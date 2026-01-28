@@ -267,7 +267,8 @@ void _c1541_write(c1541_t* sys, uint16_t addr, uint8_t data) {
             if (!sys->rotor_active) {
                 sys->rotor_nanoseconds_counter = 0;
             }
-            sys->nanoseconds_per_bit = c1541_speedzone[data & 3];
+
+            sys->nanoseconds_per_bit = c1541_speedzone[(data >> 5) & 3];
 
             uint changed_bits = sys->via_2.pb.outr ^ data;
             if(changed_bits & 0b1000) {
