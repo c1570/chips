@@ -32,6 +32,7 @@ static int drive_current_track = 0;
 #define C1541_TRACK_CHANGED_HOOK(s,v) {cycle_info("track");drive_current_track=v;}
 #define C1541_MOTOR_CHANGED_HOOK(s,v) gpio_put(MOTOR_STATUS_PIN,v)
 #define C1541_LED_CHANGED_HOOK(s,v) {cycle_info("led");gpio_put(LED_PIN,v);}
+#include "iecbus_rp2.h"
 #include "../systems/c1541.h"
 #include "../tests/c1541-roms.h"
 
@@ -164,14 +165,13 @@ int main(int argc, char **argv) {
 
     do {
       // Read IEC incoming signals from GPIOs and update the IEC bus
-      uint8_t gpio_signals = read_iec_signals();
-      iec_set_signals(state.c1541.iec_bus, host_iec, gpio_signals);
+      iec_set_from_host_signals(read_iec_signals());
       c1541_tick(&state.c1541);
       //if((tick&0xfffff)==0) printf("%d %d %04x\n", tick, state.c1541.iec_bus->master_tick, state.c1541.cpu.PC);
       tick++;
 
       const uint in_new_signals = iec_get_signals(state.c1541.iec_bus);
-      const uint out_new_signals = state.c1541.iec_device->signals;
+      const uint out_new_signals = iec_get_drive_out_signals();
       if((out_new_signals != out_signals) || (in_new_signals != in_signals)) {
         out_signals = out_new_signals;
         in_signals = in_new_signals;
