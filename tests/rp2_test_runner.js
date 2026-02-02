@@ -7,8 +7,9 @@
 
 const RP_MHZ = 125;
 
-import { RP2040, GPIOPinState } from './rp2040js/dist/esm/index.js';
+import { RP2040, RP2350, GPIOPinState } from './rp2040js/dist/esm/index.js';
 import { bootromB1 } from './rp2040js/demo/bootrom.js';
+// import { bootrom_rp2350_A2 } from './rp2040js/demo/bootrom_rp2350.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
@@ -36,6 +37,7 @@ function loadUF2(filename, rp2040) {
 const FIRMWARE_PATH = `${__dirname}/../rp2040/build/c1541.uf2`;
 const C64_LIB_PATH = `${__dirname}/libc64_emulation.so`;
 const INITIAL_PC = 0x10000000;
+// const INITIAL_PC = 0x10000036; // rp2350
 
 // IEC GPIO pins on RP2040
 const IEC_GPIO_DATA   = 2;
@@ -66,10 +68,10 @@ const c64_print_screen = lib.func('void c64_print_screen()');
 console.log('Initializing C64 emulator...');
 c64_init();
 
-// Initialize RP2040
-console.log('Initializing RP2040...');
-const mcu = new RP2040();
-mcu.loadBootrom(bootromB1);
+// Initialize RP2
+console.log('Initializing RP2...');
+const mcu = new RP2040(); // new RP2350();
+mcu.loadBootrom(bootromB1 /* bootrom_rp2350_A2 */);
 
 let doTickC64 = false;
 
@@ -109,6 +111,8 @@ mcu.uart[0].onByte = (value) => {
 
 // Set initial PC
 mcu.core0.PC = INITIAL_PC;
+// mcu.core0.pc = INITIAL_PC; // rp2350
+// mcu.core1.pc = INITIAL_PC;
 
 // GPIO tracking for IEC signals
 let lastIecState = 0xFF;
