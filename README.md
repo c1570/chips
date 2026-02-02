@@ -34,7 +34,8 @@ For the Sokol GUI version:
 3. DONE: Read directory from GCR data (i.e., keep passing [track 18 GCR data](/docs/1541_test_demo_track18gcr.h) to VIA, handle SYNC and SO CPU line, needs m6502.h changes, see Denise source)
 4. DONE: Read full disk from G64 image (implement stepper motor)
 5. DONE: Read full disk from D64 image (on the fly encoding from D64 to GCR, see [nibtools](https://github.com/rittwage/nibtools/) fileio.c/gcr.c for conversion code)
-6. RP2 variant, disk write, speeder compatibility (e.g., Transwarp doesn't work)
+6. DONE: Transwarp compatibility
+7. RP2 variant, disk write
 
 # chips
 

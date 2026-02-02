@@ -390,24 +390,6 @@ uint8_t _c1541_tick_via1(c1541_t* sys) {
 #endif
     uint64_t pins = sys->via_1.pins;
 
-    // 1. "Tick" the IEC bus (reflects back active outputs).
-    uint8_t iec_lines = iec_get_signals(sys->iec_bus);
-
-    // 2. Write IEC signals to VIA inputs.
-    pins &= ~(M6522_PB0 | M6522_PB2 | M6522_PB7 | M6522_CA1);
-    if (IEC_ATN_ACTIVE(iec_lines)) {
-        pins |= M6522_PB7; // ATN IN
-        pins |= M6522_CA1;
-    }
-    if (IEC_CLK_ACTIVE(iec_lines)) {
-        pins |= M6522_PB2; // CLK IN
-    }
-    if (IEC_DATA_ACTIVE(iec_lines)) {
-        pins |= M6522_PB0; // DATA IN
-    }
-    // note ATNA logic (activates DATA dependent on ATN and PB4) gets handled by iecbus.h
-
-    // 3. Tick VIA1
     #ifdef PICO
     uint32_t chip_tick = get_ticks();
     pins = m6522_tick(&sys->via_1, pins);
@@ -415,19 +397,6 @@ uint8_t _c1541_tick_via1(c1541_t* sys) {
     #else
     pins = m6522_tick(&sys->via_1, pins);
     #endif
-
-    // 4. Write VIA outputs to IEC bus.
-    uint8_t out_signals = ~0;
-    if (pins & M6522_PB3) {
-        out_signals &= ~IECLINE_CLK;
-    }
-    if (pins & M6522_PB1) {
-        out_signals &= ~IECLINE_DATA;
-    }
-    if (!(pins & M6522_PB4)) {
-        out_signals &= ~IECLINE_ATNA;
-    }
-    iec_set_signals(sys->iec_bus, sys->iec_device, out_signals);
 
 #ifdef PICO
     ticks_via1 = get_elapsed_ticks(tick);
@@ -601,16 +570,54 @@ uint8_t _c1541_tick_via2(c1541_t* sys) {
     return 0 != (pins & M6522_IRQ);
 }
 
+void _c1541_update_via_1_from_iec(c1541_t *sys) {
+    uint64_t pins = sys->via_1.pins;
+    uint8_t iec_lines = iec_get_signals(sys->iec_bus);
+    pins &= ~(M6522_PB0 | M6522_PB2 | M6522_PB7 | M6522_CA1);
+    if (IEC_ATN_ACTIVE(iec_lines)) {
+        pins |= M6522_PB7; // ATN IN
+        pins |= M6522_CA1;
+    }
+    if (IEC_CLK_ACTIVE(iec_lines)) {
+        pins |= M6522_PB2; // CLK IN
+    }
+    if (IEC_DATA_ACTIVE(iec_lines)) {
+        pins |= M6522_PB0; // DATA IN
+    }
+    // note ATNA logic (activates DATA dependent on ATN and PB4) gets handled by iecbus.h
+
+    sys->via_1.pb.pins = M6522_GET_PB(pins);
+    sys->via_1.pins = pins;
+}
+
+void _c1541_update_iec_from_via_1(c1541_t* sys) {
+    uint8_t out_signals = ~0;
+    const uint64_t pins = sys->via_1.pins;
+    if (pins & M6522_PB3) {
+        out_signals &= ~IECLINE_CLK;
+    }
+    if (pins & M6522_PB1) {
+        out_signals &= ~IECLINE_DATA;
+    }
+    if (!(pins & M6522_PB4)) {
+        out_signals &= ~IECLINE_ATNA;
+    }
+    iec_set_signals(sys->iec_bus, sys->iec_device, out_signals);
+}
+
 uint64_t _c1541_tick(c1541_t* sys, const uint64_t input_pins) {
     uint64_t pins = 0;
     const uint64_t via_pin_mask = M6502_PIN_MASK;
 
+    _c1541_update_via_1_from_iec(sys);       // mostly updates via_1.pb.pins here for C1541 CPU tick TODO CHECK CA1 picked up one cycle late?
     pins = _c1541_tick_cpu(sys, input_pins); // VIA1/2 reg reads/writes are handled here, too
     pins &= ~(M6502_IRQ);
 
+    _c1541_update_via_1_from_iec(sys);
     if (_c1541_tick_via1(sys)) {
         pins |= M6502_IRQ;
     }
+    _c1541_update_iec_from_via_1(sys);
 
     if (_c1541_tick_via2(sys)) {
         pins |= M6502_IRQ;
