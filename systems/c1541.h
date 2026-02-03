@@ -701,6 +701,7 @@ bool c1541_attach_disk(c1541_t* sys, const char* filename) {
     return true;
 }
 
+#ifndef IS_RP2
 bool c1541_fetch_track(c1541_t* sys) {
     CHIPS_ASSERT(sys && sys->valid);
 
@@ -857,6 +858,23 @@ bool c1541_fetch_track(c1541_t* sys) {
 
     return true;
 }
+#endif
+
+#ifdef IS_RP2
+#include "../docs/1541_test_demo.h"
+bool c1541_fetch_track(c1541_t* sys) {
+    const uint8_t* gcr_data = (const uint8_t*) gcr_1541_test_demo_g64;
+    const uint32_t half_track_data_offset = ((uint32_t *)(gcr_data + 0xc))[sys->half_track];
+    if(!half_track_data_offset) return false;
+    const uint32_t data_size = ((uint32_t)gcr_data[half_track_data_offset+0]) + ((uint32_t)gcr_data[half_track_data_offset+1] << 8);
+    for (uint16_t i=0; i < data_size; i++) {
+        sys->gcr_bytes[i] = gcr_data[half_track_data_offset+2+i];
+    }
+    sys->gcr_bytes[data_size] = 0; // mark track done, protection against memory garbage
+    sys->gcr_size = data_size;
+    return true;
+}
+#endif
 
 void c1541_remove_disc(c1541_t* sys) {
     CHIPS_ASSERT(sys && sys->valid);

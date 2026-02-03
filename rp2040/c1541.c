@@ -16,6 +16,7 @@
 #define LED_PIN 25
 
 #define CHIPS_IMPL
+#define IS_RP2
 #include <time.h>
 #include <signal.h>
 #include <unistd.h>

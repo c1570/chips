@@ -66,6 +66,9 @@ void c64_emulation_tick() {
     if(c64_tick_count == 150000) {
       set_keybuf("L\x6f\"$\",8\r");
     }
+    if(c64_tick_count == 4300000) {
+      set_keybuf("LIST\r");
+    }
 }
 
 // Get current C64 video buffer pointers and colors (for display)
