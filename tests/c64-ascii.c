@@ -243,6 +243,10 @@ int main(int argc, char* argv[]) {
                 case 261: ch = 0x09; break; // RIGHT
                 case 259: ch = 0x0B; break; // UP
                 case 258: ch = 0x0A; break; // DOWN
+                case 265: ch = C64_KEY_F1; break;
+                case 267: ch = C64_KEY_F3; break;
+                case 269: ch = C64_KEY_F5; break;
+                case 271: ch = C64_KEY_F7; break;
             }
             if (ch > 32) {
                 if (islower(ch)) {
