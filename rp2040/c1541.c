@@ -7,13 +7,25 @@
 #include "cycle_tracing.h"
 
 // GPIO pin assignments
-#define IEC_PIN_DATA    2   // GPIO for DATA line
-#define IEC_PIN_CLK     3   // GPIO for CLK line
-#define IEC_PIN_ATN     4   // GPIO for ATN line
-#define IEC_PIN_SRQ     5   // GPIO for SRQIN line (input only, reserved for future)
-#define IEC_PIN_RESET   6   // GPIO for RESET line
-#define MOTOR_STATUS_PIN 8
-#define LED_PIN 25
+#define IEC_PIN_ATN      2
+#define IEC_PIN_CLK      3
+#define IEC_PIN_DATA     4
+#define IEC_PIN_SRQ      29
+// If using a 7406, those above are IN (inverted by 74LVC04 optionally)
+#define IEC_PIN_RESET    5
+// If using a 7406, those below are OUT (and get inverted)
+#define IEC_PIN_CLK_OUT  6
+#define IEC_PIN_DATA_OUT 7
+#define IEC_PIN_SRQ_OUT  28
+
+#define DISPLAY_RESET    26
+#define DISPLAY_SDA      15
+#define DISPLAY_SCL      14
+#define DISPLAY_DC       27
+
+#define DISK_CHANGE_PIN  8
+#define MOTOR_STATUS_PIN 24
+#define LED_PIN          25
 
 #define CHIPS_IMPL
 #define IS_RP2

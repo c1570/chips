@@ -39,12 +39,16 @@ const C64_LIB_PATH = `${__dirname}/libc64_emulation.so`;
 const INITIAL_PC = 0x10000000;
 // const INITIAL_PC = 0x10000036; // rp2350
 
-// IEC GPIO pins on RP2040
-const IEC_GPIO_DATA   = 2;
+// IEC GPIO pins on RP2
+const IEC_GPIO_ATN    = 2;
 const IEC_GPIO_CLK    = 3;
-const IEC_GPIO_ATN    = 4;
-const IEC_GPIO_SRQ    = 5;
-const IEC_GPIO_RESET  = 6;
+const IEC_GPIO_DATA   = 4;
+const IEC_GPIO_RESET  = 5;
+const IEC_GPIO_SRQ    = 29;
+
+const RP2_DISK_CHANGE_PIN  = 8;
+const RP2_MOTOR_STATUS_PIN = 24;
+const RP2_LED_PIN          = 25;
 
 // IEC line definitions (must match iecbus.h)
 const IECLINE_DATA  = 1 << 0;
@@ -178,7 +182,7 @@ function runEmulation() {
   if (frameCount % 10 === 0) {
     c64_print_screen();
     console.log(`${(cyclesRun/c64TickCount)>>0} RP2 cycles per C64 µs`);
-    console.log(`Motor: ${mcu.gpio[8].value}  LED: ${mcu.gpio[25].value}`);
+    console.log(`Motor: ${mcu.gpio[RP2_MOTOR_STATUS_PIN].value}  LED: ${mcu.gpio[RP2_LED_PIN].value}`);
   }
 
   frameCount++;
