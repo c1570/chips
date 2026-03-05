@@ -35,7 +35,7 @@ static int drive_current_halftrack;
 #include "../systems/c1541.h"
 #include "../systems/disass.h"
 #include "../systems/c1541_debug.h"
-#include "../systems/c64.h"
+#include "c64_system_novic.h"
 #include "c64-roms.h"
 #include "c1541-roms.h"
 
