@@ -43,7 +43,8 @@ static c64_t c64;
 
 // Logging state
 static uint64_t start_cycle = 0;  // Cycle at which to start logging (0 = disabled)
-static uint64_t current_cycle = 0; // Current CPU cycle counter
+static uint64_t end_cycle = 0;    // Cycle at which to stop emulation (0 = disabled)
+uint c64_ticks = 0; // Current CPU cycle counter
 static bool logging_enabled = false; // Whether logging is currently enabled
 
 // PRG injection state
@@ -55,9 +56,7 @@ static bool load_prg_file(c64_t* sys, const char* filename);
 
 // Debug callback for cycle-accurate logging
 static void debug_callback(void* user_data, uint64_t pins) {
-    current_cycle++;
-
-    if (!logging_enabled && start_cycle > 0 && current_cycle >= start_cycle) {
+    if (!logging_enabled && start_cycle > 0 && c64_cycles >= start_cycle) {
         logging_enabled = true;
     }
 
@@ -199,7 +198,7 @@ static void log_cycle(c64_t* sys, uint64_t pins) {
 
     // Print the log line
     printf("Cycle %lu: PC=$%04X A=$%02X X=$%02X Y=$%02X IR=%02x.%d BUS: addr=$%04X data=$%02X %c FLAGS: SYNC=%d RDY=%d IRQ=%d NMI=%d VIC: cycle=%d line=%d\n",
-           (unsigned long)current_cycle,
+           (unsigned long)c64_cycles,
            sys->cpu.PC,
            sys->cpu.A,
            sys->cpu.X,
@@ -319,19 +318,27 @@ int main(int argc, char* argv[]) {
                 fprintf(stderr, "Error: %s requires a cycle number argument\n", argv[i]);
                 return 1;
             }
+        } else if (strcmp(argv[i], "-e") == 0) {
+            if (i + 1 < argc) {
+                end_cycle = atoi(argv[++i]);
+            } else {
+                fprintf(stderr, "Error: %s requires a cycle number argument\n", argv[i]);
+                return 1;
+            }
         } else if (strcmp(argv[i], "-c") == 0) {
             enable_curses = 0;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            printf("Usage: %s [-d|--disk FILENAME] [-p|--prg FILENAME] [-s CYCLE] [-c] [-h|--help]\n", argv[0]);
+            printf("Usage: %s [-d|--disk FILENAME] [-p|--prg FILENAME] [-s CYCLE] [-e CYCLE] [-c] [-h|--help]\n", argv[0]);
             printf("  -d, --disk FILENAME  Attach G64 disk image\n");
             printf("  -p, --prg FILENAME   Inject .prg file into memory\n");
             printf("  -s CYCLE             Start logging at CPU cycle CYCLE\n");
+            printf("  -e CYCLE             Stop emulation at CPU cycle CYCLE\n");
             printf("  -c                   Disable ncurses\n");
             printf("  -h, --help           Show this help message\n");
             return 0;
         } else {
             fprintf(stderr, "Error: Unknown option '%s'\n", argv[i]);
-            fprintf(stderr, "Usage: %s [-d|--disk FILENAME] [-p|--prg FILENAME] [-s CYCLE] [-c] [-h|--help]\n", argv[0]);
+            fprintf(stderr, "Usage: %s [-d|--disk FILENAME] [-p|--prg FILENAME] [-s CYCLE] [-e CYCLE] [-c] [-h|--help]\n", argv[0]);
             return 1;
         }
     }
@@ -380,11 +387,16 @@ int main(int argc, char* argv[]) {
         keypad(stdscr, TRUE);
         attron(A_BOLD);
     }
-    uint c64_ticks = 0;
     uint keysim_state = 0;
 
     // run the emulation/input/render loop
     while (!quit_requested) {
+        // Check if we've reached the end cycle
+        if (end_cycle > 0 && c64_ticks >= end_cycle) {
+            quit_requested = 1;
+            break;
+        }
+
         // tick the emulator for 1 frame
         c64_ticks += c64_exec(&c64, FRAME_USEC);
 

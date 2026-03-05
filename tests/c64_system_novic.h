@@ -388,6 +388,10 @@ typedef struct {
 
     float c64_microseconds;
     float c1541_microseconds;
+
+    // VIC-II raster IRQ state
+    bool raster_irq_triggered;  // True when raster IRQ condition has been met
+    bool raster_irq_active;     // True when IRQ is pending (not yet cleared by $D019 write)
 } c64_t;
 
 // initialize a new C64 instance
@@ -471,6 +475,8 @@ void c64_init(c64_t* sys, const c64_desc_t* desc) {
     sys->valid = true;
     sys->joystick_type = desc->joystick_type;
     sys->debug = desc->debug;
+    sys->raster_irq_triggered = false;
+    sys->raster_irq_active = false;
     sys->audio.callback = desc->audio.callback;
     sys->audio.num_samples = _C64_DEFAULT(desc->audio.num_samples, C64_DEFAULT_AUDIO_SAMPLES);
     CHIPS_ASSERT(sys->audio.num_samples <= C64_MAX_AUDIO_SAMPLES);
@@ -558,7 +564,11 @@ void c64_reset(c64_t* sys) {
     m6526_reset(&sys->cia_2);
     m6569_reset(&sys->vic);
     m6581_reset(&sys->sid);
+    sys->raster_irq_triggered = false;
+    sys->raster_irq_active = false;
 }
+
+uint64_t c64_cycles = 0;
 
 static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
     static uint16_t last_cpu_address = 0;
@@ -566,6 +576,7 @@ static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
     _c64_debug_out_processor_pc(sys, pins);
 #endif
     // tick the CPU
+    c64_cycles++;
     pins = m6502_tick(&sys->cpu, pins);
     sys->c64_microseconds += 1.0f/0.985248f;
     const uint16_t addr = M6502_GET_ADDR(pins);
@@ -815,8 +826,41 @@ static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
         vic_pins = m6569_tick(&sys->vic, vic_pins);
         // DISABLED, IRQ/RDY/AEC are generated in main file for testing
         // pins |= (vic_pins & (M6502_IRQ|M6502_RDY|M6510_AEC));
+
+        // DMA emulation: pull RDY low during VIC-II memory access cycles
+        const int vic_line = sys->vic.rs.v_count;
+        const int vic_cycle = sys->vic.rs.h_count;
+        const bool is_badline = (vic_line >= 55 && vic_line <= 247 &&
+                                 ((vic_line - 55) % 8) == 0);
+        const bool badline_dma = (is_badline && vic_cycle >= 11 && vic_cycle <= 53);
+        const bool sprite_dma = (vic_line >= 57 && vic_line <= 78 && vic_cycle >= 2 && vic_cycle <= 5);
+        const bool any_dma = badline_dma || sprite_dma;
+        if (any_dma) {
+            pins |= M6502_RDY;
+        } else {
+            pins &= ~M6502_RDY;
+        }
+
+        // Raster IRQ emulation: trigger IRQ at line 73, cycle 9 (only after cycle 515472
+        if (vic_line == 73 && vic_cycle == 8 && !sys->raster_irq_triggered && c64_cycles >= 515472) {
+            sys->raster_irq_triggered = true;
+            sys->raster_irq_active = true;
+        }
+        // Set CPU IRQ pin if raster IRQ is active
+        if (sys->raster_irq_active) {
+            pins |= M6502_IRQ;
+        }
+
         if ((vic_pins & (M6569_CS|M6569_RW)) == (M6569_CS|M6569_RW)) {
             pins = M6502_COPY_DATA(pins, vic_pins);
+        }
+        // Handle VIC-II register writes
+        if ((vic_pins & M6569_CS) && !(vic_pins & M6569_RW)) {
+            if (addr == 0xd019) {  // VIC-II interrupt status register
+                // Writing to $D019 clears the raster IRQ
+                sys->raster_irq_active = false;
+                sys->raster_irq_triggered = false;
+            }
         }
     }
 
