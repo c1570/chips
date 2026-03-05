@@ -46,8 +46,12 @@ static uint64_t start_cycle = 0;  // Cycle at which to start logging (0 = disabl
 static uint64_t current_cycle = 0; // Current CPU cycle counter
 static bool logging_enabled = false; // Whether logging is currently enabled
 
+// PRG injection state
+static char* prg_filename = NULL; // .prg file to inject
+
 // Forward declarations
 static void log_cycle(c64_t* sys, uint64_t pins);
+static bool load_prg_file(c64_t* sys, const char* filename);
 
 // Debug callback for cycle-accurate logging
 static void debug_callback(void* user_data, uint64_t pins) {
@@ -213,6 +217,81 @@ static void log_cycle(c64_t* sys, uint64_t pins) {
            vic_line);
 }
 
+// Load a .prg file into C64 memory
+static bool load_prg_file(c64_t* sys, const char* filename) {
+    FILE* f = fopen(filename, "rb");
+    if (!f) {
+        fprintf(stderr, "Error: Cannot open .prg file: %s\n", filename);
+        return false;
+    }
+
+    // Get file size
+    fseek(f, 0, SEEK_END);
+    long file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    if (file_size < 2) {
+        fprintf(stderr, "Error: .prg file too small (must contain at least load address)\n");
+        fclose(f);
+        return false;
+    }
+
+    // Read load address (lo/hi format)
+    uint8_t addr_lo, addr_hi;
+    if (fread(&addr_lo, 1, 1, f) != 1 || fread(&addr_hi, 1, 1, f) != 1) {
+        fprintf(stderr, "Error: Failed to read load address from .prg file\n");
+        fclose(f);
+        return false;
+    }
+
+    uint16_t load_addr = addr_lo | (addr_hi << 8);
+    size_t data_size = file_size - 2;
+
+    // Read program data
+    uint8_t* buffer = malloc(data_size);
+    if (!buffer) {
+        fprintf(stderr, "Error: Memory allocation failed\n");
+        fclose(f);
+        return false;
+    }
+
+    if (fread(buffer, 1, data_size, f) != data_size) {
+        fprintf(stderr, "Error: Failed to read program data from .prg file\n");
+        free(buffer);
+        fclose(f);
+        return false;
+    }
+
+    fclose(f);
+
+    // Load into C64 memory
+    if (load_addr + data_size > 0x10000) {
+        fprintf(stderr, "Error: Program data exceeds C64 memory bounds\n");
+        free(buffer);
+        return false;
+    }
+
+    for (size_t i = 0; i < data_size; i++) {
+        sys->ram[load_addr + i] = buffer[i];
+    }
+
+    printf("Injected .prg file: %s\n", filename);
+    printf("  Load address: $%04X\n", load_addr);
+    printf("  Data size: %zu bytes\n", data_size);
+
+    // Set BASIC end-of-program and start-of-variables pointers
+    // This allows BASIC to see the loaded program
+    sys->ram[0x2D] = load_addr & 0xFF;        // VARTAB (lo)
+    sys->ram[0x2E] = (load_addr >> 8) & 0xFF; // VARTAB (hi)
+    sys->ram[0x2F] = (load_addr + data_size) & 0xFF;        // ARYTAB (lo)
+    sys->ram[0x30] = ((load_addr + data_size) >> 8) & 0xFF; // ARYTAB (hi)
+    sys->ram[0x31] = (load_addr + data_size) & 0xFF;        // STREND (lo)
+    sys->ram[0x32] = ((load_addr + data_size) >> 8) & 0xFF; // STREND (hi)
+
+    free(buffer);
+    return true;
+}
+
 int main(int argc, char* argv[]) {
     const char* disk_filename = NULL;
     bool enable_curses = 1;
@@ -222,6 +301,13 @@ int main(int argc, char* argv[]) {
         if (strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--disk") == 0) {
             if (i + 1 < argc) {
                 disk_filename = argv[++i];
+            } else {
+                fprintf(stderr, "Error: %s requires a filename argument\n", argv[i]);
+                return 1;
+            }
+        } else if (strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--prg") == 0) {
+            if (i + 1 < argc) {
+                prg_filename = argv[++i];
             } else {
                 fprintf(stderr, "Error: %s requires a filename argument\n", argv[i]);
                 return 1;
@@ -236,15 +322,16 @@ int main(int argc, char* argv[]) {
         } else if (strcmp(argv[i], "-c") == 0) {
             enable_curses = 0;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            printf("Usage: %s [-d|--disk FILENAME] [-s CYCLE] [-c] [-h|--help]\n", argv[0]);
+            printf("Usage: %s [-d|--disk FILENAME] [-p|--prg FILENAME] [-s CYCLE] [-c] [-h|--help]\n", argv[0]);
             printf("  -d, --disk FILENAME  Attach G64 disk image\n");
+            printf("  -p, --prg FILENAME   Inject .prg file into memory\n");
             printf("  -s CYCLE             Start logging at CPU cycle CYCLE\n");
             printf("  -c                   Disable ncurses\n");
             printf("  -h, --help           Show this help message\n");
             return 0;
         } else {
             fprintf(stderr, "Error: Unknown option '%s'\n", argv[i]);
-            fprintf(stderr, "Usage: %s [-d|--disk FILENAME] [-s CYCLE] [-c] [-h|--help]\n", argv[0]);
+            fprintf(stderr, "Usage: %s [-d|--disk FILENAME] [-p|--prg FILENAME] [-s CYCLE] [-c] [-h|--help]\n", argv[0]);
             return 1;
         }
     }
@@ -301,12 +388,22 @@ int main(int argc, char* argv[]) {
         // tick the emulator for 1 frame
         c64_ticks += c64_exec(&c64, FRAME_USEC);
 
+        // Inject .prg file at cycle 200000 if specified
+
         #ifdef PRGDEBUG
         if(c64_ticks > 150000 && keysim_state == 0) {
-            keysim_state++;
-            set_keybuf("L\x6f\"*\",8,1\r");
-        }
+        #else
+        if (prg_filename && c64_ticks > 150000) {
         #endif
+            load_prg_file(&c64, prg_filename);
+            prg_filename = NULL;
+            #ifdef PRGDEBUG
+            set_keybuf("L\x6f\"*\",8,1\r");
+            #else
+            set_keybuf("RUN\r");
+            #endif
+            keysim_state++;
+        }
 
         // keyboard input
         int ch = getch();
