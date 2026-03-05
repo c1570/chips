@@ -41,6 +41,27 @@ static int drive_current_halftrack;
 
 static c64_t c64;
 
+// Logging state
+static uint64_t start_cycle = 0;  // Cycle at which to start logging (0 = disabled)
+static uint64_t current_cycle = 0; // Current CPU cycle counter
+static bool logging_enabled = false; // Whether logging is currently enabled
+
+// Forward declarations
+static void log_cycle(c64_t* sys, uint64_t pins);
+
+// Debug callback for cycle-accurate logging
+static void debug_callback(void* user_data, uint64_t pins) {
+    current_cycle++;
+
+    if (!logging_enabled && start_cycle > 0 && current_cycle >= start_cycle) {
+        logging_enabled = true;
+    }
+
+    if (logging_enabled) {
+        log_cycle(&c64, pins);
+    }
+}
+
 // run the emulator and render-loop at 30fps
 #define FRAME_USEC (33333)
 // border size
@@ -153,6 +174,45 @@ void update_screen(c64_t* c64) {
     refresh();
 }
 
+// Logging function for cycle-accurate debugging
+static void log_cycle(c64_t* sys, uint64_t pins) {
+    // Extract bus information
+    const uint16_t bus_addr = M6502_GET_ADDR(pins);
+    const uint8_t bus_data = M6502_GET_DATA(pins);
+    const bool is_read = (pins & M6502_RW) != 0;
+
+    // Extract CPU flags
+    const int sync = (pins & M6502_SYNC) ? 1 : 0;
+    const int rdy = (pins & M6502_RDY) ? 1 : 0;
+    const int irq = (pins & M6502_IRQ) ? 1 : 0;
+    const int nmi = (pins & M6502_NMI) ? 1 : 0;
+
+    // Extract VIC-II timing info
+    const int vic_cycle = sys->vic.rs.h_count;
+    const int vic_line = sys->vic.rs.v_count;
+
+    const uint16_t ir = sys->cpu.IR;
+
+    // Print the log line
+    printf("Cycle %lu: PC=$%04X A=$%02X X=$%02X Y=$%02X IR=%02x.%d BUS: addr=$%04X data=$%02X %c FLAGS: SYNC=%d RDY=%d IRQ=%d NMI=%d VIC: cycle=%d line=%d\n",
+           (unsigned long)current_cycle,
+           sys->cpu.PC,
+           sys->cpu.A,
+           sys->cpu.X,
+           sys->cpu.Y,
+           ir >> 3,
+           (ir & 7) - 1,
+           bus_addr,
+           bus_data,
+           is_read ? 'R' : 'W',
+           sync,
+           rdy,
+           irq,
+           nmi,
+           vic_cycle,
+           vic_line);
+}
+
 int main(int argc, char* argv[]) {
     const char* disk_filename = NULL;
     bool enable_curses = 1;
@@ -166,21 +226,31 @@ int main(int argc, char* argv[]) {
                 fprintf(stderr, "Error: %s requires a filename argument\n", argv[i]);
                 return 1;
             }
+        } else if (strcmp(argv[i], "-s") == 0) {
+            if (i + 1 < argc) {
+                start_cycle = atoi(argv[++i]);
+            } else {
+                fprintf(stderr, "Error: %s requires a cycle number argument\n", argv[i]);
+                return 1;
+            }
         } else if (strcmp(argv[i], "-c") == 0) {
             enable_curses = 0;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            printf("Usage: %s [-d|--disk FILENAME] [-h|--help]\n", argv[0]);
+            printf("Usage: %s [-d|--disk FILENAME] [-s CYCLE] [-c] [-h|--help]\n", argv[0]);
             printf("  -d, --disk FILENAME  Attach G64 disk image\n");
-            printf("  -c,                  Disable ncurses\n");
+            printf("  -s CYCLE             Start logging at CPU cycle CYCLE\n");
+            printf("  -c                   Disable ncurses\n");
             printf("  -h, --help           Show this help message\n");
             return 0;
         } else {
             fprintf(stderr, "Error: Unknown option '%s'\n", argv[i]);
-            fprintf(stderr, "Usage: %s [-d|--disk FILENAME] [-h|--help]\n", argv[0]);
+            fprintf(stderr, "Usage: %s [-d|--disk FILENAME] [-s CYCLE] [-c] [-h|--help]\n", argv[0]);
             return 1;
         }
     }
 
+    // Setup debug callback for logging if start_cycle is specified
+    static bool debug_stopped = false;
     c64_init(&c64, &(c64_desc_t){
         .roms = {
             .chars = { .ptr=dump_c64_char_bin, .size=sizeof(dump_c64_char_bin) },
@@ -191,7 +261,14 @@ int main(int argc, char* argv[]) {
                 .e000_ffff = { .ptr=dump_1541_e000_901229_06aa_bin, .size=sizeof(dump_1541_e000_901229_06aa_bin) }
             }
         },
-        .c1541_enabled = 1
+        .c1541_enabled = 1,
+        .debug = {
+            .callback = {
+                .func = start_cycle > 0 ? debug_callback : NULL,
+                .user_data = NULL
+            },
+            .stopped = &debug_stopped
+        }
     });
 
     // Attach disk image if specified
