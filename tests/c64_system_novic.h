@@ -861,6 +861,12 @@ static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
                 sys->raster_irq_active = false;
                 sys->raster_irq_triggered = false;
             }
+            if (addr == 0xd021) {  // VIC-II background color register
+                // Log $D021 writes with VIC-II cycle indentation and cycle number
+                const uint8_t value = M6502_GET_DATA(pins);
+                const int vic_cycle = sys->vic.rs.h_count;
+                printf("D021_write(%2d):%*s%X\n", vic_cycle, vic_cycle, "", value & 0xf);
+            }
         }
     }
 
