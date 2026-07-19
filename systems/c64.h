@@ -723,18 +723,18 @@ static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
                 if (cia2_pins & M6526_RW) {
                     // CIA reads IEC: advance drive emulation up to (current CPU time - 450ns)
                     while ((sys->c1541_microseconds + 1) < (sys->c64_microseconds - 0.45)) {
-                        _c1541_tick(&sys->c1541);
+                        _c1541_tick();
                     }
                 } else {
                     // CIA writes IEC: advance drive emulation up to (current CPU time + 450ns)
                     while ((sys->c1541_microseconds + 1) < (sys->c64_microseconds + 0.45)) {
-                        _c1541_tick(&sys->c1541);
+                        _c1541_tick();
                     }
                 }
             } else {
                 // don't let the C1541 fall back too much anyways.
                 while ((sys->c1541_microseconds + 10) < sys->c64_microseconds) {
-                    _c1541_tick(&sys->c1541);
+                    _c1541_tick();
                 }
             }
 
