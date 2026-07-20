@@ -13,8 +13,7 @@ mkdir -p build
 cd build
 
 # Run CMake configuration
-cmake .. -DPICO_BOARD=pico
-#cmake .. -DPICO_PLATFORM=rp2350-riscv
+cmake .. -DPICO_PLATFORM=rp2350-riscv
 
 # Build the project
 make -j$(nproc)

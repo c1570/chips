@@ -1,15 +1,13 @@
 #!/usr/bin/env node
 /**
- * RP2040 C1541 Test Runner
+ * RP2 C1541 Test Runner
  *
- * Runs the RP2040 C1541 firmware in rp2040js and interfaces with C64 emulator
+ * Runs the RP2 C1541 firmware in rp2350js and interfaces with C64 emulator
  */
 
 const RP_MHZ = 125;
 
-import { RP2040, RP2350, GPIOPinState } from './rp2040js/dist/esm/index.js';
-import { bootromB1 } from './rp2040js/demo/bootrom.js';
-// import { bootrom_rp2350_A2 } from './rp2040js/demo/bootrom_rp2350.js';
+import { RP2350, GPIOPinState } from './rp2350js/dist/esm/index.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
@@ -21,23 +19,8 @@ const __dirname = path.dirname(__filename);
 const require = createRequire(import.meta.url);
 const koffi = require('koffi');
 
-// UF2 loading
-const FLASH_START_ADDRESS = 0x10000000;
-function loadUF2(filename, rp2040) {
-  const file = fs.openSync(filename, 'r');
-  const buffer = new Uint8Array(512);
-  while (fs.readSync(file, buffer) === buffer.length) {
-    const block = decodeBlock(buffer);
-    const { flashAddress, payload } = block;
-    rp2040.flash.set(payload, flashAddress - FLASH_START_ADDRESS);
-  }
-  fs.closeSync(file);
-}
-
 const FIRMWARE_PATH = `${__dirname}/../rp2040/build/c1541.uf2`;
 const C64_LIB_PATH = `${__dirname}/libc64_emulation.so`;
-const INITIAL_PC = 0x10000000;
-// const INITIAL_PC = 0x10000036; // rp2350
 
 // IEC GPIO pins on RP2
 const IEC_GPIO_ATN    = 2;
@@ -74,8 +57,8 @@ c64_init();
 
 // Initialize RP2
 console.log('Initializing RP2...');
-const mcu = new RP2040(); // new RP2350();
-mcu.loadBootrom(bootromB1 /* bootrom_rp2350_A2 */);
+const mcu = new RP2350();
+mcu.loadFirmware(FIRMWARE_PATH);
 
 let doTickC64 = false;
 
@@ -97,26 +80,10 @@ function getOffsetForVariable(var_name) {
   return parseInt(res[1]);
 }
 
-// Load C1541 firmware
-if (fs.existsSync(FIRMWARE_PATH)) {
-  console.log(`Loading firmware from ${FIRMWARE_PATH}`);
-  loadUF2(FIRMWARE_PATH, mcu);
-  console.log('Firmware loaded successfully');
-} else {
-  console.error(`Firmware not found at ${FIRMWARE_PATH}`);
-  console.error('Please build the firmware first: cd rp2040 && ./build.sh');
-  process.exit(1);
-}
-
 // Set up UART output
 mcu.uart[0].onByte = (value) => {
   process.stdout.write(new Uint8Array([value]));
 };
-
-// Set initial PC
-mcu.core0.PC = INITIAL_PC;
-// mcu.core0.pc = INITIAL_PC; // rp2350
-// mcu.core1.pc = INITIAL_PC;
 
 // GPIO tracking for IEC signals
 let lastIecState = 0xFF;
