@@ -60,16 +60,6 @@ console.log('Initializing RP2...');
 const mcu = new RP2350();
 mcu.loadFirmware(FIRMWARE_PATH);
 
-let doTickC64 = false;
-
-mcu.onTrace = function(coreNumber, pc, tag) {
-  if(tag == "tick ") {
-    doTickC64 = true;
-  } else {
-    console.log(`${mcu.cycles} PC 0x${pc.toString(16)} tag ${tag}`);
-  }
-}
-
 function getOffsetForVariable(var_name) {
   const filename = FIRMWARE_PATH.replace(".uf2", ".elf.map");
   const content = fs.readFileSync(filename, 'utf-8');
@@ -84,6 +74,8 @@ function getOffsetForVariable(var_name) {
 mcu.uart[0].onByte = (value) => {
   process.stdout.write(new Uint8Array([value]));
 };
+
+const displayMotorAnim = [ "b", "d", "q", "p"];
 
 // GPIO tracking for IEC signals
 let lastIecState = 0xFF;
@@ -122,42 +114,127 @@ function tickC64() {
   mcu.gpio[IEC_GPIO_RESET].setInputValue((busState & IECLINE_RESET) !== 0);
 }
 
-let frameCount = 0;
-
-function runEmulation() {
-  const startTime = Date.now();
-
-  // Run RP2040 for one frame worth of cycles
-  const targetCycles = 125000000 / 20;
-  let cyclesRun = 0;
-  let c64TickCount = 0;
-
-  while (cyclesRun < targetCycles) {
-    const startCycles = mcu.cycles;
-    mcu.step();
-    const elapsed = mcu.cycles - startCycles;
-
-    if (doTickC64) {
-      tickC64();
-      c64TickCount++;
-      doTickC64 = false;
+function emu() {
+    mcu.onTrace = function(coreNumber, pc, tag) {
+        if(tag == "tick ") {
+            c1541TickDone = true;
+        } else {
+            console.log(`${mcu.cycles} PC 0x${pc.toString(16)} tag ${tag}`);
+        }
     }
 
-    cyclesRun += elapsed;
-  }
+    const c64Config = {
+        pal: {
+            ticksPerSecond: 985249,
+            framesPerSecond: 25,
+        },
+        ntsc: {
+            ticksPerSecond: 1022727,
+            framesPerSecond: 30000 / 1001,
+        }
+    };
 
-  if (frameCount % 10 === 0) {
-    c64_print_screen();
-    console.log(`${(cyclesRun/c64TickCount)>>0} RP2 cycles per C64 µs`);
-    console.log(`Motor: ${mcu.gpio[RP2_MOTOR_STATUS_PIN].value}  LED: ${mcu.gpio[RP2_LED_PIN].value}`);
-  }
+    const c64VideoModel = "pal";
+    
+    const c64TicksPerSecond = c64Config[c64VideoModel].ticksPerSecond;
+    const c64FramesPerSecond = c64Config[c64VideoModel].framesPerSecond;
 
-  frameCount++;
+    const c1541TicksPerSecond = 1000000;
 
-  setTimeout(runEmulation);
+    const ticksPerVideoFrame = c64TicksPerSecond / c64FramesPerSecond;
+    
+    const tickC64ToC1541Ratio = c64TicksPerSecond / c1541TicksPerSecond;
+    const c64TickDelta = (tickC64ToC1541Ratio > 1) ? 1 : tickC64ToC1541Ratio;
+    const c1541TickDelta = (tickC64ToC1541Ratio > 1) ? 1 / tickC64ToC1541Ratio : 1;
+
+    let tickCountC64 = 0;
+    let tickCountC1541 = 0;
+
+    let lastTickCountC64 = -1;
+    let lastTickCountC1541 = -1;
+
+    let c1541TickDone = false;
+
+    let c1541EmulationHzNeeded = [];
+
+    let motorAnimationIndex = 0;
+
+    const wallClockStart = +new Date();
+
+    const stopAfterSystemSeconds = 20;
+    
+    const consoleFramesPerSecond = 1;
+
+    let worstNeededMHzCenter = 0;
+    let worstNeededMHzRange = 0;
+
+    let nextOutput = +new Date();
+    let keepRunning = true;
+
+    while (keepRunning) {
+        const now = +new Date();
+
+        if (now >= nextOutput) {
+            nextOutput = now + (1000 / consoleFramesPerSecond);
+
+            const c64Seconds = tickCountC64 / c64TicksPerSecond;
+            const wallSeconds = (now - wallClockStart) / 1000;
+            const speed = c64Seconds / wallSeconds;
+
+            c64_print_screen();
+            console.log(`C1541 ticks: ${Math.floor(tickCountC1541)}`);
+            console.log(`System seconds: ${c64Seconds.toFixed(2)}  Wall seconds: ${wallSeconds.toFixed(0)}  Speed: ${speed.toFixed(3)}x`);
+
+            const minNeededMHz = Math.ceil(Math.min.apply(Math, c1541EmulationHzNeeded) / 1e6);
+            const maxNeededMHz = Math.ceil(Math.max.apply(Math, c1541EmulationHzNeeded) / 1e6);
+            const sumNeeded = c1541EmulationHzNeeded.reduce((s, v) => s + v, 0);
+            const avgNeededMHz = Math.ceil((sumNeeded / Math.max(1, c1541EmulationHzNeeded.length)) / 1e6);
+            c1541EmulationHzNeeded.sort();
+            const medianNeededMHz = (c1541EmulationHzNeeded.length > 0) ? c1541EmulationHzNeeded[Math.floor(c1541EmulationHzNeeded.length / 2)] / 1e6 : 0;
+
+            const centerNeededMHz = (avgNeededMHz + medianNeededMHz) / 2;
+            const rangeNeededMHz = centerNeededMHz - Math.min(avgNeededMHz, medianNeededMHz);
+            if (c64Seconds > 0.05 && centerNeededMHz + rangeNeededMHz > worstNeededMHzCenter + worstNeededMHzRange) {
+                worstNeededMHzCenter = centerNeededMHz;
+                worstNeededMHzRange = rangeNeededMHz;
+            }
+
+            console.log(`C1541 Emulation MHz needed: ${centerNeededMHz.toFixed(1)} +/- ${rangeNeededMHz.toFixed(1)} => ${centerNeededMHz + rangeNeededMHz}`);
+            console.log(`Worst Emulation MHz needed: ${worstNeededMHzCenter.toFixed(1)} +/- ${worstNeededMHzRange.toFixed(1)} => ${worstNeededMHzCenter + worstNeededMHzRange}`);
+            const motorChar = (mcu.gpio[RP2_MOTOR_STATUS_PIN].value) ? displayMotorAnim[motorAnimationIndex] : " ";
+            const ledChar = (mcu.gpio[RP2_LED_PIN].value) ? "*" : " ";
+            console.log(`[${motorChar}] Motor  [${ledChar}] LED`);
+
+            motorAnimationIndex = (motorAnimationIndex + 1) % displayMotorAnim.length;
+
+            c1541EmulationHzNeeded.length = 0;
+            keepRunning = stopAfterSystemSeconds <= 0 || c64Seconds < stopAfterSystemSeconds;
+        }
+
+        const mustTickC64 = Math.floor(tickCountC64) != Math.floor(lastTickCountC64);
+        const mustTickC1541 = Math.floor(tickCountC1541) != Math.floor(lastTickCountC1541);
+
+        if (mustTickC64) {
+            tickC64();
+        }
+
+        if (mustTickC1541) {
+            c1541TickDone = false;
+            const startCycles = mcu.cycles;
+            while (!c1541TickDone) {
+                mcu.step();
+            }
+            const elapsed = mcu.cycles - startCycles;
+            c1541EmulationHzNeeded.push(elapsed * c1541TicksPerSecond);
+        }
+
+        lastTickCountC64 = tickCountC64;
+        tickCountC64 += c64TickDelta;
+
+        lastTickCountC1541 = tickCountC1541;
+        tickCountC1541 += c1541TickDelta;
+    }
 }
 
-console.log('Starting C64 + RP2040 C1541 emulation...');
-console.log('Press Ctrl+C to stop');
+emu();
 
-setTimeout(runEmulation);
