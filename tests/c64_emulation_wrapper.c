@@ -1,7 +1,7 @@
 /*
  * C64 Emulation Wrapper
  *
- * koffi-callable C64 emulator library for RP2040 C1541 testing.
+ * C64 emulator library for RP2 C1541 testing.
  * Uses the same IEC bus pattern as rp2040/c1541.c.
  */
 
