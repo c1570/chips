@@ -862,6 +862,7 @@ bool c1541_fetch_track(c1541_t* sys) {
 
 #ifdef IS_RP2
 #include "../docs/1541_test_demo.h"
+#pragma message "Using ../docs/1541_test_demo.h as disk image"
 bool c1541_fetch_track(c1541_t* sys) {
     const uint8_t* gcr_data = (const uint8_t*) gcr_1541_test_demo_g64;
     const uint32_t half_track_data_offset = ((uint32_t *)(gcr_data + 0xc))[sys->half_track];

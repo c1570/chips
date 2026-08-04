@@ -21,6 +21,8 @@ extern void c64_emulation_tick(void);
 extern void c64_set_iec_gpio(uint8_t state);
 extern uint8_t c64_get_iec_bus(void);
 extern void c64_print_screen(void);
+extern void c64_load_cartridge(const char* filename);
+extern uint8_t c64_ram_read(uint16_t addr);
 
 #define FIRMWARE_PATH "../rp2040/build/c1541.uf2"
 
@@ -147,6 +149,11 @@ int main(void) {
   printf("Initializing C64 emulator...\n");
   c64_emulation_init();
 
+#ifdef AUTOTEST
+  printf("AUTOTEST: loading cartridge...\n");
+  c64_load_cartridge("cart-br-read.bin");
+#endif
+
   printf("Initializing RP2...\n");
   RP2350Options options = {.coreArch = "riscv", .loadFirmware = NULL};
   mcu = RP2350_new(&options);
@@ -235,6 +242,41 @@ int main(void) {
     if (must_tick_c64) {
       tick_c64();
     }
+
+#ifdef AUTOTEST
+    /* Check cartridge completion marker at $C100 */
+    if (must_tick_c64) {
+      uint8_t prog = c64_ram_read(0xC100);
+      bool timeout = tick_count_c64 > 2300000;
+      if (prog == 0xFF || prog == 0xEE || timeout) {
+        static const uint8_t expected[18] = {
+            0x01, 0x41, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00};
+        int pass = (prog == 0xFF);
+        if (pass) {
+          for (int i = 0; i < 18; i++) {
+            if (c64_ram_read(0xC000 + i) != expected[i]) {
+              pass = 0;
+              break;
+            }
+          }
+        }
+        double secs = tick_count_c64 / C64_TICKS_PER_SECOND;
+        printf("AUTOTEST: %s (PROG=$%02X, %.2fs C64, %.0f C1541 ticks)\n",
+               pass ? "PASS" : "FAIL", prog, secs, tick_count_c1541);
+        if (!pass) {
+          printf("  Buffer $C000:");
+          for (int i = 0; i < 18; i++) printf(" %02X", c64_ram_read(0xC000 + i));
+          printf("\n  Expected:    ");
+          for (int i = 0; i < 18; i++) printf(" %02X", expected[i]);
+          printf("\n");
+        }
+        free(hz_needed);
+        return pass ? 0 : 1;
+      }
+    }
+#endif
 
     if (must_tick_c1541) {
       c1541_tick_done = false;

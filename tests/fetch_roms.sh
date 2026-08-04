@@ -11,4 +11,6 @@ if [ ! -e c1541-roms.h ]; then
   wget https://raw.githubusercontent.com/floooh/chips-test/refs/heads/master/examples/roms/c1541-roms.h
   # patch: skip RAM/ROM check
   perl -i -pe 's/0x8a, 0x95, 0x00, 0xe8,/0x4c, 0x22, 0xeb, 0xe8,/gm' c1541-roms.h
+  # patch: skip motor spin-up delay (ACLTIM $3C -> $01 in TURNON at $F97E)
+  perl -i -pe 's/0x8d, 0x00, 0x1c, 0xa9, 0x3c, 0x85, 0x48,/0x8d, 0x00, 0x1c, 0xa9, 0x01, 0x85, 0x48,/gm' c1541-roms.h
 fi

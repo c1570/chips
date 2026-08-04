@@ -21,5 +21,12 @@ $(RUNNER): $(RUNNER).c rp2350js-c.h $(SOURCE)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o c64_emulation_wrapper.o $(SOURCE)
 	$(CC) $(RUNNER_CFLAGS) -o $(RUNNER) $(RUNNER).c c64_emulation_wrapper.o -lm
 
+cart-br-read.bin: cart-br-read.asm
+	acme -f plain -o cart-br-read.bin cart-br-read.asm
+
+autotest: $(RUNNER).c rp2350js-c.h $(SOURCE) cart-br-read.bin
+	$(CC) $(CFLAGS) $(INCLUDES) -DAUTOTEST -c -o c64_emulation_wrapper.o $(SOURCE)
+	$(CC) $(RUNNER_CFLAGS) -DAUTOTEST -o rp2_autotest $(RUNNER).c c64_emulation_wrapper.o -lm
+
 clean:
-	rm -f $(TARGET) $(RUNNER) c64_emulation_wrapper.o
+	rm -f $(TARGET) $(RUNNER) rp2_autotest c64_emulation_wrapper.o

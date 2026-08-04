@@ -63,12 +63,39 @@ void c64_emulation_tick() {
     // This gets called frequently by the RP2040's STROBE pin
     c64_tick_count += c64_exec(&c64, 2);  // Execute for 1 tick (2µS, rounded down)
 
+#ifndef AUTOTEST
     if(c64_tick_count == 150000) {
       set_keybuf("L\x6f\"$\",8\r");
     }
     if(c64_tick_count == 4300000) {
       set_keybuf("LIST\r");
     }
+#endif
+}
+
+// Load a cartridge binary into C64 RAM at $8000 and trigger cold-start
+void c64_load_cartridge(const char* filename) {
+    FILE* f = fopen(filename, "rb");
+    if (!f) {
+        fprintf(stderr, "Cannot open cartridge: %s\n", filename);
+        return;
+    }
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (size > 0 && size <= 0x2000) {
+        fread(c64.ram + 0x8000, 1, (size_t)size, f);
+        fprintf(stderr, "Loaded cartridge '%s' (%ld bytes at $8000)\n", filename, size);
+        c64_reset(&c64);
+    } else {
+        fprintf(stderr, "Cartridge %s: bad size %ld\n", filename, size);
+    }
+    fclose(f);
+}
+
+// Read a byte from C64 RAM
+uint8_t c64_ram_read(uint16_t addr) {
+    return c64.ram[addr];
 }
 
 // Get current C64 video buffer pointers and colors (for display)

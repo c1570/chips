@@ -155,7 +155,9 @@ void update_screen(c64_t* c64) {
 
 int main(int argc, char* argv[]) {
     const char* disk_filename = NULL;
+    const char* cart_filename = NULL;
     bool enable_curses = 1;
+    bool autotest = 0;
 
     // Parse command line arguments
     for (int i = 1; i < argc; i++) {
@@ -166,17 +168,29 @@ int main(int argc, char* argv[]) {
                 fprintf(stderr, "Error: %s requires a filename argument\n", argv[i]);
                 return 1;
             }
+        } else if (strcmp(argv[i], "--cart") == 0) {
+            if (i + 1 < argc) {
+                cart_filename = argv[++i];
+            } else {
+                fprintf(stderr, "Error: %s requires a filename argument\n", argv[i]);
+                return 1;
+            }
         } else if (strcmp(argv[i], "-c") == 0) {
             enable_curses = 0;
+        } else if (strcmp(argv[i], "--autotest") == 0) {
+            autotest = 1;
+            enable_curses = 0;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            printf("Usage: %s [-d|--disk FILENAME] [-h|--help]\n", argv[0]);
-            printf("  -d, --disk FILENAME  Attach G64 disk image\n");
-            printf("  -c,                  Disable ncurses\n");
+            printf("Usage: %s [-d|--disk FILE] [--cart FILE] [--autotest] [-c] [-h]\n", argv[0]);
+            printf("  -d, --disk FILE      Attach G64/D64 disk image\n");
+            printf("      --cart FILE      Load cartridge image at $8000\n");
+            printf("      --autotest       Non-interactive: verify cartridge output, exit 0/1\n");
+            printf("  -c,                  Disable ncurses (dump screen on exit)\n");
             printf("  -h, --help           Show this help message\n");
             return 0;
         } else {
             fprintf(stderr, "Error: Unknown option '%s'\n", argv[i]);
-            fprintf(stderr, "Usage: %s [-d|--disk FILENAME] [-h|--help]\n", argv[0]);
+            fprintf(stderr, "Usage: %s [-d|--disk FILE] [--cart FILE] [--autotest] [-h]\n", argv[0]);
             return 1;
         }
     }
@@ -201,6 +215,27 @@ int main(int argc, char* argv[]) {
         }
     }
     drive_current_halftrack = c64.c1541.half_track;
+
+    // Load cartridge image into RAM at $8000 (KERNAL auto-detects it on cold start)
+    if (cart_filename != NULL) {
+        FILE* f = fopen(cart_filename, "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long cart_size = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            if (cart_size > 0 && cart_size <= 0x2000) {
+                fread(c64.ram + 0x8000, 1, (size_t)cart_size, f);
+                fprintf(stderr, "Loaded cartridge '%s' (%ld bytes at $8000)\n", cart_filename, cart_size);
+                // Force a cold-start so the KERNAL re-scans $8000 and finds the cart
+                c64_reset(&c64);
+            } else {
+                fprintf(stderr, "Error: cartridge image %s is %ld bytes (expected 1..8192)\n", cart_filename, cart_size);
+            }
+            fclose(f);
+        } else {
+            fprintf(stderr, "Error: cannot open cartridge file '%s'\n", cart_filename);
+        }
+    }
 
     // install a Ctrl-C signal handler
     signal(SIGINT, catch_sigint);
@@ -263,6 +298,58 @@ int main(int argc, char* argv[]) {
         }
         if (enable_curses) {
             update_screen(&c64);
+        } else {
+            // non-interactive mode: detect cartridge completion via PROG marker
+            // at $C100 ($FF = done, $EE = error), then dump screen and quit
+            uint8_t prog = c64.ram[0xC100];
+            uint32_t tick_limit = autotest ? 2200000 : 15000000;
+            if (prog == 0xFF || prog == 0xEE || c64_ticks > tick_limit) {
+                if (autotest) {
+                    // Verify: buffer at $C000 should contain BAM bytes 1..18
+                    // (byte 0 is consumed by KERNAL CHKIN read-ahead).
+                    // Expected from docs/1541_test_demo.d64 track 18 sector 0.
+                    // Buffer starts at BAM[1] (byte 0 consumed by KERNAL CHKIN):
+                    //   $01 (next sector) $41 (DOS ver 'A') $00 then all-zero BAM.
+                    static const uint8_t expected[18] = {
+                        0x01, 0x41, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                        0x00, 0x00
+                    };
+                    int pass = (prog == 0xFF);
+                    if (pass) {
+                        for (int i = 0; i < 18; i++) {
+                            if (c64.ram[0xC000 + i] != expected[i]) {
+                                pass = 0;
+                                break;
+                            }
+                        }
+                    }
+                    printf("AUTOTEST: %s (PROG=$%02X, %u ticks, %.2fs)\n",
+                           pass ? "PASS" : "FAIL", prog, c64_ticks,
+                           (float)c64_ticks / 985248.0f);
+                    if (!pass) {
+                        printf("  Buffer $C000: ");
+                        for (int i = 0; i < 18; i++)
+                            printf("%02X ", c64.ram[0xC000 + i]);
+                        printf("\n  Expected:     ");
+                        for (int i = 0; i < 18; i++)
+                            printf("%02X ", expected[i]);
+                        printf("\n");
+                    }
+                    if (enable_curses) endwin();
+                    return pass ? 0 : 1;
+                }
+                printf("\n=== SCREEN DUMP (tick %u, PROG=$%02X) ===\n", c64_ticks, prog);
+                for (int row = 0; row < 25; row++) {
+                    for (int col = 0; col < 40; col++) {
+                        uint8_t code = c64.ram[0x0400 + row * 40 + col] & 0x7F;
+                        char ch = (code < 64) ? font_map[code] : '.';
+                        putchar(ch);
+                    }
+                    printf("|\n");
+                }
+                quit_requested = 1;
+            }
         }
 
         // pause until next frame
