@@ -291,6 +291,7 @@ typedef struct IRPChipVTable {
   bool (*gpioRawOutputValue)(void* self, int32_t);
   bool (*gpioRawOutputEnable)(void* self, int32_t);
   void (*gpioInputValueHasBeenSet)(void* self, int32_t);
+  void (*updatePioActiveLists)(void* self);
   int32_t (*readUint32)(void* self, int32_t);
   int32_t (*readUint16)(void* self, int32_t);
   int32_t (*readUint8)(void* self, int32_t);
@@ -333,6 +334,9 @@ static inline bool IRPChip_gpioRawOutputEnable(IRPChip p, int32_t index) {
 }
 static inline void IRPChip_gpioInputValueHasBeenSet(IRPChip p, int32_t index) {
   return p.vtable->gpioInputValueHasBeenSet(p.obj, index);
+}
+static inline void IRPChip_updatePioActiveLists(IRPChip p) {
+  return p.vtable->updatePioActiveLists(p.obj);
 }
 static inline int32_t IRPChip_readUint32(IRPChip p, int32_t address) {
   return p.vtable->readUint32(p.obj, address);
@@ -738,6 +742,8 @@ typedef enum {
   TimerMode_ZigZag = 2,
 } TimerMode;
 
+typedef void (*GPIOPinListener)(GPIOPinState, GPIOPinState);
+
 // ─── Global constants (cross-file) ───
 enum { SYSM_MSP = (8) };
 enum { SYSM_PSP = (9) };
@@ -925,7 +931,6 @@ typedef struct RPWatchdog RPWatchdog;
 typedef struct RPXIPQMI RPXIPQMI;
 typedef struct RPXIP RPXIP;
 typedef struct CPU CPU;
-typedef struct RegisterSet RegisterSet;
 typedef struct RP2040 RP2040;
 typedef struct RP2350 RP2350;
 typedef struct Simulator Simulator;
@@ -1009,7 +1014,7 @@ struct SimulationClock {
 };
 
 struct CortexM0Core {
-  uint32_t* registers;
+  __attribute__((aligned(8))) uint32_t registers[16];
   int32_t bankedSP;
   int64_t cycles;
   bool eventRegistered;
@@ -1074,7 +1079,7 @@ struct CortexM33Core {
 };
 
 struct M33Registers {
-  uint32_t* r;
+  __attribute__((aligned(8))) uint32_t r[16];
   int32_t xpsr;
   int32_t primask;
   int32_t basepri;
@@ -1092,7 +1097,7 @@ struct M33Registers {
   int32_t basepri_ns;
   int32_t faultmask_ns;
   int32_t control_ns;
-  float* s;
+  __attribute__((aligned(8))) float s[32];
   int32_t fpscr;
 };
 
@@ -1143,7 +1148,7 @@ struct GPIOPin {
   int32_t irqEnableMask;
   int32_t irqForceMask;
   int32_t irqStatus;
-  void** listeners;
+  GPIOPinListener* listeners;
   int32_t listeners_count;
   RP2350* rp2040;
   int32_t index;
@@ -1403,12 +1408,13 @@ struct StateMachine {
   RP2350* rp2040;
   RPPIO* pio;
   int32_t index;
+  int32_t fifoStat;
 };
 
 struct RPPIO {
   BasePeripheral base; // parent class (must be first member)
-  uint32_t* instructions;
-  StateMachine** machines;
+  __attribute__((aligned(8))) uint32_t instructions[32];
+  StateMachine* machines[4];
   int32_t machinesRunning;
   int32_t fdebug;
   int32_t inputSyncBypass;
@@ -1447,7 +1453,7 @@ struct RP2350POWMAN {
   double runStartNanos;
   bool running;
   bool badPasswd;
-  uint16_t* setWords;
+  __attribute__((aligned(8))) uint16_t setWords[4];
   uint32_t* regs;
 };
 
@@ -1472,7 +1478,7 @@ struct SystickAlarmCallback {
 
 struct RPPPB2350 {
   BasePeripheral base; // parent class (must be first member)
-  M33CoreState** coreState;
+  M33CoreState* coreState[2];
 };
 
 struct RP2350PSM {
@@ -1524,12 +1530,12 @@ struct PWMChannel {
 
 struct RPPWM {
   BasePeripheral base; // parent class (must be first member)
-  PWMChannel** channels;
+  PWMChannel* channels[8];
   int32_t intRaw;
   int32_t intEnable;
   int32_t intForce;
   int32_t gpioValue;
-  int32_t gpioDirection;
+  uint32_t gpioDirection;
   RP2350* rp2040;
   int32_t pwm_wrap_irq;
   int32_t pwm_dreq_base;
@@ -1621,22 +1627,19 @@ struct RPTimer {
   BasePeripheral base; // parent class (must be first member)
   IClock clock;
   int32_t latchedTimeHigh;
-  RPTimerAlarm** alarms;
+  RPTimerAlarm* alarms[4];
   int32_t intRaw;
   int32_t intEnable;
   int32_t intForce;
   bool paused;
-  int32_t INTR;
-  int32_t INTE;
-  int32_t INTF;
-  int32_t INTS;
+  int32_t intRegBase;
   int32_t timer_irq_base;
 };
 
 struct RP2350TRNG {
   BasePeripheral base; // parent class (must be first member)
   int32_t state;
-  uint32_t* ehr;
+  __attribute__((aligned(8))) uint32_t ehr[6];
   bool valid;
   bool enabled;
   int32_t* regs;
@@ -1699,7 +1702,7 @@ struct RPWatchdog {
   BasePeripheral base; // parent class (must be first member)
   Timer32* timer;
   Timer32PeriodicAlarm* alarm;
-  uint32_t* scratchData;
+  __attribute__((aligned(8))) uint32_t scratchData[8];
   bool enable;
   bool tickEnable;
   int32_t reason;
@@ -1726,19 +1729,19 @@ struct CPU {
   bool waiting;
   bool waitingOnBlock;
   bool eventRegistered;
-  RegisterSet* registerSet;
-  uint32_t* csrs;
+  __attribute__((aligned(8))) int32_t regs[32];
+  __attribute__((aligned(8))) uint32_t csrs[4096];
   int32_t pc;
   int32_t next_pc;
   int64_t cycles;
   ExecutionModeRiscv currentMode;
   bool interruptsUpdated;
-  int32_t* meiea;
-  int32_t* meipa;
-  int32_t* meifa;
-  int32_t* meipra;
-  int32_t* candidateIrq;
-  int32_t* candidatePriority;
+  int32_t meiea[512];
+  int32_t meipa[512];
+  int32_t meifa[512];
+  int32_t meipra[512];
+  int32_t candidateIrq[512];
+  int32_t candidatePriority[512];
   int32_t candidateCount;
   bool did_just_jump;
   int32_t lr_addr;
@@ -1751,10 +1754,6 @@ struct CPU {
   const ICpuCoreVTable* __vtable_ICpuCore;
 };
 
-struct RegisterSet {
-  int32_t* regs;
-};
-
 struct RP2040 {
   uint32_t* bootrom;
   uint8_t* sram;
@@ -1765,22 +1764,22 @@ struct RP2040 {
   uint8_t* usbDPRAM;
   uint8_t* usbDPRAMView;
   const char* identifier;
-  CortexM0Core** core;
+  CortexM0Core* core[2];
   SimulationClock* clock;
   int32_t clkSys;
   int32_t clkPeri;
   RPPPB* ppb;
   RPSIO* sio;
-  RPUART** uart;
-  RPI2C** i2c;
+  RPUART* uart[2];
+  RPI2C* i2c[2];
   RPPWM* pwm;
   RPADC* adc;
-  GPIOPin** gpio;
-  GPIOPin** qspi;
+  GPIOPin* gpio[30];
+  GPIOPin* qspi[6];
   RPDMA* dma;
-  RPPIO** pio;
+  RPPIO* pio[2];
   RPUSBController* usbCtrl;
-  RPSPI** spi;
+  RPSPI* spi[2];
   void* logger;
   Peripheral* peripherals;
   RP2040_onBreak_Fn onBreak_fn;
@@ -1789,6 +1788,10 @@ struct RP2040 {
   void* onTrace_ctx;
   int32_t currentCore;
   const char* disassembly;
+  StateMachine* pioActiveSms[8];
+  int32_t pioActiveSmCount;
+  RPPIO* pioActivePios[2];
+  int32_t pioActivePioCount;
   const IRPChipVTable* __vtable_IRPChip;
 };
 
@@ -1806,7 +1809,7 @@ struct RP2350 {
   const char* identifier;
   const char* coreArch;
   bool isArmCore;
-  ICpuCore* core;
+  ICpuCore core[2];
   RPPPB2350* ppb;
   SimulationClock* clock;
   int32_t clkSys;
@@ -1814,22 +1817,26 @@ struct RP2350 {
   RPSIO* sio;
   RP2350OTP* otp;
   RPWatchdog* watchdog;
-  RPUART** uart;
-  RPI2C** i2c;
+  RPUART* uart[2];
+  RPI2C* i2c[2];
   RPPWM* pwm;
   RPADC* adc;
-  GPIOPin** gpio;
-  GPIOPin** qspi;
+  GPIOPin* gpio[48];
+  GPIOPin* qspi[6];
   RPDMA* dma;
-  RPPIO** pio;
+  RPPIO* pio[3];
   RPUSBController* usbCtrl;
-  RPSPI** spi;
+  RPSPI* spi[2];
   void* logger;
   Peripheral* peripherals;
   RP2350_onTrace_Fn onTrace_fn;
   void* onTrace_ctx;
   int32_t currentCore;
   const char* disassembly;
+  StateMachine* pioActiveSms[12];
+  int32_t pioActiveSmCount;
+  RPPIO* pioActivePios[3];
+  int32_t pioActivePioCount;
   const IRPChipVTable* __vtable_IRPChip;
 };
 
@@ -1865,7 +1872,7 @@ struct RPSIO {
   int32_t qspiGpioValue;
   int32_t qspiGpioOutputEnable;
   int32_t spinLock;
-  RPSIOCore** sioCore;
+  RPSIOCore* sioCore[2];
   RP2350* rp2040;
   int32_t sio_proc0_irq;
   int32_t sio_proc1_irq;
@@ -1873,8 +1880,8 @@ struct RPSIO {
   int32_t gpioHiOutputEnable;
   Timer32* mtimeTimer;
   int32_t mtimeCtrl;
-  Timer32PeriodicAlarm** mtimecmpAlarm;
-  int32_t* mtimecmpHigh;
+  Timer32PeriodicAlarm* mtimecmpAlarm[2];
+  int32_t mtimecmpHigh[2];
   int32_t sio_mtimecmp_irq;
 };
 
@@ -2289,7 +2296,7 @@ static void GPIOPin_setInputValue(GPIOPin* self, bool value);
 static void GPIOPin_checkForUpdates(GPIOPin* self);
 static void GPIOPin_refreshInput(GPIOPin* self);
 static void GPIOPin_updateIRQValue(GPIOPin* self, int32_t value);
-static int32_t GPIOPin_addListener(GPIOPin* self, void* callback);
+static void GPIOPin_addListener(GPIOPin* self, GPIOPinListener callback);
 static int32_t GPIOPin_rawInterrupt_get(GPIOPin* self);
 static int32_t GPIOPin_isSlewFast_get(GPIOPin* self);
 static int32_t GPIOPin_schmittEnabled_get(GPIOPin* self);
@@ -2432,6 +2439,7 @@ static void StateMachine_executeInstruction(StateMachine* self, int32_t opcode);
 static void StateMachine_resolveIrqTarget(StateMachine* self, int32_t irqField, IrqTarget* out);
 static void StateMachine_wait(StateMachine* self, WaitType type, bool polarity, int32_t index, RPPIO* targetPio);
 static void StateMachine_step(StateMachine* self);
+static void StateMachine_stepUnchecked(StateMachine* self);
 static void StateMachine_setSetPinDirs(StateMachine* self, int32_t value);
 static void StateMachine_setSetPins(StateMachine* self, int32_t value);
 static void StateMachine_setSideset(StateMachine* self, int32_t value, int32_t count);
@@ -2439,6 +2447,7 @@ static int32_t StateMachine_transformMovValue(StateMachine* self, int32_t value,
 static void StateMachine_setMovDestination(StateMachine* self, int32_t destination, int32_t value);
 static int32_t StateMachine_readUint32(StateMachine* self, int32_t offset);
 static void StateMachine_writeUint32(StateMachine* self, int32_t offset, int32_t value);
+static void StateMachine_updateFifoStat(StateMachine* self);
 static void StateMachine_restart(StateMachine* self);
 static void StateMachine_clkDivRestart(StateMachine* self);
 static void StateMachine_checkWait(StateMachine* self);
@@ -2458,7 +2467,6 @@ static int32_t StateMachine_outBase_get(StateMachine* self);
 static int32_t StateMachine_jmpPin_get(StateMachine* self);
 static int32_t StateMachine_wrapTop_get(StateMachine* self);
 static int32_t StateMachine_wrapBottom_get(StateMachine* self);
-static int32_t StateMachine_fifoStat_get(StateMachine* self);
 static void StateMachine_enabled_set(StateMachine* self, bool value);
 static RPPIO* RPPIO_new(RP2350* rp2040, const char* name, int32_t firstIrq, int32_t index, int32_t dreqRx_base, int32_t dreqTx_base);
 static int32_t RPPIO_readUint32(RPPIO* self, int32_t offset);
@@ -2618,6 +2626,7 @@ static void RPUSBController_resetDevice(RPUSBController* self);
 static void RPUSBController_sendSetupPacket(RPUSBController* self, uint8_t* setupPacket);
 static void RPUSBController_indicateBufferReady(RPUSBController* self, int32_t endpoint, bool out);
 static void RPUSBController_buffStatusUpdated(RPUSBController* self);
+static void RPUSBController_mirrorSieBit(RPUSBController* self, int32_t sieBit, int32_t intRawBit);
 static void RPUSBController_sieStatusUpdated(RPUSBController* self);
 static int32_t RPUSBController_intStatus_get(RPUSBController* self);
 static RPWatchdog* RPWatchdog_new(RP2350* rp2040, const char* name);
@@ -2631,6 +2640,10 @@ static RPXIPQMI* RPXIPQMI_new(RP2350* rp2040, const char* name);
 static int32_t RPXIP_readUint32(RPXIP* self, int32_t offset);
 static void RPXIP_writeUint32(RPXIP* self, int32_t offset, int32_t value);
 static RPXIP* RPXIP_new(RP2350* rp2040, const char* name);
+static int32_t CPU_getRegister(CPU* self, int32_t index);
+static uint32_t CPU_getRegisterU(CPU* self, int32_t index);
+static void CPU_setRegister(CPU* self, int32_t index, int32_t value);
+static void CPU_setRegisterU(CPU* self, int32_t index, int32_t value);
 static int64_t CPU_getCycles(CPU* self);
 static void CPU_addCycles(CPU* self, int32_t delta);
 static void CPU_setOtherCore(CPU* self, ICpuCore other);
@@ -2663,11 +2676,6 @@ static int32_t CPU_PC_get(CPU* self);
 static int32_t CPU_coreIndex_get(CPU* self);
 static void* CPU_logger_get(CPU* self);
 static void CPU_PC_set(CPU* self, int32_t value);
-static RegisterSet* RegisterSet_new(int32_t numRegisters);
-static int32_t RegisterSet_getRegister(RegisterSet* self, int32_t index);
-static uint32_t RegisterSet_getRegisterU(RegisterSet* self, int32_t index);
-static void RegisterSet_setRegister(RegisterSet* self, int32_t index, int32_t value);
-static void RegisterSet_setRegisterU(RegisterSet* self, int32_t index, int32_t value);
 static RP2040* RP2040_new(RP2040Options* options);
 static void RP2040_loadBootrom(RP2040* self, uint32_t* bootromData);
 static void RP2040_loadDisassembly(RP2040* self, const char* dis);
@@ -2690,6 +2698,8 @@ static void RP2040_setInterrupt(RP2040* self, int32_t irq, bool value);
 static void RP2040_setInterruptCore(RP2040* self, int32_t irq, bool value, int32_t core);
 static void RP2040_updateIOInterrupt(RP2040* self);
 static int32_t RP2040_stepCores(RP2040* self);
+static void RP2040_updatePioActiveLists(RP2040* self);
+static void RP2040_stepPios(RP2040* self, int32_t cycles);
 static void RP2040_stepThings(RP2040* self, int32_t cycles);
 static void RP2040_step(RP2040* self);
 static void RP2040_stop(RP2040* self);
@@ -2719,6 +2729,8 @@ static void RP2350_setInterrupt(RP2350* self, int32_t irq, bool value);
 static void RP2350_setInterruptCore(RP2350* self, int32_t irq, bool value, int32_t core);
 static void RP2350_updateIOInterrupt(RP2350* self);
 static int32_t RP2350_stepCores(RP2350* self);
+static void RP2350_updatePioActiveLists(RP2350* self);
+static void RP2350_stepPios(RP2350* self, int32_t cycles);
 static void RP2350_stepThings(RP2350* self, int32_t cycles);
 static void RP2350_step(RP2350* self);
 static void RP2350_stop(RP2350* self);
@@ -3592,6 +3604,7 @@ static const IRPChipVTable RP2040_IRPChip_vtable = {
   .gpioRawOutputValue = (void*)RP2040_gpioRawOutputValue,
   .gpioRawOutputEnable = (void*)RP2040_gpioRawOutputEnable,
   .gpioInputValueHasBeenSet = (void*)RP2040_gpioInputValueHasBeenSet,
+  .updatePioActiveLists = (void*)RP2040_updatePioActiveLists,
   /* TODO: .pio = [src/rp2040.ts:52: RP2040 implements IRPChip] */ NULL,
   /* TODO: .flash = [src/rp2040.ts:52: RP2040 implements IRPChip] */ NULL,
   /* TODO: .sram = [src/rp2040.ts:52: RP2040 implements IRPChip] */ NULL,
@@ -3633,6 +3646,7 @@ static const IRPChipVTable RP2350_IRPChip_vtable = {
   .gpioRawOutputValue = (void*)RP2350_gpioRawOutputValue,
   .gpioRawOutputEnable = (void*)RP2350_gpioRawOutputEnable,
   .gpioInputValueHasBeenSet = (void*)RP2350_gpioInputValueHasBeenSet,
+  .updatePioActiveLists = (void*)RP2350_updatePioActiveLists,
   /* TODO: .pio = [src/rp2350.ts:87: RP2350 implements IRPChip] */ NULL,
   /* TODO: .flash = [src/rp2350.ts:87: RP2350 implements IRPChip] */ NULL,
   /* TODO: .sram = [src/rp2350.ts:87: RP2350 implements IRPChip] */ NULL,
@@ -7374,7 +7388,6 @@ enum { XPSR_IT_MASK = (100727808) }; /* ((int32_t)(XPSR_IT_COND_MASK) | (int32_t
 enum { XPSR_IPSR_MASK = (511) };
 static M33Registers* M33Registers_new() {
   M33Registers* self = calloc(1, sizeof(M33Registers));
-  self->r = calloc(16, sizeof(uint32_t));
   self->xpsr = XPSR_T;
   self->primask = 0;
   self->basepri = 0;
@@ -7392,7 +7405,6 @@ static M33Registers* M33Registers_new() {
   self->basepri_ns = 0;
   self->faultmask_ns = 0;
   self->control_ns = 0;
-  self->s = calloc(32, sizeof(float));
   self->fpscr = 0;
   return self;
 }
@@ -7589,7 +7601,7 @@ static GPIOPin* GPIOPin_new(RP2350* rp2040, int32_t index, const char* name) {
   self->irqEnableMask = 0;
   self->irqForceMask = 0;
   self->irqStatus = 0;
-  self->listeners = calloc(8, sizeof(void*));
+  self->listeners = calloc(8, sizeof(GPIOPinListener));
   self->listeners_count = 0;
   return self;
 }
@@ -7714,8 +7726,8 @@ static void GPIOPin_checkForUpdates(GPIOPin* self) {
   {
     int32_t __forof_n = self->listeners_count;
     for (int32_t __forof_i = 0; __forof_i < __forof_n; __forof_i++) {
-      void* listener = self->listeners[__forof_i];
-  /* TODO: OptionalCallExpression [src/gpio-pin.ts:181: listener?.(value, lastValue);] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "OptionalCallExpression [src/gpio-pin.ts:181: listener?.(value, lastValue);]"); abort(); 0; }));
+      GPIOPinListener listener = self->listeners[__forof_i];
+  listener(value, lastValue);
     }
   }
   }
@@ -7736,10 +7748,8 @@ static void GPIOPin_updateIRQValue(GPIOPin* self, int32_t value) {
   }
 }
 
-static int32_t GPIOPin_addListener(GPIOPin* self, void* callback) {
+static void GPIOPin_addListener(GPIOPin* self, GPIOPinListener callback) {
   (__extension__({ if (self->listeners_count < 8) { self->listeners[self->listeners_count++] = callback; } else { fprintf(stderr, "cts2c: %s capacity (%d) exceeded\n", "listeners", 8); abort(); } }));
-  int32_t index = (self->listeners_count - 1);
-  return ((int32_t)(/* TODO: ArrowFunctionExpression [src/gpio-pin.ts:204: return () => {] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "ArrowFunctionExpression [src/gpio-pin.ts:204: return () => {]"); abort(); 0; }))));
 }
 
 // ─── index.ts ───
@@ -9816,6 +9826,7 @@ static StateMachine* StateMachine_new(RP2350* rp2040, RPPIO* pio, int32_t index)
   self->waitTargetPio = self->pio;
   self->dreqRx = (self->pio->dreqRx_base + self->index);
   self->dreqTx = (self->pio->dreqTx_base + self->index);
+  self->fifoStat = 0;
   self->irqTargetScratch = memcpy(malloc(sizeof(IrqTarget)), &(IrqTarget){ .targetPio = pio, .irqBit = 0 }, sizeof(IrqTarget));
   StateMachine_updateDMARx(self);
   StateMachine_updateDMATx(self);
@@ -9823,6 +9834,7 @@ static StateMachine* StateMachine_new(RP2350* rp2040, RPPIO* pio, int32_t index)
 }
 
 static void StateMachine_updateDMATx(StateMachine* self) {
+  StateMachine_updateFifoStat(self);
   if (FIFO_full_get(self->txFIFO)) {
   RP2350_dma_clearDREQ(self->rp2040, self->dreqTx);
   } else {
@@ -9831,6 +9843,7 @@ static void StateMachine_updateDMATx(StateMachine* self) {
 }
 
 static void StateMachine_updateDMARx(StateMachine* self) {
+  StateMachine_updateFifoStat(self);
   if (FIFO_empty_get(self->rxFIFO)) {
   RP2350_dma_clearDREQ(self->rp2040, self->dreqRx);
   } else {
@@ -9882,6 +9895,7 @@ static void StateMachine_enabled_set(StateMachine* self, bool value) {
   } else {
   (self->pio->machinesRunning &= (~((int32_t)((uint32_t)(1) << (((int32_t)(self->index)) & 31)))));
   }
+  RP2350_updatePioActiveLists(self->rp2040);
 }
 
 static int32_t StateMachine_enabled_get(StateMachine* self) {
@@ -10078,7 +10092,7 @@ static void StateMachine_outInstruction(StateMachine* self, int32_t arg) {
 
 static void StateMachine_executeInstruction(StateMachine* self, int32_t opcode) {
   int32_t arg = ((int32_t)(opcode) & (int32_t)(255));
-  switch (((uint32_t)(opcode) >> (13))) {
+  switch (((int32_t)(((uint32_t)(opcode) >> (13))) & (int32_t)(7))) {
   case 0:
   if (StateMachine_jmpCondition(self, ((int32_t)(arg) >> (5)))) {
   (self->nextPC = ((int32_t)(arg) & (int32_t)(31)));
@@ -10332,14 +10346,19 @@ static void StateMachine_wait(StateMachine* self, WaitType type, bool polarity, 
 }
 
 static void StateMachine_step(StateMachine* self) {
-  if ((!self->_enabled)) {
-  return;
+  if (self->_enabled) {
+  StateMachine_stepUnchecked(self);
   }
+}
+
+static void StateMachine_stepUnchecked(StateMachine* self) {
+  if ((self->clockDiv != 256)) {
   (self->curClockPhase += 256);
   if ((self->curClockPhase < self->clockDiv)) {
   return;
   }
   (self->curClockPhase -= self->clockDiv);
+  }
   (self->cycles++);
   if ((self->remainingDelay > 0)) {
   (self->remainingDelay--);
@@ -10485,9 +10504,9 @@ static void StateMachine_writeUint32(StateMachine* self, int32_t offset, int32_t
   }
 }
 
-static int32_t StateMachine_fifoStat_get(StateMachine* self) {
+static void StateMachine_updateFifoStat(StateMachine* self) {
   int32_t result = ((int32_t)(((int32_t)(((int32_t)((FIFO_empty_get(self->txFIFO) ? FSTAT_TXEMPTY : 0)) | (int32_t)((FIFO_full_get(self->txFIFO) ? FSTAT_TXFULL : 0)))) | (int32_t)((FIFO_empty_get(self->rxFIFO) ? FSTAT_RXEMPTY : 0)))) | (int32_t)((FIFO_full_get(self->rxFIFO) ? FSTAT_RXFULL : 0)));
-  return ((int32_t)((uint32_t)(result) << (((int32_t)(self->index)) & 31)));
+  (self->fifoStat = ((int32_t)((uint32_t)(result) << (((int32_t)(self->index)) & 31))));
 }
 
 static void StateMachine_restart(StateMachine* self) {
@@ -10581,8 +10600,6 @@ static RPPIO* RPPIO_new(RP2350* rp2040, const char* name, int32_t firstIrq, int3
   self->index = index;
   self->dreqRx_base = dreqRx_base;
   self->dreqTx_base = dreqTx_base;
-  self->instructions = calloc(32, sizeof(uint32_t));
-  self->machines = calloc(4, sizeof(StateMachine*));
   self->machines[0] = StateMachine_new(self->base.rp2040, self, 0);
   self->machines[1] = StateMachine_new(self->base.rp2040, self, 1);
   self->machines[2] = StateMachine_new(self->base.rp2040, self, 2);
@@ -10661,7 +10678,7 @@ static int32_t RPPIO_readUint32(RPPIO* self, int32_t offset) {
   case CTRL:
   return self->machinesRunning;
   case FSTAT:
-  return ((int32_t)(((int32_t)(((int32_t)(StateMachine_fifoStat_get(self->machines[0])) | (int32_t)(StateMachine_fifoStat_get(self->machines[1])))) | (int32_t)(StateMachine_fifoStat_get(self->machines[2])))) | (int32_t)(StateMachine_fifoStat_get(self->machines[3])));
+  return ((int32_t)(((int32_t)(((int32_t)(self->machines[0]->fifoStat) | (int32_t)(self->machines[1]->fifoStat))) | (int32_t)(self->machines[2]->fifoStat))) | (int32_t)(self->machines[3]->fifoStat));
   case FDEBUG:
   return self->fdebug;
   case FLEVEL:
@@ -10686,19 +10703,19 @@ static int32_t RPPIO_readUint32(RPPIO* self, int32_t offset) {
   return self->pinDirections;
   case DBG_CFGINFO:
   return 2098180;
-  __dyncase_17_14: /* dynamic case (INTR__pio + self->irq_reg_offset) [src/peripherals/pio.ts:1146: case INTR + this.irq_reg_offset:] */;
+  __dyncase_17_14: /* dynamic case (INTR__pio + self->irq_reg_offset) [src/peripherals/pio.ts:1155: case INTR + this.irq_reg_offset:] */;
   return RPPIO_intRaw_get(self);
-  __dyncase_17_15: /* dynamic case (IRQ0_INTE + self->irq_reg_offset) [src/peripherals/pio.ts:1148: case IRQ0_INTE + this.irq_reg_offset:] */;
+  __dyncase_17_15: /* dynamic case (IRQ0_INTE + self->irq_reg_offset) [src/peripherals/pio.ts:1157: case IRQ0_INTE + this.irq_reg_offset:] */;
   return self->irq0IntEnable;
-  __dyncase_17_16: /* dynamic case (IRQ0_INTF + self->irq_reg_offset) [src/peripherals/pio.ts:1150: case IRQ0_INTF + this.irq_reg_offset:] */;
+  __dyncase_17_16: /* dynamic case (IRQ0_INTF + self->irq_reg_offset) [src/peripherals/pio.ts:1159: case IRQ0_INTF + this.irq_reg_offset:] */;
   return self->irq0IntForce;
-  __dyncase_17_17: /* dynamic case (IRQ0_INTS + self->irq_reg_offset) [src/peripherals/pio.ts:1152: case IRQ0_INTS + this.irq_reg_offset:] */;
+  __dyncase_17_17: /* dynamic case (IRQ0_INTS + self->irq_reg_offset) [src/peripherals/pio.ts:1161: case IRQ0_INTS + this.irq_reg_offset:] */;
   return RPPIO_irq0IntStatus_get(self);
-  __dyncase_17_18: /* dynamic case (IRQ1_INTE + self->irq_reg_offset) [src/peripherals/pio.ts:1154: case IRQ1_INTE + this.irq_reg_offset:] */;
+  __dyncase_17_18: /* dynamic case (IRQ1_INTE + self->irq_reg_offset) [src/peripherals/pio.ts:1163: case IRQ1_INTE + this.irq_reg_offset:] */;
   return self->irq1IntEnable;
-  __dyncase_17_19: /* dynamic case (IRQ1_INTF + self->irq_reg_offset) [src/peripherals/pio.ts:1156: case IRQ1_INTF + this.irq_reg_offset:] */;
+  __dyncase_17_19: /* dynamic case (IRQ1_INTF + self->irq_reg_offset) [src/peripherals/pio.ts:1165: case IRQ1_INTF + this.irq_reg_offset:] */;
   return self->irq1IntForce;
-  __dyncase_17_20: /* dynamic case (IRQ1_INTS + self->irq_reg_offset) [src/peripherals/pio.ts:1158: case IRQ1_INTS + this.irq_reg_offset:] */;
+  __dyncase_17_20: /* dynamic case (IRQ1_INTS + self->irq_reg_offset) [src/peripherals/pio.ts:1167: case IRQ1_INTS + this.irq_reg_offset:] */;
   return RPPIO_irq1IntStatus_get(self);
   case RP2350_GPIOBASE:
   if ((!self->isRp2040)) {
@@ -10808,19 +10825,19 @@ int32_t index = 0
   (self->irq |= value);
   RPPIO_irqUpdated(self);
   break;
-  __dyncase_18_9: /* dynamic case (IRQ0_INTE + self->irq_reg_offset) [src/peripherals/pio.ts:1252: case IRQ0_INTE + this.irq_reg_offset:] */;
+  __dyncase_18_9: /* dynamic case (IRQ0_INTE + self->irq_reg_offset) [src/peripherals/pio.ts:1261: case IRQ0_INTE + this.irq_reg_offset:] */;
   (self->irq0IntEnable = ((int32_t)(value) & (int32_t)(4095)));
   RPPIO_checkInterrupts(self);
   break;
-  __dyncase_18_10: /* dynamic case (IRQ0_INTF + self->irq_reg_offset) [src/peripherals/pio.ts:1256: case IRQ0_INTF + this.irq_reg_offset:] */;
+  __dyncase_18_10: /* dynamic case (IRQ0_INTF + self->irq_reg_offset) [src/peripherals/pio.ts:1265: case IRQ0_INTF + this.irq_reg_offset:] */;
   (self->irq0IntForce = ((int32_t)(value) & (int32_t)(4095)));
   RPPIO_checkInterrupts(self);
   break;
-  __dyncase_18_11: /* dynamic case (IRQ1_INTE + self->irq_reg_offset) [src/peripherals/pio.ts:1260: case IRQ1_INTE + this.irq_reg_offset:] */;
+  __dyncase_18_11: /* dynamic case (IRQ1_INTE + self->irq_reg_offset) [src/peripherals/pio.ts:1269: case IRQ1_INTE + this.irq_reg_offset:] */;
   (self->irq1IntEnable = ((int32_t)(value) & (int32_t)(4095)));
   RPPIO_checkInterrupts(self);
   break;
-  __dyncase_18_12: /* dynamic case (IRQ1_INTF + self->irq_reg_offset) [src/peripherals/pio.ts:1264: case IRQ1_INTF + this.irq_reg_offset:] */;
+  __dyncase_18_12: /* dynamic case (IRQ1_INTF + self->irq_reg_offset) [src/peripherals/pio.ts:1273: case IRQ1_INTF + this.irq_reg_offset:] */;
   (self->irq1IntForce = ((int32_t)(value) & (int32_t)(4095)));
   RPPIO_checkInterrupts(self);
   break;
@@ -10890,12 +10907,11 @@ static void RPPIO_checkChangedPins(RPPIO* self) {
   (self->oldPinValues = self->pinValues);
   RP2350* __destruct_tmp_1 = self->base.rp2040;
   GPIOPin** gpio = __destruct_tmp_1->gpio;
-  for (
-int32_t pinIndex = 0
-; (pinIndex < 32); (pinIndex++)) {
-  if (((int32_t)(changedPins) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(pinIndex)) & 31)))))) {
-  GPIOPin_checkForUpdates(gpio[(pinIndex + self->gpiobase)]);
-  }
+  int32_t remaining = changedPins;
+  while (remaining) {
+  int32_t lowest = ((int32_t)(remaining) & (int32_t)((-remaining)));
+  GPIOPin_checkForUpdates(gpio[((31 - clz32(lowest)) + self->gpiobase)]);
+  (remaining ^= lowest);
   }
   }
 }
@@ -10908,7 +10924,7 @@ static void RPPIO_step(RPPIO* self) {
 int32_t i = 0
 ; (i < 4); (i++)) {
   if (((int32_t)(self->machinesRunning) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(i)) & 31)))))) {
-  StateMachine_step(self->machines[i]);
+  StateMachine_stepUnchecked(self->machines[i]);
   }
   }
   RPPIO_checkChangedPins(self);
@@ -10923,7 +10939,7 @@ static void RPPIO_stop(RPPIO* self) {
     }
   }
   if (self->runTimer) {
-  /* TODO: clearTimeout() [src/peripherals/pio.ts:1362: clearTimeout(this.runTimer);] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "clearTimeout() [src/peripherals/pio.ts:1362: clearTimeout(this.runTimer);]"); abort(); 0; }));
+  /* TODO: clearTimeout() [src/peripherals/pio.ts:1372: clearTimeout(this.runTimer);] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "clearTimeout() [src/peripherals/pio.ts:1372: clearTimeout(this.runTimer);]"); abort(); 0; }));
   (self->runTimer = 0);
   }
 }
@@ -11016,7 +11032,6 @@ static RP2350POWMAN* RP2350POWMAN_new(RP2350* rp2040, const char* name) {
   self->runStartNanos = 0;
   self->running = false;
   self->badPasswd = false;
-  self->setWords = calloc(4, sizeof(uint16_t));
   self->regs = calloc(REG_WORDS, sizeof(uint32_t));
   return self;
 }
@@ -11190,7 +11205,6 @@ static RPPPB2350* RPPPB2350_new(RP2350* rp2350, const char* name) {
     free(__super_19);
   }
   (&(self)->base)->__vtable_Peripheral = &RPPPB2350_Peripheral_vtable;
-  self->coreState = calloc(2, sizeof(M33CoreState*));
   self->coreState[0] = RPPPB2350_makeCoreState(self, 0);
   self->coreState[1] = RPPPB2350_makeCoreState(self, 1);
   return self;
@@ -11895,7 +11909,6 @@ static RPPWM* RPPWM_new(RP2350* rp2040, const char* name, int32_t pwm_wrap_irq, 
   self->rp2040 = rp2040;
   self->pwm_wrap_irq = pwm_wrap_irq;
   self->pwm_dreq_base = pwm_dreq_base;
-  self->channels = calloc(8, sizeof(PWMChannel*));
   self->channels[0] = PWMChannel_new(self, self->rp2040->clock, 0);
   self->channels[1] = PWMChannel_new(self, self->rp2040->clock, 1);
   self->channels[2] = PWMChannel_new(self, self->rp2040->clock, 2);
@@ -11996,7 +12009,7 @@ static void RPPWM_gpioSet(RPPWM* self, int32_t index, bool value) {
 
 static void RPPWM_gpioSetDir(RPPWM* self, int32_t index, bool output) {
   int32_t bit = ((int32_t)((uint32_t)(1) << (((int32_t)(index)) & 31)));
-  int32_t newGpioDirection = (output ? ((int32_t)(self->gpioDirection) | (int32_t)(bit)) : ((int32_t)(self->gpioDirection) & (int32_t)((~bit))));
+  uint32_t newGpioDirection = ((uint32_t)((output ? ((int32_t)(self->gpioDirection) | (int32_t)(bit)) : ((int32_t)(self->gpioDirection) & (int32_t)((~bit))))) >> (0));
   if ((self->gpioDirection != newGpioDirection)) {
   (self->gpioDirection = newGpioDirection);
   GPIOPin_checkForUpdates(self->rp2040->gpio[index]);
@@ -12008,7 +12021,7 @@ static int32_t RPPWM_gpioRead(RPPWM* self, int32_t index) {
 }
 
 static void RPPWM_gpioOnInput(RPPWM* self, int32_t index) {
-  if ((self->gpioDirection && ((int32_t)((uint32_t)(1) << (((int32_t)(index)) & 31))))) {
+  if (((int32_t)(self->gpioDirection) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(index)) & 31)))))) {
   return;
   }
   {
@@ -12734,6 +12747,10 @@ enum { ALARM2 = (24) };
 enum { ALARM3 = (28) };
 enum { ARMED = (32) };
 enum { PAUSE = (48) };
+enum { INTR__timer = (0) };
+enum { INTE__timer = (4) };
+enum { INTF__timer = (8) };
+enum { INTS__timer = (12) };
 enum { ALARM_0 = (1) }; /* ((int32_t)((uint32_t)(1) << (0))) */
 enum { ALARM_1 = (2) }; /* ((int32_t)((uint32_t)(1) << (1))) */
 enum { ALARM_2 = (4) }; /* ((int32_t)((uint32_t)(1) << (2))) */
@@ -12767,24 +12784,15 @@ static RPTimer* RPTimer_new(RP2350* rp2040, const char* name, int32_t timer_irq_
   self->intEnable = 0;
   self->intForce = 0;
   self->paused = false;
-  self->INTR = 0;
-  self->INTE = 0;
-  self->INTF = 0;
-  self->INTS = 0;
+  self->intRegBase = 0;
   (self->clock = (IClock){ .obj = (void*)(rp2040->clock), .vtable = &SimulationClock_IClock_vtable });
   do { const char* __switch_tmp_25 = rp2040->identifier;
   if (strcmp(__switch_tmp_25, "rp2040") == 0) {
-  (self->INTR = 52);
-  (self->INTE = 56);
-  (self->INTF = 60);
-  (self->INTS = 64);
+  (self->intRegBase = 52);
   break;
   }
   else if (strcmp(__switch_tmp_25, "rp2350") == 0) {
-  (self->INTR = 60);
-  (self->INTE = 64);
-  (self->INTF = 68);
-  (self->INTS = 72);
+  (self->intRegBase = 60);
   break;
   }
   else {
@@ -12792,7 +12800,6 @@ static RPTimer* RPTimer_new(RP2350* rp2040, const char* name, int32_t timer_irq_
   abort();
   }
   } while (0);
-  self->alarms = calloc(4, sizeof(RPTimerAlarm*));
   self->alarms[0] = RPTimerAlarm_new(self, ALARM_0, 0);
   self->alarms[1] = RPTimerAlarm_new(self, ALARM_1, 1);
   self->alarms[2] = RPTimerAlarm_new(self, ALARM_2, 2);
@@ -12812,13 +12819,7 @@ static int32_t RPTimer_intStatus_get(RPTimer* self) {
 }
 
 static int32_t RPTimer_readUint32(RPTimer* self, int32_t offset) {
-  {
-  int32_t __dyncase_26_disc = offset;
-  if (__dyncase_26_disc == (self->INTR)) goto __dyncase_26_9;
-  if (__dyncase_26_disc == (self->INTE)) goto __dyncase_26_10;
-  if (__dyncase_26_disc == (self->INTF)) goto __dyncase_26_11;
-  if (__dyncase_26_disc == (self->INTS)) goto __dyncase_26_12;
-  switch (__dyncase_26_disc) {
+  switch (offset) {
   case TIMEHR:
   return self->latchedTimeHigh;
   case TIMELR:
@@ -12847,28 +12848,24 @@ static int32_t RPTimer_readUint32(RPTimer* self, int32_t offset) {
   return self->alarms[3]->targetMicros;
   case PAUSE:
   return (self->paused ? 1 : 0);
-  __dyncase_26_9: /* dynamic case self->INTR [src/peripherals/timer.ts:121: case this.INTR:] */;
-  return self->intRaw;
-  __dyncase_26_10: /* dynamic case self->INTE [src/peripherals/timer.ts:123: case this.INTE:] */;
-  return self->intEnable;
-  __dyncase_26_11: /* dynamic case self->INTF [src/peripherals/timer.ts:125: case this.INTF:] */;
-  return self->intForce;
-  __dyncase_26_12: /* dynamic case self->INTS [src/peripherals/timer.ts:127: case this.INTS:] */;
-  return RPTimer_intStatus_get(self);
   case ARMED:
   return ((int32_t)(((int32_t)(((int32_t)((self->alarms[0]->armed ? self->alarms[0]->bitValue : 0)) | (int32_t)((self->alarms[1]->armed ? self->alarms[1]->bitValue : 0)))) | (int32_t)((self->alarms[2]->armed ? self->alarms[2]->bitValue : 0)))) | (int32_t)((self->alarms[3]->armed ? self->alarms[3]->bitValue : 0)));
   }
+  switch ((offset - self->intRegBase)) {
+  case INTR__timer:
+  return self->intRaw;
+  case INTE__timer:
+  return self->intEnable;
+  case INTF__timer:
+  return self->intForce;
+  case INTS__timer:
+  return RPTimer_intStatus_get(self);
   }
   return BasePeripheral_readUint32(&self->base, offset);
 }
 
 static void RPTimer_writeUint32(RPTimer* self, int32_t offset, int32_t value) {
-  {
-  int32_t __dyncase_27_disc = offset;
-  if (__dyncase_27_disc == (self->INTR)) goto __dyncase_27_6;
-  if (__dyncase_27_disc == (self->INTE)) goto __dyncase_27_7;
-  if (__dyncase_27_disc == (self->INTF)) goto __dyncase_27_8;
-  switch (__dyncase_27_disc) {
+  switch (offset) {
   case ALARM0:
   case ALARM1:
   case ALARM2:
@@ -12880,7 +12877,7 @@ static void RPTimer_writeUint32(RPTimer* self, int32_t offset, int32_t value) {
   (alarm->armed = true);
   (alarm->targetMicros = value);
   IAlarm_schedule(alarm->clockAlarm, (deltaMicros * 1000));
-  break;
+  return;
   }
   case ARMED:
   {
@@ -12892,29 +12889,29 @@ static void RPTimer_writeUint32(RPTimer* self, int32_t offset, int32_t value) {
   }
     }
   }
-  break;
+  return;
   case PAUSE:
   (self->paused = (!(!((int32_t)(value) & (int32_t)(1)))));
   if (self->paused) {
   BasePeripheral_warn(&self->base, "Unimplemented Timer Pause");
   }
-  break;
-  __dyncase_27_6: /* dynamic case self->INTR [src/peripherals/timer.ts:169: case this.INTR:] */;
+  return;
+  }
+  switch ((offset - self->intRegBase)) {
+  case INTR__timer:
   (self->intRaw &= (~self->base.rawWriteValue));
   RPTimer_checkInterrupts(self);
-  break;
-  __dyncase_27_7: /* dynamic case self->INTE [src/peripherals/timer.ts:173: case this.INTE:] */;
+  return;
+  case INTE__timer:
   (self->intEnable = ((int32_t)(value) & (int32_t)(15)));
   RPTimer_checkInterrupts(self);
-  break;
-  __dyncase_27_8: /* dynamic case self->INTF [src/peripherals/timer.ts:177: case this.INTF:] */;
+  return;
+  case INTF__timer:
   (self->intForce = ((int32_t)(value) & (int32_t)(15)));
   RPTimer_checkInterrupts(self);
-  break;
-  default:
+  return;
+  }
   BasePeripheral_writeUint32(&self->base, offset, value);
-  }
-  }
 }
 
 static void RPTimer_fireAlarm(RPTimer* self, int32_t index) {
@@ -12958,7 +12955,6 @@ static RP2350TRNG* RP2350TRNG_new(RP2350* rp2040, const char* name) {
   }
   (&(self)->base)->__vtable_Peripheral = &RP2350TRNG_Peripheral_vtable;
   self->state = ((uint32_t)(SEED) >> (0));
-  self->ehr = calloc(6, sizeof(uint32_t));
   self->valid = false;
   self->enabled = false;
   self->regs = calloc(4096, sizeof(int32_t));
@@ -13065,9 +13061,9 @@ enum { UARTRXINTR = (16) }; /* ((int32_t)((uint32_t)(1) << (4))) */
 static RPUART* RPUART_new(RP2350* rp2040, const char* name, int32_t irq, IUARTDMAChannels* dreq) {
   RPUART* self = calloc(1, sizeof(RPUART));
   {
-    BasePeripheral* __super_28 = BasePeripheral_new(rp2040, name);
-    self->base = *__super_28;
-    free(__super_28);
+    BasePeripheral* __super_26 = BasePeripheral_new(rp2040, name);
+    self->base = *__super_26;
+    free(__super_26);
   }
   (&(self)->base)->__vtable_Peripheral = &RPUART_Peripheral_vtable;
   self->irq = irq;
@@ -13321,9 +13317,9 @@ static int32_t RPUSBController_intStatus_get(RPUSBController* self) {
 static RPUSBController* RPUSBController_new(RP2350* rp2040, const char* name, int32_t usbctrl_irq) {
   RPUSBController* self = calloc(1, sizeof(RPUSBController));
   {
-    BasePeripheral* __super_29 = BasePeripheral_new(rp2040, name);
-    self->base = *__super_29;
-    free(__super_29);
+    BasePeripheral* __super_27 = BasePeripheral_new(rp2040, name);
+    self->base = *__super_27;
+    free(__super_27);
   }
   (self)->__vtable_AlarmCallback = &RPUSBController_AlarmCallback_vtable;
   (&(self)->base)->__vtable_Peripheral = &RPUSBController_Peripheral_vtable;
@@ -13525,9 +13521,27 @@ static void RPUSBController_buffStatusUpdated(RPUSBController* self) {
   RPUSBController_checkInterrupts(self);
 }
 
+static void RPUSBController_mirrorSieBit(RPUSBController* self, int32_t sieBit, int32_t intRawBit) {
+  if (((int32_t)(self->sieStatus) & (int32_t)(sieBit))) {
+  (self->intRaw |= intRawBit);
+  } else {
+  (self->intRaw &= (~intRawBit));
+  }
+}
+
 static void RPUSBController_sieStatusUpdated(RPUSBController* self) {
-  int32_t intRegisterMap = ((int32_t)(/* TODO: array literal [src/peripherals/usb.ts:369: const intRegisterMap = [] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "array literal [src/peripherals/usb.ts:369: const intRegisterMap = []"); abort(); 0; }))));
-  /* TODO: ForOfStatement [src/peripherals/usb.ts:383: for (const [sieBit, intRawBit] of intRegisterMap) {] */ fprintf(stderr, "cts2c: unsupported: %s\n", "ForOfStatement [src/peripherals/usb.ts:383: for (const [sieBit, intRawBit] of intRegisterMap) {]"); abort();
+  RPUSBController_mirrorSieBit(self, SIE_SETUP_REC, ((int32_t)((uint32_t)(1) << (16))));
+  RPUSBController_mirrorSieBit(self, SIE_RESUME, ((int32_t)((uint32_t)(1) << (15))));
+  RPUSBController_mirrorSieBit(self, SIE_SUSPENDED, ((int32_t)((uint32_t)(1) << (14))));
+  RPUSBController_mirrorSieBit(self, SIE_CONNECTED, ((int32_t)((uint32_t)(1) << (13))));
+  RPUSBController_mirrorSieBit(self, SIE_BUS_RESET, ((int32_t)((uint32_t)(1) << (12))));
+  RPUSBController_mirrorSieBit(self, SIE_VBUS_DETECTED, ((int32_t)((uint32_t)(1) << (11))));
+  RPUSBController_mirrorSieBit(self, SIE_STALL_REC, ((int32_t)((uint32_t)(1) << (10))));
+  RPUSBController_mirrorSieBit(self, SIE_CRC_ERROR, ((int32_t)((uint32_t)(1) << (9))));
+  RPUSBController_mirrorSieBit(self, SIE_BIT_STUFF_ERROR, ((int32_t)((uint32_t)(1) << (8))));
+  RPUSBController_mirrorSieBit(self, SIE_RX_OVERFLOW, ((int32_t)((uint32_t)(1) << (7))));
+  RPUSBController_mirrorSieBit(self, SIE_RX_TIMEOUT, ((int32_t)((uint32_t)(1) << (6))));
+  RPUSBController_mirrorSieBit(self, SIE_DATA_SEQ_ERROR, ((int32_t)((uint32_t)(1) << (5))));
   RPUSBController_checkInterrupts(self);
 }
 
@@ -13569,13 +13583,12 @@ static void RPWatchdog_onWatchdogTrigger_default(void* __ctx) {
 static RPWatchdog* RPWatchdog_new(RP2350* rp2040, const char* name) {
   RPWatchdog* self = calloc(1, sizeof(RPWatchdog));
   {
-    BasePeripheral* __super_30 = BasePeripheral_new(rp2040, name);
-    self->base = *__super_30;
-    free(__super_30);
+    BasePeripheral* __super_28 = BasePeripheral_new(rp2040, name);
+    self->base = *__super_28;
+    free(__super_28);
   }
   (&(self)->base)->__vtable_Peripheral = &RPWatchdog_Peripheral_vtable;
   (self)->__vtable_AlarmCallback = &RPWatchdog_AlarmCallback_vtable;
-  self->scratchData = calloc(8, sizeof(uint32_t));
   self->enable = false;
   self->tickEnable = true;
   self->reason = 0;
@@ -13790,6 +13803,26 @@ static inline int32_t imm_j(int32_t i) {
   return ((int32_t)(((int32_t)(((int32_t)(((int32_t)((uint32_t)(((int32_t)(i) >> (31))) << (20)))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(((uint32_t)(i) >> (12))) & (int32_t)(255))) << (12)))))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(((uint32_t)(i) >> (20))) & (int32_t)(1))) << (11)))))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(((uint32_t)(i) >> (21))) & (int32_t)(1023))) << (1)))));
 }
 
+static int32_t CPU_getRegister(CPU* self, int32_t index) {
+  return self->regs[index];
+}
+
+static uint32_t CPU_getRegisterU(CPU* self, int32_t index) {
+  return ((uint32_t)(self->regs[index]) >> (0));
+}
+
+static void CPU_setRegister(CPU* self, int32_t index, int32_t value) {
+  if ((index != 0)) {
+  (self->regs[index] = value);
+  }
+}
+
+static void CPU_setRegisterU(CPU* self, int32_t index, int32_t value) {
+  if ((index != 0)) {
+  (self->regs[index] = value);
+  }
+}
+
 static int64_t CPU_getCycles(CPU* self) {
   return self->cycles;
 }
@@ -13836,19 +13869,11 @@ static CPU* CPU_new(RP2350* chip, const char* coreLabel, int32_t mhartid) {
   self->waiting = false;
   self->waitingOnBlock = false;
   self->eventRegistered = false;
-  self->registerSet = RegisterSet_new(32);
-  self->csrs = calloc(4096, sizeof(uint32_t));
   self->pc = 0;
   self->next_pc = 0;
   self->cycles = 0;
   self->currentMode = ExecutionModeRiscv_Mode_Machine;
   self->interruptsUpdated = false;
-  self->meiea = calloc(512, sizeof(int32_t));
-  self->meipa = calloc(512, sizeof(int32_t));
-  self->meifa = calloc(512, sizeof(int32_t));
-  self->meipra = calloc(512, sizeof(int32_t));
-  self->candidateIrq = calloc(512, sizeof(int32_t));
-  self->candidatePriority = calloc(512, sizeof(int32_t));
   self->candidateCount = 0;
   self->did_just_jump = false;
   self->lr_addr = (-1);
@@ -13932,7 +13957,7 @@ static int32_t CPU_fetchInstruction(CPU* self) {
   return word;
 }
 
-static void CPU_printDisassembly(CPU* self) { /* TODO: stubbed: uses unsupported JS [src/riscv/cpu.ts:200: printDisassembly() {] */ }
+static void CPU_printDisassembly(CPU* self) { /* TODO: stubbed: uses unsupported JS [src/riscv/cpu.ts:218: printDisassembly() {] */ }
 
 static int32_t CPU_executeInstruction(CPU* self) {
   int64_t before = self->cycles;
@@ -14353,7 +14378,7 @@ int32_t irq = (((int32_t)(raw_write) & (int32_t)(31)) * 4)
   case 3860:
   return;
   }
-  /* TODO: log [src/riscv/cpu.ts:679: this.logger.info(] */ 0;
+  /* TODO: log [src/riscv/cpu.ts:697: this.logger.info(] */ 0;
   (self->csrs[csr] = value);
 }
 
@@ -14425,7 +14450,7 @@ static int32_t CPU_getCSR(CPU* self, int32_t csr, int32_t raw_write) {
   return meicontext;
   }
   }
-  /* TODO: log [src/riscv/cpu.ts:752: this.logger.info(this.coreLabel, `Unknown CSR get: 0x${csr.toString(16)}`);] */ 0;
+  /* TODO: log [src/riscv/cpu.ts:770: this.logger.info(this.coreLabel, `Unknown CSR get: 0x${csr.toString(16)}`);] */ 0;
   return self->csrs[csr];
 }
 
@@ -14442,52 +14467,26 @@ static int32_t umulh(int32_t a, int32_t b) {
   return ((uint32_t)((((hh + ((uint32_t)(lh) >> (16))) + ((uint32_t)(hl) >> (16))) + ((uint32_t)(cross) >> (16)))) >> (0));
 }
 
-static RegisterSet* RegisterSet_new(int32_t numRegisters) {
-  RegisterSet* self = calloc(1, sizeof(RegisterSet));
-  (self->regs = calloc(numRegisters, sizeof(int32_t)));
-  return self;
-}
-
-static int32_t RegisterSet_getRegister(RegisterSet* self, int32_t index) {
-  return self->regs[index];
-}
-
-static uint32_t RegisterSet_getRegisterU(RegisterSet* self, int32_t index) {
-  return ((uint32_t)(self->regs[index]) >> (0));
-}
-
-static void RegisterSet_setRegister(RegisterSet* self, int32_t index, int32_t value) {
-  if ((index != 0)) {
-  (self->regs[index] = value);
-  }
-}
-
-static void RegisterSet_setRegisterU(RegisterSet* self, int32_t index, int32_t value) {
-  if ((index != 0)) {
-  (self->regs[index] = value);
-  }
-}
-
 static void executeLoad(int32_t inst, CPU* cpu) {
   int32_t r = rd(inst);
   int32_t s1 = rs1(inst);
   int32_t im = imm_i(inst);
-  int32_t addr = (RegisterSet_getRegisterU(cpu->registerSet, s1) + im);
+  int32_t addr = (CPU_getRegisterU(cpu, s1) + im);
   switch (func3(inst)) {
   case 0:
-  RegisterSet_setRegister(cpu->registerSet, r, signExtend8(RP2350_readUint8(cpu->chip, addr)));
+  CPU_setRegister(cpu, r, signExtend8(RP2350_readUint8(cpu->chip, addr)));
   break;
   case 1:
-  RegisterSet_setRegister(cpu->registerSet, r, signExtend16(RP2350_readUint16(cpu->chip, addr)));
+  CPU_setRegister(cpu, r, signExtend16(RP2350_readUint16(cpu->chip, addr)));
   break;
   case 2:
-  RegisterSet_setRegisterU(cpu->registerSet, r, RP2350_readUint32(cpu->chip, addr));
+  CPU_setRegisterU(cpu, r, RP2350_readUint32(cpu->chip, addr));
   break;
   case 4:
-  RegisterSet_setRegister(cpu->registerSet, r, RP2350_readUint8(cpu->chip, addr));
+  CPU_setRegister(cpu, r, RP2350_readUint8(cpu->chip, addr));
   break;
   case 5:
-  RegisterSet_setRegister(cpu->registerSet, r, RP2350_readUint16(cpu->chip, addr));
+  CPU_setRegister(cpu, r, RP2350_readUint16(cpu->chip, addr));
   break;
   default:
   fprintf(stderr, "Error: %s\n", fmtStr("Invalid LOAD func3 %d", func3(inst)));
@@ -14501,10 +14500,9 @@ static void executeMiscMem(int32_t inst, CPU* cpu) {
 static void executeOpImm(int32_t inst, CPU* cpu) {
   int32_t r = rd(inst);
   int32_t s1 = rs1(inst);
-  RegisterSet* rs = cpu->registerSet;
   switch (func3(inst)) {
   case 0:
-  RegisterSet_setRegisterU(rs, r, ((uint32_t)((RegisterSet_getRegisterU(rs, s1) + imm_i(inst))) >> (0)));
+  CPU_setRegisterU(cpu, r, ((uint32_t)((CPU_getRegisterU(cpu, s1) + imm_i(inst))) >> (0)));
   break;
   case 1:
   {
@@ -14512,38 +14510,38 @@ static void executeOpImm(int32_t inst, CPU* cpu) {
   int32_t f7 = func7(inst);
   int32_t imu = immU_i(inst);
   if ((f7 == 0)) {
-  RegisterSet_setRegisterU(rs, r, ((int32_t)((uint32_t)(RegisterSet_getRegisterU(rs, s1)) << (((int32_t)(sh)) & 31))));
+  CPU_setRegisterU(cpu, r, ((int32_t)((uint32_t)(CPU_getRegisterU(cpu, s1)) << (((int32_t)(sh)) & 31))));
   } else {
   if ((f7 == 20)) {
-  RegisterSet_setRegister(rs, r, ((int32_t)(RegisterSet_getRegister(rs, s1)) | (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(sh)) & 31))))));
+  CPU_setRegister(cpu, r, ((int32_t)(CPU_getRegister(cpu, s1)) | (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(sh)) & 31))))));
   } else {
   if ((f7 == 36)) {
-  RegisterSet_setRegister(rs, r, ((int32_t)(RegisterSet_getRegister(rs, s1)) & (int32_t)((~((int32_t)((uint32_t)(1) << (((int32_t)(sh)) & 31)))))));
+  CPU_setRegister(cpu, r, ((int32_t)(CPU_getRegister(cpu, s1)) & (int32_t)((~((int32_t)((uint32_t)(1) << (((int32_t)(sh)) & 31)))))));
   } else {
   if ((f7 == 52)) {
-  RegisterSet_setRegister(rs, r, ((int32_t)(RegisterSet_getRegister(rs, s1)) ^ (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(sh)) & 31))))));
+  CPU_setRegister(cpu, r, ((int32_t)(CPU_getRegister(cpu, s1)) ^ (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(sh)) & 31))))));
   } else {
   if ((imu == 1537)) {
-  int32_t t = ((uint32_t)(RegisterSet_getRegister(rs, s1)) >> (0));
-  RegisterSet_setRegister(rs, r, ((t == 0) ? 32 : (31 - clz32(((int32_t)(t) & (int32_t)((-t)))))));
+  int32_t t = ((uint32_t)(CPU_getRegister(cpu, s1)) >> (0));
+  CPU_setRegister(cpu, r, ((t == 0) ? 32 : (31 - clz32(((int32_t)(t) & (int32_t)((-t)))))));
   } else {
   if ((imu == 1538)) {
-  int32_t t = ((uint32_t)(RegisterSet_getRegister(rs, s1)) >> (0));
+  int32_t t = ((uint32_t)(CPU_getRegister(cpu, s1)) >> (0));
   (t = (t - ((int32_t)(((int32_t)(t) >> (1))) & (int32_t)(1431655765))));
   (t = (((int32_t)(t) & (int32_t)(858993459)) + ((int32_t)(((int32_t)(t) >> (2))) & (int32_t)(858993459))));
-  RegisterSet_setRegister(rs, r, ((int32_t)((((int32_t)((t + ((int32_t)(t) >> (4)))) & (int32_t)(252645135)) * 16843009)) >> (24)));
+  CPU_setRegister(cpu, r, ((int32_t)((((int32_t)((t + ((int32_t)(t) >> (4)))) & (int32_t)(252645135)) * 16843009)) >> (24)));
   } else {
   if ((imu == 1541)) {
-  RegisterSet_setRegister(rs, r, signExtend16(((int32_t)(RegisterSet_getRegisterU(rs, s1)) & (int32_t)(65535))));
+  CPU_setRegister(cpu, r, signExtend16(((int32_t)(CPU_getRegisterU(cpu, s1)) & (int32_t)(65535))));
   } else {
   if ((imu == 1540)) {
-  RegisterSet_setRegister(rs, r, signExtend8(((int32_t)(RegisterSet_getRegisterU(rs, s1)) & (int32_t)(255))));
+  CPU_setRegister(cpu, r, signExtend8(((int32_t)(CPU_getRegisterU(cpu, s1)) & (int32_t)(255))));
   } else {
   if ((((int32_t)(inst) & (int32_t)(4293947519u)) == 1610616851)) {
-  RegisterSet_setRegister(rs, r, clz32(RegisterSet_getRegisterU(rs, s1)));
+  CPU_setRegister(cpu, r, clz32(CPU_getRegisterU(cpu, s1)));
   } else {
   if ((imu == 143)) {
-  uint32_t u = RegisterSet_getRegisterU(rs, s1);
+  uint32_t u = CPU_getRegisterU(cpu, s1);
   int32_t result = 0;
   for (
 int32_t i = 0
@@ -14551,7 +14549,7 @@ int32_t i = 0
   (result |= ((int32_t)((uint32_t)(((int32_t)(((uint32_t)(u) >> (((int32_t)((16 + i))) & 31))) & (int32_t)(1))) << (((int32_t)((2 * i))) & 31))));
   (result |= ((int32_t)((uint32_t)(((int32_t)(((uint32_t)(u) >> (((int32_t)(i)) & 31))) & (int32_t)(1))) << (((int32_t)(((2 * i) + 1))) & 31))));
   }
-  RegisterSet_setRegisterU(rs, r, ((uint32_t)(result) >> (0)));
+  CPU_setRegisterU(cpu, r, ((uint32_t)(result) >> (0)));
   } else {
   fprintf(stderr, "Error: %s\n", fmtStr("Unknown OP-IMM func3=1, func7: 0x%x", (unsigned)(f7)));
   abort();
@@ -14568,38 +14566,38 @@ int32_t i = 0
   break;
   }
   case 2:
-  RegisterSet_setRegister(rs, r, ((RegisterSet_getRegister(rs, s1) < imm_i(inst)) ? 1 : 0));
+  CPU_setRegister(cpu, r, ((CPU_getRegister(cpu, s1) < imm_i(inst)) ? 1 : 0));
   break;
   case 3:
-  RegisterSet_setRegister(rs, r, ((RegisterSet_getRegisterU(rs, s1) < immU_i(inst)) ? 1 : 0));
+  CPU_setRegister(cpu, r, ((CPU_getRegisterU(cpu, s1) < immU_i(inst)) ? 1 : 0));
   break;
   case 4:
-  RegisterSet_setRegister(rs, r, ((int32_t)(RegisterSet_getRegister(rs, s1)) ^ (int32_t)(imm_i(inst))));
+  CPU_setRegister(cpu, r, ((int32_t)(CPU_getRegister(cpu, s1)) ^ (int32_t)(imm_i(inst))));
   break;
   case 5:
   {
   int32_t sh = shamt(inst);
   int32_t f7 = func7(inst);
   int32_t imu = immU_i(inst);
-  int32_t v = RegisterSet_getRegister(rs, s1);
+  int32_t v = CPU_getRegister(cpu, s1);
   if ((f7 == 0)) {
-  RegisterSet_setRegister(rs, r, ((uint32_t)(v) >> (((int32_t)(sh)) & 31)));
+  CPU_setRegister(cpu, r, ((uint32_t)(v) >> (((int32_t)(sh)) & 31)));
   } else {
   if ((f7 == 32)) {
-  RegisterSet_setRegister(rs, r, ((int32_t)(v) >> (((int32_t)(sh)) & 31)));
+  CPU_setRegister(cpu, r, ((int32_t)(v) >> (((int32_t)(sh)) & 31)));
   } else {
   if ((f7 == 36)) {
-  RegisterSet_setRegister(rs, r, ((int32_t)(((uint32_t)(v) >> (((int32_t)(sh)) & 31))) & (int32_t)(1)));
+  CPU_setRegister(cpu, r, ((int32_t)(((uint32_t)(v) >> (((int32_t)(sh)) & 31))) & (int32_t)(1)));
   } else {
   if ((f7 == 48)) {
-  uint32_t u = RegisterSet_getRegisterU(rs, s1);
-  RegisterSet_setRegister(rs, r, ((int32_t)(((uint32_t)(((int32_t)((uint32_t)(u) << (((int32_t)((32 - sh))) & 31)))) >> (0))) | (int32_t)(((uint32_t)(u) >> (((int32_t)(sh)) & 31)))));
+  uint32_t u = CPU_getRegisterU(cpu, s1);
+  CPU_setRegister(cpu, r, ((int32_t)(((uint32_t)(((int32_t)((uint32_t)(u) << (((int32_t)((32 - sh))) & 31)))) >> (0))) | (int32_t)(((uint32_t)(u) >> (((int32_t)(sh)) & 31)))));
   } else {
   if ((imu == 1688)) {
-  RegisterSet_setRegisterU(rs, r, ((uint32_t)(((int32_t)(((int32_t)(((int32_t)(((uint32_t)(v) >> (24))) | (int32_t)(((int32_t)(((uint32_t)(v) >> (8))) & (int32_t)(65280))))) | (int32_t)(((int32_t)(((int32_t)((uint32_t)(v) << (8)))) & (int32_t)(16711680))))) | (int32_t)(((uint32_t)(((int32_t)((uint32_t)(((int32_t)(v) & (int32_t)(255))) << (24)))) >> (0))))) >> (0)));
+  CPU_setRegisterU(cpu, r, ((uint32_t)(((int32_t)(((int32_t)(((int32_t)(((uint32_t)(v) >> (24))) | (int32_t)(((int32_t)(((uint32_t)(v) >> (8))) & (int32_t)(65280))))) | (int32_t)(((int32_t)(((int32_t)((uint32_t)(v) << (8)))) & (int32_t)(16711680))))) | (int32_t)(((uint32_t)(((int32_t)((uint32_t)(((int32_t)(v) & (int32_t)(255))) << (24)))) >> (0))))) >> (0)));
   } else {
   if ((imu == 1671)) {
-  uint32_t u = RegisterSet_getRegisterU(rs, s1);
+  uint32_t u = CPU_getRegisterU(cpu, s1);
   int32_t result = 0;
   for (
 int32_t i = 0
@@ -14610,10 +14608,10 @@ int32_t i = 0
   (by = ((int32_t)(((int32_t)(((int32_t)(by) & (int32_t)(170))) >> (1))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(by) & (int32_t)(85))) << (1))))));
   (result |= ((int32_t)((uint32_t)(by) << (((int32_t)(i)) & 31))));
   }
-  RegisterSet_setRegisterU(rs, r, ((uint32_t)(result) >> (0)));
+  CPU_setRegisterU(cpu, r, ((uint32_t)(result) >> (0)));
   } else {
   if ((imu == 647)) {
-  uint32_t u = RegisterSet_getRegisterU(rs, s1);
+  uint32_t u = CPU_getRegisterU(cpu, s1);
   int32_t result = 0;
   for (
 int32_t i = 0
@@ -14622,10 +14620,10 @@ int32_t i = 0
   (result |= ((int32_t)((uint32_t)(255) << (((int32_t)(i)) & 31))));
   }
   }
-  RegisterSet_setRegisterU(rs, r, ((uint32_t)(result) >> (0)));
+  CPU_setRegisterU(cpu, r, ((uint32_t)(result) >> (0)));
   } else {
   if ((imu == 143)) {
-  uint32_t u = RegisterSet_getRegisterU(rs, s1);
+  uint32_t u = CPU_getRegisterU(cpu, s1);
   int32_t result = 0;
   for (
 int32_t i = 0
@@ -14633,7 +14631,7 @@ int32_t i = 0
   (result |= ((int32_t)((uint32_t)(((int32_t)(((uint32_t)(u) >> (((int32_t)(((2 * i) + 1))) & 31))) & (int32_t)(1))) << (((int32_t)(i)) & 31))));
   (result |= ((int32_t)((uint32_t)(((int32_t)(((uint32_t)(u) >> (((int32_t)((2 * i))) & 31))) & (int32_t)(1))) << (((int32_t)((16 + i))) & 31))));
   }
-  RegisterSet_setRegisterU(rs, r, ((uint32_t)(result) >> (0)));
+  CPU_setRegisterU(cpu, r, ((uint32_t)(result) >> (0)));
   } else {
   fprintf(stderr, "Error: %s\n", fmtStr("Unknown OP-IMM func3=5, func7: 0x%x", (unsigned)(f7)));
   abort();
@@ -14648,10 +14646,10 @@ int32_t i = 0
   break;
   }
   case 6:
-  RegisterSet_setRegister(rs, r, ((int32_t)(RegisterSet_getRegister(rs, s1)) | (int32_t)(imm_i(inst))));
+  CPU_setRegister(cpu, r, ((int32_t)(CPU_getRegister(cpu, s1)) | (int32_t)(imm_i(inst))));
   break;
   case 7:
-  RegisterSet_setRegister(rs, r, ((int32_t)(RegisterSet_getRegister(rs, s1)) & (int32_t)(imm_i(inst))));
+  CPU_setRegister(cpu, r, ((int32_t)(CPU_getRegister(cpu, s1)) & (int32_t)(imm_i(inst))));
   break;
   default:
   fprintf(stderr, "Error: %s\n", fmtStr("Invalid OP-IMM func3 %d", func3(inst)));
@@ -14662,8 +14660,8 @@ int32_t i = 0
 static void executeStore(int32_t inst, CPU* cpu) {
   int32_t s1 = rs1(inst);
   int32_t s2 = rs2(inst);
-  int32_t addr = (RegisterSet_getRegister(cpu->registerSet, s1) + imm_s(inst));
-  int32_t v = RegisterSet_getRegister(cpu->registerSet, s2);
+  int32_t addr = (CPU_getRegister(cpu, s1) + imm_s(inst));
+  int32_t v = CPU_getRegister(cpu, s2);
   switch (func3(inst)) {
   case 0:
   RP2350_writeUint8(cpu->chip, addr, ((int32_t)(v) & (int32_t)(255)));
@@ -14689,11 +14687,10 @@ static void executeAmo(int32_t inst, CPU* cpu) {
   int32_t r = rd(inst);
   int32_t s1 = rs1(inst);
   int32_t s2 = rs2(inst);
-  RegisterSet* rs = cpu->registerSet;
   RP2350* chip = cpu->chip;
-  uint32_t addr = RegisterSet_getRegisterU(rs, s1);
+  uint32_t addr = CPU_getRegisterU(cpu, s1);
   if ((funct5 == 2)) {
-  RegisterSet_setRegisterU(rs, r, RP2350_readUint32(chip, addr));
+  CPU_setRegisterU(cpu, r, RP2350_readUint32(chip, addr));
   (cpu->lr_addr = ((int32_t)(addr) & (int32_t)((~15))));
   CPU_invalidateLrReservation(cpu->otherCore, addr);
   (cpu->cycles += 3);
@@ -14701,18 +14698,18 @@ static void executeAmo(int32_t inst, CPU* cpu) {
   }
   if ((funct5 == 3)) {
   if ((cpu->lr_addr == ((int32_t)(addr) & (int32_t)((~15))))) {
-  RP2350_writeUint32(chip, addr, RegisterSet_getRegisterU(rs, s2));
-  RegisterSet_setRegisterU(rs, r, 0);
+  RP2350_writeUint32(chip, addr, CPU_getRegisterU(cpu, s2));
+  CPU_setRegisterU(cpu, r, 0);
   } else {
-  RegisterSet_setRegisterU(rs, r, 1);
+  CPU_setRegisterU(cpu, r, 1);
   }
   (cpu->lr_addr = (-1));
   (cpu->cycles += 3);
   return;
   }
-  uint32_t v = RegisterSet_getRegisterU(rs, s2);
+  uint32_t v = CPU_getRegisterU(cpu, s2);
   uint32_t mem = RP2350_readUint32(chip, addr);
-  RegisterSet_setRegisterU(rs, r, mem);
+  CPU_setRegisterU(cpu, r, mem);
   void amoStore(int32_t val) {
   RP2350_writeUint32(chip, addr, val);
   CPU_invalidateLrReservation(cpu->otherCore, addr);
@@ -14764,21 +14761,20 @@ static void executeOp(int32_t inst, CPU* cpu) {
   int32_t r = rd(inst);
   int32_t s1 = rs1(inst);
   int32_t s2 = rs2(inst);
-  RegisterSet* rs = cpu->registerSet;
   switch (func3(inst)) {
   case 0:
   {
-  int32_t a = RegisterSet_getRegister(rs, s1);
-  int32_t b = RegisterSet_getRegister(rs, s2);
+  int32_t a = CPU_getRegister(cpu, s1);
+  int32_t b = CPU_getRegister(cpu, s2);
   int32_t f7 = func7(inst);
   if ((f7 == 0)) {
-  RegisterSet_setRegister(rs, r, (a + b));
+  CPU_setRegister(cpu, r, (a + b));
   } else {
   if ((f7 == 32)) {
-  RegisterSet_setRegister(rs, r, (a - b));
+  CPU_setRegister(cpu, r, (a - b));
   } else {
   if ((f7 == 1)) {
-  RegisterSet_setRegister(rs, r, imul32(a, b));
+  CPU_setRegister(cpu, r, imul32(a, b));
   } else {
   fprintf(stderr, "Error: %s\n", fmtStr("Unknown OP func3=0, func7: 0x%x", (unsigned)(f7)));
   abort();
@@ -14789,14 +14785,14 @@ static void executeOp(int32_t inst, CPU* cpu) {
   }
   case 1:
   {
-  int32_t a = RegisterSet_getRegister(rs, s1);
-  uint32_t b = RegisterSet_getRegisterU(rs, s2);
+  int32_t a = CPU_getRegister(cpu, s1);
+  uint32_t b = CPU_getRegisterU(cpu, s2);
   int32_t f7 = func7(inst);
   if ((f7 == 0)) {
-  RegisterSet_setRegister(rs, r, ((int32_t)((uint32_t)(a) << (((int32_t)(b)) & 31))));
+  CPU_setRegister(cpu, r, ((int32_t)((uint32_t)(a) << (((int32_t)(b)) & 31))));
   } else {
   if ((f7 == 1)) {
-  int32_t bs = RegisterSet_getRegister(rs, s2);
+  int32_t bs = CPU_getRegister(cpu, s2);
   int32_t hi = umulh(((uint32_t)(a) >> (0)), ((uint32_t)(bs) >> (0)));
   if ((a < 0)) {
   (hi = ((int32_t)((hi - ((uint32_t)(bs) >> (0)))) | (int32_t)(0)));
@@ -14804,20 +14800,20 @@ static void executeOp(int32_t inst, CPU* cpu) {
   if ((bs < 0)) {
   (hi = ((int32_t)((hi - ((uint32_t)(a) >> (0)))) | (int32_t)(0)));
   }
-  RegisterSet_setRegister(rs, r, hi);
+  CPU_setRegister(cpu, r, hi);
   } else {
   if ((f7 == 20)) {
-  RegisterSet_setRegister(rs, r, ((int32_t)(a) | (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(((int32_t)(b) & (int32_t)(31)))) & 31))))));
+  CPU_setRegister(cpu, r, ((int32_t)(a) | (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(((int32_t)(b) & (int32_t)(31)))) & 31))))));
   } else {
   if ((f7 == 36)) {
-  RegisterSet_setRegister(rs, r, ((int32_t)(a) & (int32_t)((~((int32_t)((uint32_t)(1) << (((int32_t)(((int32_t)(b) & (int32_t)(31)))) & 31)))))));
+  CPU_setRegister(cpu, r, ((int32_t)(a) & (int32_t)((~((int32_t)((uint32_t)(1) << (((int32_t)(((int32_t)(b) & (int32_t)(31)))) & 31)))))));
   } else {
   if ((f7 == 48)) {
   int32_t sh = ((int32_t)(b) & (int32_t)(31));
-  RegisterSet_setRegister(rs, r, ((uint32_t)(((int32_t)(((int32_t)((uint32_t)(a) << (((int32_t)(sh)) & 31)))) | (int32_t)(((uint32_t)(a) >> (((int32_t)((32 - sh))) & 31))))) >> (0)));
+  CPU_setRegister(cpu, r, ((uint32_t)(((int32_t)(((int32_t)((uint32_t)(a) << (((int32_t)(sh)) & 31)))) | (int32_t)(((uint32_t)(a) >> (((int32_t)((32 - sh))) & 31))))) >> (0)));
   } else {
   if ((f7 == 52)) {
-  RegisterSet_setRegister(rs, r, ((int32_t)(a) ^ (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(((int32_t)(b) & (int32_t)(31)))) & 31))))));
+  CPU_setRegister(cpu, r, ((int32_t)(a) ^ (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(((int32_t)(b) & (int32_t)(31)))) & 31))))));
   } else {
   fprintf(stderr, "Error: %s\n", fmtStr("Unknown OP func3=1, func7: 0x%x", (unsigned)(f7)));
   abort();
@@ -14853,19 +14849,19 @@ static void executeOp(int32_t inst, CPU* cpu) {
   }
   }
   }
-  RegisterSet_setRegister(rs, r, ((RegisterSet_getRegister(rs, s1) < RegisterSet_getRegister(rs, s2)) ? 1 : 0));
+  CPU_setRegister(cpu, r, ((CPU_getRegister(cpu, s1) < CPU_getRegister(cpu, s2)) ? 1 : 0));
   } else {
   if ((f7 == 1)) {
-  int32_t a = RegisterSet_getRegister(rs, s1);
-  uint32_t b = RegisterSet_getRegisterU(rs, s2);
+  int32_t a = CPU_getRegister(cpu, s1);
+  uint32_t b = CPU_getRegisterU(cpu, s2);
   int32_t hi = umulh(((uint32_t)(a) >> (0)), b);
   if ((a < 0)) {
   (hi = ((int32_t)((hi - b)) | (int32_t)(0)));
   }
-  RegisterSet_setRegister(rs, r, hi);
+  CPU_setRegister(cpu, r, hi);
   } else {
   if ((f7 == 16)) {
-  RegisterSet_setRegister(rs, r, ((int32_t)((((int32_t)((uint32_t)(RegisterSet_getRegister(rs, s1)) << (1))) + RegisterSet_getRegister(rs, s2))) & (int32_t)(4294967295u)));
+  CPU_setRegister(cpu, r, ((int32_t)((((int32_t)((uint32_t)(CPU_getRegister(cpu, s1)) << (1))) + CPU_getRegister(cpu, s2))) & (int32_t)(4294967295u)));
   } else {
   fprintf(stderr, "Error: %s\n", fmtStr("Unknown OP func3=2, func7: 0x%x", (unsigned)(f7)));
   abort();
@@ -14876,14 +14872,14 @@ static void executeOp(int32_t inst, CPU* cpu) {
   }
   case 3:
   {
-  uint32_t a = RegisterSet_getRegisterU(rs, s1);
-  uint32_t b = RegisterSet_getRegisterU(rs, s2);
+  uint32_t a = CPU_getRegisterU(cpu, s1);
+  uint32_t b = CPU_getRegisterU(cpu, s2);
   int32_t f7 = func7(inst);
   if ((f7 == 0)) {
-  RegisterSet_setRegister(rs, r, ((a < b) ? 1 : 0));
+  CPU_setRegister(cpu, r, ((a < b) ? 1 : 0));
   } else {
   if ((f7 == 1)) {
-  RegisterSet_setRegisterU(rs, r, umulh(a, b));
+  CPU_setRegisterU(cpu, r, umulh(a, b));
   } else {
   fprintf(stderr, "Error: %s\n", fmtStr("Unknown OP func3=3, func7: 0x%x", (unsigned)(f7)));
   abort();
@@ -14893,35 +14889,35 @@ static void executeOp(int32_t inst, CPU* cpu) {
   }
   case 4:
   {
-  int32_t a = RegisterSet_getRegister(rs, s1);
-  int32_t b = RegisterSet_getRegister(rs, s2);
+  int32_t a = CPU_getRegister(cpu, s1);
+  int32_t b = CPU_getRegister(cpu, s2);
   int32_t f7 = func7(inst);
   if ((f7 == 0)) {
-  RegisterSet_setRegister(rs, r, ((int32_t)(a) ^ (int32_t)(b)));
+  CPU_setRegister(cpu, r, ((int32_t)(a) ^ (int32_t)(b)));
   } else {
   if ((f7 == 1)) {
   if ((b == 0)) {
-  RegisterSet_setRegisterU(rs, r, 4294967295u);
+  CPU_setRegisterU(cpu, r, 4294967295u);
   } else {
   if (((((uint32_t)(a) >> (0)) == 2147483648u) && (((uint32_t)(b) >> (0)) == 4294967295u))) {
-  RegisterSet_setRegisterU(rs, r, 2147483648u);
+  CPU_setRegisterU(cpu, r, 2147483648u);
   } else {
-  RegisterSet_setRegister(rs, r, ((int32_t)(((double)(a) / (double)(b))) | (int32_t)(0)));
+  CPU_setRegister(cpu, r, ((int32_t)(((double)(a) / (double)(b))) | (int32_t)(0)));
   }
   }
   (cpu->cycles += 17);
   } else {
   if ((f7 == 16)) {
-  RegisterSet_setRegister(rs, r, ((int32_t)((((int32_t)((uint32_t)(a) << (2))) + b)) & (int32_t)(4294967295u)));
+  CPU_setRegister(cpu, r, ((int32_t)((((int32_t)((uint32_t)(a) << (2))) + b)) & (int32_t)(4294967295u)));
   } else {
   if ((f7 == 4)) {
-  RegisterSet_setRegister(rs, r, ((int32_t)(((int32_t)(a) & (int32_t)(65535))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(b) & (int32_t)(65535))) << (16))))));
+  CPU_setRegister(cpu, r, ((int32_t)(((int32_t)(a) & (int32_t)(65535))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(b) & (int32_t)(65535))) << (16))))));
   } else {
   if ((f7 == 5)) {
-  RegisterSet_setRegister(rs, r, ((a < b) ? a : b));
+  CPU_setRegister(cpu, r, ((a < b) ? a : b));
   } else {
   if ((f7 == 32)) {
-  RegisterSet_setRegister(rs, r, ((int32_t)((~a)) ^ (int32_t)(b)));
+  CPU_setRegister(cpu, r, ((int32_t)((~a)) ^ (int32_t)(b)));
   } else {
   fprintf(stderr, "Error: %s\n", fmtStr("Unknown OP func3=4, func7: 0x%x", (unsigned)(f7)));
   abort();
@@ -14935,33 +14931,33 @@ static void executeOp(int32_t inst, CPU* cpu) {
   }
   case 5:
   {
-  int32_t a = RegisterSet_getRegister(rs, s1);
-  int32_t b = RegisterSet_getRegister(rs, s2);
+  int32_t a = CPU_getRegister(cpu, s1);
+  int32_t b = CPU_getRegister(cpu, s2);
   int32_t f7 = func7(inst);
   if ((f7 == 0)) {
-  RegisterSet_setRegister(rs, r, ((uint32_t)(a) >> (((int32_t)(b)) & 31)));
+  CPU_setRegister(cpu, r, ((uint32_t)(a) >> (((int32_t)(b)) & 31)));
   } else {
   if ((f7 == 5)) {
   int32_t u1 = ((uint32_t)(a) >> (0));
   int32_t u2 = ((uint32_t)(b) >> (0));
-  RegisterSet_setRegister(rs, r, ((u1 < u2) ? u1 : u2));
+  CPU_setRegister(cpu, r, ((u1 < u2) ? u1 : u2));
   } else {
   if ((f7 == 32)) {
-  RegisterSet_setRegister(rs, r, ((int32_t)(a) >> (((int32_t)(b)) & 31)));
+  CPU_setRegister(cpu, r, ((int32_t)(a) >> (((int32_t)(b)) & 31)));
   } else {
   if ((f7 == 36)) {
-  RegisterSet_setRegister(rs, r, ((int32_t)(((uint32_t)(a) >> (((int32_t)(((int32_t)(b) & (int32_t)(31)))) & 31))) & (int32_t)(1)));
+  CPU_setRegister(cpu, r, ((int32_t)(((uint32_t)(a) >> (((int32_t)(((int32_t)(b) & (int32_t)(31)))) & 31))) & (int32_t)(1)));
   } else {
   if ((f7 == 48)) {
   int32_t sh = ((int32_t)(b) & (int32_t)(31));
-  uint32_t u = RegisterSet_getRegisterU(rs, s1);
-  RegisterSet_setRegister(rs, r, ((int32_t)(((uint32_t)(((int32_t)((uint32_t)(u) << (((int32_t)((32 - sh))) & 31)))) >> (0))) | (int32_t)(((uint32_t)(u) >> (((int32_t)(sh)) & 31)))));
+  uint32_t u = CPU_getRegisterU(cpu, s1);
+  CPU_setRegister(cpu, r, ((int32_t)(((uint32_t)(((int32_t)((uint32_t)(u) << (((int32_t)((32 - sh))) & 31)))) >> (0))) | (int32_t)(((uint32_t)(u) >> (((int32_t)(sh)) & 31)))));
   } else {
   if ((f7 == 1)) {
   if ((b == 0)) {
-  RegisterSet_setRegisterU(rs, r, 4294967295u);
+  CPU_setRegisterU(cpu, r, 4294967295u);
   } else {
-  RegisterSet_setRegister(rs, r, ((uint32_t)(((double)(((uint32_t)(a) >> (0))) / (double)(((uint32_t)(b) >> (0))))) >> (0)));
+  CPU_setRegister(cpu, r, ((uint32_t)(((double)(((uint32_t)(a) >> (0))) / (double)(((uint32_t)(b) >> (0))))) >> (0)));
   }
   (cpu->cycles += 17);
   } else {
@@ -14977,24 +14973,24 @@ static void executeOp(int32_t inst, CPU* cpu) {
   }
   case 6:
   {
-  int32_t a = RegisterSet_getRegister(rs, s1);
-  int32_t b = RegisterSet_getRegister(rs, s2);
+  int32_t a = CPU_getRegister(cpu, s1);
+  int32_t b = CPU_getRegister(cpu, s2);
   int32_t f7 = func7(inst);
   if ((f7 == 0)) {
-  RegisterSet_setRegister(rs, r, ((int32_t)(a) | (int32_t)(b)));
+  CPU_setRegister(cpu, r, ((int32_t)(a) | (int32_t)(b)));
   } else {
   if ((f7 == 1)) {
-  RegisterSet_setRegister(rs, r, ((b == 0) ? a : (a % b)));
+  CPU_setRegister(cpu, r, ((b == 0) ? a : (a % b)));
   (cpu->cycles += 17);
   } else {
   if ((f7 == 5)) {
-  RegisterSet_setRegister(rs, r, ((a > b) ? a : b));
+  CPU_setRegister(cpu, r, ((a > b) ? a : b));
   } else {
   if ((f7 == 32)) {
-  RegisterSet_setRegister(rs, r, ((int32_t)(a) | (int32_t)((~b))));
+  CPU_setRegister(cpu, r, ((int32_t)(a) | (int32_t)((~b))));
   } else {
   if ((f7 == 16)) {
-  RegisterSet_setRegister(rs, r, ((int32_t)((((int32_t)((uint32_t)(a) << (3))) + b)) & (int32_t)(4294967295u)));
+  CPU_setRegister(cpu, r, ((int32_t)((((int32_t)((uint32_t)(a) << (3))) + b)) & (int32_t)(4294967295u)));
   } else {
   fprintf(stderr, "Error: %s\n", fmtStr("Unknown OP func3=6, func7: 0x%x", (unsigned)(f7)));
   abort();
@@ -15007,23 +15003,23 @@ static void executeOp(int32_t inst, CPU* cpu) {
   }
   case 7:
   {
-  int32_t a = RegisterSet_getRegister(rs, s1);
-  int32_t b = RegisterSet_getRegister(rs, s2);
+  int32_t a = CPU_getRegister(cpu, s1);
+  int32_t b = CPU_getRegister(cpu, s2);
   int32_t f7 = func7(inst);
   if ((f7 == 0)) {
-  RegisterSet_setRegister(rs, r, ((int32_t)(a) & (int32_t)(b)));
+  CPU_setRegister(cpu, r, ((int32_t)(a) & (int32_t)(b)));
   } else {
   if ((f7 == 32)) {
-  RegisterSet_setRegister(rs, r, ((int32_t)(a) & (int32_t)((~b))));
+  CPU_setRegister(cpu, r, ((int32_t)(a) & (int32_t)((~b))));
   } else {
   if ((f7 == 4)) {
-  RegisterSet_setRegister(rs, r, ((int32_t)(((int32_t)(a) & (int32_t)(255))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(b) & (int32_t)(255))) << (8))))));
+  CPU_setRegister(cpu, r, ((int32_t)(((int32_t)(a) & (int32_t)(255))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(b) & (int32_t)(255))) << (8))))));
   } else {
   if ((f7 == 5)) {
-  RegisterSet_setRegisterU(rs, r, ((uint32_t)(((((uint32_t)(a) >> (0)) > ((uint32_t)(b) >> (0))) ? a : b)) >> (0)));
+  CPU_setRegisterU(cpu, r, ((uint32_t)(((((uint32_t)(a) >> (0)) > ((uint32_t)(b) >> (0))) ? a : b)) >> (0)));
   } else {
   if ((f7 == 1)) {
-  RegisterSet_setRegisterU(rs, r, ((uint32_t)(((b == 0) ? a : (((uint32_t)(a) >> (0)) % ((uint32_t)(b) >> (0))))) >> (0)));
+  CPU_setRegisterU(cpu, r, ((uint32_t)(((b == 0) ? a : (((uint32_t)(a) >> (0)) % ((uint32_t)(b) >> (0))))) >> (0)));
   (cpu->cycles += 17);
   } else {
   fprintf(stderr, "Error: %s\n", fmtStr("Unknown OP func3=7, func7: 0x%x", (unsigned)(f7)));
@@ -15045,26 +15041,25 @@ static void executeBranch(int32_t inst, CPU* cpu) {
   int32_t s1 = rs1(inst);
   int32_t s2 = rs2(inst);
   int32_t im = imm_b(inst);
-  RegisterSet* rs = cpu->registerSet;
   int32_t taken = false;
   switch (func3(inst)) {
   case 0:
-  (taken = (RegisterSet_getRegister(rs, s1) == RegisterSet_getRegister(rs, s2)));
+  (taken = (CPU_getRegister(cpu, s1) == CPU_getRegister(cpu, s2)));
   break;
   case 1:
-  (taken = (RegisterSet_getRegister(rs, s1) != RegisterSet_getRegister(rs, s2)));
+  (taken = (CPU_getRegister(cpu, s1) != CPU_getRegister(cpu, s2)));
   break;
   case 4:
-  (taken = (RegisterSet_getRegister(rs, s1) < RegisterSet_getRegister(rs, s2)));
+  (taken = (CPU_getRegister(cpu, s1) < CPU_getRegister(cpu, s2)));
   break;
   case 5:
-  (taken = (RegisterSet_getRegister(rs, s1) >= RegisterSet_getRegister(rs, s2)));
+  (taken = (CPU_getRegister(cpu, s1) >= CPU_getRegister(cpu, s2)));
   break;
   case 6:
-  (taken = (RegisterSet_getRegisterU(rs, s1) < RegisterSet_getRegisterU(rs, s2)));
+  (taken = (CPU_getRegisterU(cpu, s1) < CPU_getRegisterU(cpu, s2)));
   break;
   case 7:
-  (taken = (RegisterSet_getRegisterU(rs, s1) >= RegisterSet_getRegisterU(rs, s2)));
+  (taken = (CPU_getRegisterU(cpu, s1) >= CPU_getRegisterU(cpu, s2)));
   break;
   default:
   fprintf(stderr, "Error: %s\n", fmtStr("Invalid BRANCH func3 %d", func3(inst)));
@@ -15081,18 +15076,18 @@ static void executeJalr(int32_t inst, CPU* cpu) {
   fprintf(stderr, "Error: %s\n", fmtStr("Invalid JALR func3 %d", func3(inst)));
   abort();
   }
-  int32_t target = (RegisterSet_getRegister(cpu->registerSet, rs1(inst)) + imm_i(inst));
-  RegisterSet_setRegister(cpu->registerSet, rd(inst), (cpu->pc + cpu->inst_length));
+  int32_t target = (CPU_getRegister(cpu, rs1(inst)) + imm_i(inst));
+  CPU_setRegister(cpu, rd(inst), (cpu->pc + cpu->inst_length));
   (cpu->next_pc = target);
   (cpu->cycles++);
 }
 
 static void executeLui(int32_t inst, CPU* cpu) {
-  RegisterSet_setRegisterU(cpu->registerSet, rd(inst), imm_u(inst));
+  CPU_setRegisterU(cpu, rd(inst), imm_u(inst));
 }
 
 static void executeAuipc(int32_t inst, CPU* cpu) {
-  RegisterSet_setRegister(cpu->registerSet, rd(inst), (imm_u(inst) + cpu->pc));
+  CPU_setRegister(cpu, rd(inst), (imm_u(inst) + cpu->pc));
 }
 
 static void checkTraceMagic(CPU* cpu, int32_t magicStart) {
@@ -15110,14 +15105,13 @@ static void checkTraceMagic(CPU* cpu, int32_t magicStart) {
 }
 
 static void executeJal(int32_t inst, CPU* cpu) {
-  RegisterSet_setRegister(cpu->registerSet, rd(inst), (cpu->pc + cpu->inst_length));
+  CPU_setRegister(cpu, rd(inst), (cpu->pc + cpu->inst_length));
   checkTraceMagic(cpu, (cpu->pc + cpu->inst_length));
   (cpu->next_pc = (cpu->pc + imm_j(inst)));
   (cpu->cycles++);
 }
 
 static void executeSystem(int32_t inst, CPU* cpu) {
-  RegisterSet* rs = cpu->registerSet;
   switch (func3(inst)) {
   case 0:
   {
@@ -15161,9 +15155,9 @@ static void executeSystem(int32_t inst, CPU* cpu) {
   int32_t csr = immU_i(inst);
   int32_t r = rd(inst);
   int32_t s1 = rs1(inst);
-  int32_t newVal = RegisterSet_getRegister(rs, s1);
+  int32_t newVal = CPU_getRegister(cpu, s1);
   if ((r != 0)) {
-  RegisterSet_setRegister(rs, r, CPU_getCSR(cpu, csr, newVal));
+  CPU_setRegister(cpu, r, CPU_getCSR(cpu, csr, newVal));
   }
   CPU_setCSR(cpu, csr, newVal, newVal);
   break;
@@ -15173,12 +15167,12 @@ static void executeSystem(int32_t inst, CPU* cpu) {
   int32_t csr = immU_i(inst);
   int32_t r = rd(inst);
   int32_t s1 = rs1(inst);
-  int32_t orVal = RegisterSet_getRegister(rs, s1);
+  int32_t orVal = CPU_getRegister(cpu, s1);
   int32_t old = CPU_getCSR(cpu, csr, orVal);
   if ((s1 != 0)) {
   CPU_setCSR(cpu, csr, ((int32_t)(old) | (int32_t)(orVal)), orVal);
   }
-  RegisterSet_setRegister(rs, r, old);
+  CPU_setRegister(cpu, r, old);
   break;
   }
   case 3:
@@ -15186,12 +15180,12 @@ static void executeSystem(int32_t inst, CPU* cpu) {
   int32_t csr = immU_i(inst);
   int32_t r = rd(inst);
   int32_t s1 = rs1(inst);
-  int32_t notVal = RegisterSet_getRegister(rs, s1);
+  int32_t notVal = CPU_getRegister(cpu, s1);
   int32_t old = CPU_getCSR(cpu, csr, notVal);
   if ((notVal != 0)) {
   CPU_setCSR(cpu, csr, ((int32_t)(old) & (int32_t)((~notVal))), notVal);
   }
-  RegisterSet_setRegister(rs, r, old);
+  CPU_setRegister(cpu, r, old);
   break;
   }
   case 5:
@@ -15200,7 +15194,7 @@ static void executeSystem(int32_t inst, CPU* cpu) {
   int32_t r = rd(inst);
   int32_t imm5 = rs1(inst);
   if ((r != 0)) {
-  RegisterSet_setRegister(rs, r, CPU_getCSR(cpu, csr, imm5));
+  CPU_setRegister(cpu, r, CPU_getCSR(cpu, csr, imm5));
   }
   CPU_setCSR(cpu, csr, imm5, imm5);
   break;
@@ -15214,7 +15208,7 @@ static void executeSystem(int32_t inst, CPU* cpu) {
   if ((imm5 != 0)) {
   CPU_setCSR(cpu, csr, ((int32_t)(old) | (int32_t)(imm5)), imm5);
   }
-  RegisterSet_setRegister(rs, r, old);
+  CPU_setRegister(cpu, r, old);
   break;
   }
   case 7:
@@ -15226,7 +15220,7 @@ static void executeSystem(int32_t inst, CPU* cpu) {
   if ((imm5 != 0)) {
   CPU_setCSR(cpu, csr, ((int32_t)(old) & (int32_t)((~imm5))), imm5);
   }
-  RegisterSet_setRegister(rs, r, old);
+  CPU_setRegister(cpu, r, old);
   break;
   }
   default:
@@ -15239,13 +15233,13 @@ static void executeCustom0(int32_t inst, CPU* cpu) {
   int32_t c_ident = ((int32_t)(inst) & (int32_t)(3791679615u));
   int32_t size = ((int32_t)(((uint32_t)(inst) >> (26))) & (int32_t)(7));
   if ((c_ident == 11)) {
-  uint32_t sh = RegisterSet_getRegisterU(cpu->registerSet, rs2(inst));
-  int32_t v = ((uint32_t)(RegisterSet_getRegisterU(cpu->registerSet, rs1(inst))) >> (((int32_t)(sh)) & 31));
-  RegisterSet_setRegisterU(cpu->registerSet, rd(inst), ((int32_t)(v) & (int32_t)((((int32_t)((uint32_t)(2) << (((int32_t)(size)) & 31))) - 1))));
+  uint32_t sh = CPU_getRegisterU(cpu, rs2(inst));
+  int32_t v = ((uint32_t)(CPU_getRegisterU(cpu, rs1(inst))) >> (((int32_t)(sh)) & 31));
+  CPU_setRegisterU(cpu, rd(inst), ((int32_t)(v) & (int32_t)((((int32_t)((uint32_t)(2) << (((int32_t)(size)) & 31))) - 1))));
   } else {
   if ((c_ident == 16395)) {
-  int32_t v = ((uint32_t)(RegisterSet_getRegisterU(cpu->registerSet, rs1(inst))) >> (((int32_t)(rs2(inst))) & 31));
-  RegisterSet_setRegisterU(cpu->registerSet, rd(inst), ((int32_t)(v) & (int32_t)((((int32_t)((uint32_t)(2) << (((int32_t)(size)) & 31))) - 1))));
+  int32_t v = ((uint32_t)(CPU_getRegisterU(cpu, rs1(inst))) >> (((int32_t)(rs2(inst))) & 31));
+  CPU_setRegisterU(cpu, rd(inst), ((int32_t)(v) & (int32_t)((((int32_t)((uint32_t)(2) << (((int32_t)(size)) & 31))) - 1))));
   } else {
   fprintf(stderr, "Error: %s\n", fmtStr("Invalid CUSTOM0 instruction 0x%x", (unsigned)(inst)));
   abort();
@@ -15331,27 +15325,26 @@ static void assert(bool a) {
 static void caddi4spn(CPU* cpu, int32_t inst) {
   int32_t nzuimm = dec_ciw_imm(inst);
   int32_t rd = dec_rd_short(inst);
-  RegisterSet* rs = cpu->registerSet;
-  RegisterSet_setRegisterU(rs, rd, ((uint32_t)((RegisterSet_getRegisterU(rs, 2) + nzuimm)) >> (0)));
+  CPU_setRegisterU(cpu, rd, ((uint32_t)((CPU_getRegisterU(cpu, 2) + nzuimm)) >> (0)));
 }
 
 static void clw(CPU* cpu, int32_t inst) {
   int32_t imm = dec_clw_csw_imm(inst);
   int32_t rs1 = dec_rs1_short(inst);
   int32_t rd = dec_rd_short(inst);
-  int32_t addr = (RegisterSet_getRegisterU(cpu->registerSet, rs1) + imm);
-  RegisterSet_setRegisterU(cpu->registerSet, rd, RP2350_readUint32(cpu->chip, addr));
+  int32_t addr = (CPU_getRegisterU(cpu, rs1) + imm);
+  CPU_setRegisterU(cpu, rd, RP2350_readUint32(cpu->chip, addr));
 }
 
 static void zcb_100_00(CPU* cpu, int32_t inst) {
-  uint32_t base = RegisterSet_getRegisterU(cpu->registerSet, dec_rs1_short(inst));
+  uint32_t base = CPU_getRegisterU(cpu, dec_rs1_short(inst));
   int32_t sub = ((int32_t)(((uint32_t)(inst) >> (10))) & (int32_t)(7));
   switch (sub) {
   case 0:
   {
   int32_t uimm = ((int32_t)(((int32_t)((uint32_t)(((int32_t)(((uint32_t)(inst) >> (5))) & (int32_t)(1))) << (1)))) | (int32_t)(((int32_t)(((uint32_t)(inst) >> (6))) & (int32_t)(1))));
   int32_t rd = dec_rd_short(inst);
-  RegisterSet_setRegister(cpu->registerSet, rd, RP2350_readUint8(cpu->chip, (base + uimm)));
+  CPU_setRegister(cpu, rd, RP2350_readUint8(cpu->chip, (base + uimm)));
   return;
   }
   case 1:
@@ -15360,9 +15353,9 @@ static void zcb_100_00(CPU* cpu, int32_t inst) {
   int32_t rd = dec_rd_short(inst);
   uint32_t half = RP2350_readUint16(cpu->chip, (base + uimm));
   if (((int32_t)(((uint32_t)(inst) >> (6))) & (int32_t)(1))) {
-  RegisterSet_setRegister(cpu->registerSet, rd, sign_extend(half, 15));
+  CPU_setRegister(cpu, rd, sign_extend(half, 15));
   } else {
-  RegisterSet_setRegister(cpu->registerSet, rd, half);
+  CPU_setRegister(cpu, rd, half);
   }
   return;
   }
@@ -15370,7 +15363,7 @@ static void zcb_100_00(CPU* cpu, int32_t inst) {
   {
   int32_t uimm = ((int32_t)(((int32_t)((uint32_t)(((int32_t)(((uint32_t)(inst) >> (5))) & (int32_t)(1))) << (1)))) | (int32_t)(((int32_t)(((uint32_t)(inst) >> (6))) & (int32_t)(1))));
   int32_t rs2 = dec_rs2_short(inst);
-  RP2350_writeUint8(cpu->chip, (base + uimm), ((int32_t)(RegisterSet_getRegister(cpu->registerSet, rs2)) & (int32_t)(255)));
+  RP2350_writeUint8(cpu->chip, (base + uimm), ((int32_t)(CPU_getRegister(cpu, rs2)) & (int32_t)(255)));
   return;
   }
   case 3:
@@ -15380,7 +15373,7 @@ static void zcb_100_00(CPU* cpu, int32_t inst) {
   }
   int32_t uimm = ((int32_t)((uint32_t)(((int32_t)(((uint32_t)(inst) >> (5))) & (int32_t)(1))) << (1)));
   int32_t rs2 = dec_rs2_short(inst);
-  RP2350_writeUint16(cpu->chip, (base + uimm), ((int32_t)(RegisterSet_getRegister(cpu->registerSet, rs2)) & (int32_t)(65535)));
+  RP2350_writeUint16(cpu->chip, (base + uimm), ((int32_t)(CPU_getRegister(cpu, rs2)) & (int32_t)(65535)));
   return;
   }
   }
@@ -15392,7 +15385,7 @@ static void csw(CPU* cpu, int32_t inst) {
   int32_t imm = dec_clw_csw_imm(inst);
   int32_t rs1 = dec_rs1_short(inst);
   int32_t rs2 = dec_rs2_short(inst);
-  RP2350_writeUint32(cpu->chip, (RegisterSet_getRegisterU(cpu->registerSet, rs1) + imm), RegisterSet_getRegister(cpu->registerSet, rs2));
+  RP2350_writeUint32(cpu->chip, (CPU_getRegisterU(cpu, rs1) + imm), CPU_getRegister(cpu, rs2));
 }
 
 static void cnop(void) {
@@ -15407,13 +15400,12 @@ static void caddi(CPU* cpu, int32_t inst) {
   if ((nzimm == 0)) {
   return;
   }
-  RegisterSet* rs = cpu->registerSet;
-  RegisterSet_setRegisterU(rs, rd, ((uint32_t)((RegisterSet_getRegisterU(rs, rd) + nzimm)) >> (0)));
+  CPU_setRegisterU(cpu, rd, ((uint32_t)((CPU_getRegisterU(cpu, rd) + nzimm)) >> (0)));
 }
 
 static void cjal(CPU* cpu, int32_t inst) {
   checkTraceMagic(cpu, (cpu->pc + 2));
-  RegisterSet_setRegister(cpu->registerSet, 1, (cpu->pc + 2));
+  CPU_setRegister(cpu, 1, (cpu->pc + 2));
   (cpu->next_pc = (cpu->pc + dec_cj_imm(inst)));
   (cpu->cycles++);
 }
@@ -15427,7 +15419,7 @@ static void cli(CPU* cpu, int32_t inst) {
   if ((rd == 0)) {
   return;
   }
-  RegisterSet_setRegister(cpu->registerSet, rd, imm);
+  CPU_setRegister(cpu, rd, imm);
 }
 
 static void caddi16sp(CPU* cpu, int32_t inst) {
@@ -15439,8 +15431,7 @@ static void caddi16sp(CPU* cpu, int32_t inst) {
   (nzimm |= ((int32_t)(((int32_t)(inst) & (int32_t)(64))) >> (2)));
   (nzimm = sign_extend(nzimm, 9));
   assert((nzimm != 0));
-  RegisterSet* rs = cpu->registerSet;
-  RegisterSet_setRegisterU(rs, 2, ((uint32_t)((RegisterSet_getRegisterU(rs, 2) + nzimm)) >> (0)));
+  CPU_setRegisterU(cpu, 2, ((uint32_t)((CPU_getRegisterU(cpu, 2) + nzimm)) >> (0)));
 }
 
 static void clui(CPU* cpu, int32_t inst) {
@@ -15453,7 +15444,7 @@ static void clui(CPU* cpu, int32_t inst) {
   if ((rd == 0)) {
   return;
   }
-  RegisterSet_setRegisterU(cpu->registerSet, rd, nzimm);
+  CPU_setRegisterU(cpu, rd, nzimm);
 }
 
 static void csrli(CPU* cpu, int32_t inst) {
@@ -15463,7 +15454,7 @@ static void csrli(CPU* cpu, int32_t inst) {
   (shamt |= ((int32_t)(((int32_t)(inst) & (int32_t)(((int32_t)(C_CI_MASK_6_4) | (int32_t)(C_CI_MASK_3_2))))) >> (2)));
   assert((shamt != 0));
   int32_t rd = dec_rs1_short(inst);
-  RegisterSet_setRegister(cpu->registerSet, rd, ((uint32_t)(RegisterSet_getRegister(cpu->registerSet, rd)) >> (((int32_t)(shamt)) & 31)));
+  CPU_setRegister(cpu, rd, ((uint32_t)(CPU_getRegister(cpu, rd)) >> (((int32_t)(shamt)) & 31)));
 }
 
 static void csrai(CPU* cpu, int32_t inst) {
@@ -15473,7 +15464,7 @@ static void csrai(CPU* cpu, int32_t inst) {
   (shamt |= ((int32_t)(((int32_t)(inst) & (int32_t)(((int32_t)(C_CI_MASK_6_4) | (int32_t)(C_CI_MASK_3_2))))) >> (2)));
   assert((shamt != 0));
   int32_t rd = dec_rs1_short(inst);
-  RegisterSet_setRegister(cpu->registerSet, rd, ((int32_t)(RegisterSet_getRegister(cpu->registerSet, rd)) >> (((int32_t)(shamt)) & 31)));
+  CPU_setRegister(cpu, rd, ((int32_t)(CPU_getRegister(cpu, rd)) >> (((int32_t)(shamt)) & 31)));
 }
 
 static void candi(CPU* cpu, int32_t inst) {
@@ -15482,35 +15473,31 @@ static void candi(CPU* cpu, int32_t inst) {
   (imm |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CI_MASK_12))) >> (7)));
   (imm |= ((int32_t)(((int32_t)(inst) & (int32_t)(((int32_t)(C_CI_MASK_6_4) | (int32_t)(C_CI_MASK_3_2))))) >> (2)));
   (imm = sign_extend(imm, 5));
-  RegisterSet_setRegister(cpu->registerSet, rd, ((int32_t)(RegisterSet_getRegister(cpu->registerSet, rd)) & (int32_t)(imm)));
+  CPU_setRegister(cpu, rd, ((int32_t)(CPU_getRegister(cpu, rd)) & (int32_t)(imm)));
 }
 
 static void csub(CPU* cpu, int32_t inst) {
   int32_t rd = dec_rs1_short(inst);
   int32_t rs2 = dec_rs2_short(inst);
-  RegisterSet* rs = cpu->registerSet;
-  RegisterSet_setRegister(rs, rd, (RegisterSet_getRegister(rs, rd) - RegisterSet_getRegister(rs, rs2)));
+  CPU_setRegister(cpu, rd, (CPU_getRegister(cpu, rd) - CPU_getRegister(cpu, rs2)));
 }
 
 static void cxor(CPU* cpu, int32_t inst) {
   int32_t rd = dec_rs1_short(inst);
   int32_t rs2 = dec_rs2_short(inst);
-  RegisterSet* rs = cpu->registerSet;
-  RegisterSet_setRegister(rs, rd, ((int32_t)(RegisterSet_getRegister(rs, rd)) ^ (int32_t)(RegisterSet_getRegister(rs, rs2))));
+  CPU_setRegister(cpu, rd, ((int32_t)(CPU_getRegister(cpu, rd)) ^ (int32_t)(CPU_getRegister(cpu, rs2))));
 }
 
 static void cor(CPU* cpu, int32_t inst) {
   int32_t rd = dec_rs1_short(inst);
   int32_t rs2 = dec_rs2_short(inst);
-  RegisterSet* rs = cpu->registerSet;
-  RegisterSet_setRegister(rs, rd, ((int32_t)(RegisterSet_getRegister(rs, rd)) | (int32_t)(RegisterSet_getRegister(rs, rs2))));
+  CPU_setRegister(cpu, rd, ((int32_t)(CPU_getRegister(cpu, rd)) | (int32_t)(CPU_getRegister(cpu, rs2))));
 }
 
 static void cand(CPU* cpu, int32_t inst) {
   int32_t rd = dec_rs1_short(inst);
   int32_t rs2 = dec_rs2_short(inst);
-  RegisterSet* rs = cpu->registerSet;
-  RegisterSet_setRegister(rs, rd, ((int32_t)(RegisterSet_getRegister(rs, rd)) & (int32_t)(RegisterSet_getRegister(rs, rs2))));
+  CPU_setRegister(cpu, rd, ((int32_t)(CPU_getRegister(cpu, rd)) & (int32_t)(CPU_getRegister(cpu, rs2))));
 }
 
 static void cj(CPU* cpu, int32_t inst) {
@@ -15522,7 +15509,7 @@ static void cj(CPU* cpu, int32_t inst) {
 static void cbeqz(CPU* cpu, int32_t inst) {
   int32_t offset = dec_branch_imm(inst);
   int32_t rs1 = dec_rs1_short(inst);
-  int32_t taken = (RegisterSet_getRegister(cpu->registerSet, rs1) == 0);
+  int32_t taken = (CPU_getRegister(cpu, rs1) == 0);
   if (taken) {
   (cpu->next_pc = (cpu->pc + offset));
   }
@@ -15532,7 +15519,7 @@ static void cbeqz(CPU* cpu, int32_t inst) {
 static void cbenz(CPU* cpu, int32_t inst) {
   int32_t offset = dec_branch_imm(inst);
   int32_t rs1 = dec_rs1_short(inst);
-  int32_t taken = (RegisterSet_getRegister(cpu->registerSet, rs1) != 0);
+  int32_t taken = (CPU_getRegister(cpu, rs1) != 0);
   if (taken) {
   (cpu->next_pc = (cpu->pc + offset));
   }
@@ -15549,7 +15536,7 @@ static void cslli(CPU* cpu, int32_t inst) {
   if ((rd == 0)) {
   return;
   }
-  RegisterSet_setRegisterU(cpu->registerSet, rd, ((int32_t)((uint32_t)(RegisterSet_getRegisterU(cpu->registerSet, rd)) << (((int32_t)(shamt)) & 31))));
+  CPU_setRegisterU(cpu, rd, ((int32_t)((uint32_t)(CPU_getRegisterU(cpu, rd)) << (((int32_t)(shamt)) & 31))));
 }
 
 static void clwsp(CPU* cpu, int32_t inst) {
@@ -15559,14 +15546,14 @@ static void clwsp(CPU* cpu, int32_t inst) {
   (offset |= ((int32_t)((uint32_t)(((int32_t)(inst) & (int32_t)(C_CI_MASK_3_2))) << (4))));
   int32_t rd = dec_rd(inst);
   assert((rd != 0));
-  int32_t addr = (RegisterSet_getRegisterU(cpu->registerSet, 2) + offset);
-  RegisterSet_setRegisterU(cpu->registerSet, rd, RP2350_readUint32(cpu->chip, addr));
+  int32_t addr = (CPU_getRegisterU(cpu, 2) + offset);
+  CPU_setRegisterU(cpu, rd, RP2350_readUint32(cpu->chip, addr));
 }
 
 static void cjr(CPU* cpu, int32_t inst) {
   int32_t rs1 = dec_rs1(inst);
   assert((rs1 != 0));
-  (cpu->next_pc = RegisterSet_getRegister(cpu->registerSet, rs1));
+  (cpu->next_pc = CPU_getRegister(cpu, rs1));
   (cpu->cycles++);
 }
 
@@ -15577,7 +15564,7 @@ static void cmv(CPU* cpu, int32_t inst) {
   if ((rd == 0)) {
   return;
   }
-  RegisterSet_setRegister(cpu->registerSet, rd, RegisterSet_getRegister(cpu->registerSet, rs2));
+  CPU_setRegister(cpu, rd, CPU_getRegister(cpu, rs2));
 }
 
 static void cebreak(CPU* cpu) {
@@ -15587,8 +15574,8 @@ static void cebreak(CPU* cpu) {
 static void cjalr(CPU* cpu, int32_t inst) {
   int32_t rs1 = dec_rs1(inst);
   assert((rs1 != 0));
-  RegisterSet_setRegister(cpu->registerSet, 1, (cpu->pc + 2));
-  (cpu->next_pc = RegisterSet_getRegister(cpu->registerSet, rs1));
+  CPU_setRegister(cpu, 1, (cpu->pc + 2));
+  (cpu->next_pc = CPU_getRegister(cpu, rs1));
   (cpu->cycles++);
 }
 
@@ -15599,15 +15586,14 @@ static void cadd(CPU* cpu, int32_t inst) {
   if ((rd == 0)) {
   return;
   }
-  RegisterSet* rs = cpu->registerSet;
-  RegisterSet_setRegister(rs, rd, (RegisterSet_getRegister(rs, rd) + RegisterSet_getRegister(rs, rs2)));
+  CPU_setRegister(cpu, rd, (CPU_getRegister(cpu, rd) + CPU_getRegister(cpu, rs2)));
 }
 
 static void cswsp(CPU* cpu, int32_t inst) {
   int32_t offset = dec_css_imm(inst);
   int32_t rs2 = dec_rs2(inst);
-  int32_t addr = (RegisterSet_getRegisterU(cpu->registerSet, 2) + offset);
-  RP2350_writeUint32(cpu->chip, addr, RegisterSet_getRegister(cpu->registerSet, rs2));
+  int32_t addr = (CPU_getRegisterU(cpu, 2) + offset);
+  RP2350_writeUint32(cpu->chip, addr, CPU_getRegister(cpu, rs2));
 }
 
 static void parse_011_01(CPU* cpu, int32_t inst) {
@@ -15650,29 +15636,27 @@ static void parse_100_01(CPU* cpu, int32_t inst) {
   {
   int32_t rd = dec_rs1_short(inst);
   int32_t rs2 = dec_rs2_short(inst);
-  RegisterSet* rs = cpu->registerSet;
-  RegisterSet_setRegister(rs, rd, ((int32_t)((RegisterSet_getRegister(rs, rd) * RegisterSet_getRegister(rs, rs2))) & (int32_t)(4294967295u)));
+  CPU_setRegister(cpu, rd, ((int32_t)((CPU_getRegister(cpu, rd) * CPU_getRegister(cpu, rs2))) & (int32_t)(4294967295u)));
   return;
   }
   case 7:
   {
   int32_t rd = dec_rs1_short(inst);
-  RegisterSet* rs = cpu->registerSet;
   switch (((int32_t)(((uint32_t)(inst) >> (2))) & (int32_t)(7))) {
   case 0:
-  RegisterSet_setRegister(rs, rd, ((int32_t)(RegisterSet_getRegister(rs, rd)) & (int32_t)(255)));
+  CPU_setRegister(cpu, rd, ((int32_t)(CPU_getRegister(cpu, rd)) & (int32_t)(255)));
   return;
   case 1:
-  RegisterSet_setRegister(rs, rd, sign_extend(((int32_t)(RegisterSet_getRegisterU(rs, rd)) & (int32_t)(255)), 7));
+  CPU_setRegister(cpu, rd, sign_extend(((int32_t)(CPU_getRegisterU(cpu, rd)) & (int32_t)(255)), 7));
   return;
   case 2:
-  RegisterSet_setRegister(rs, rd, ((int32_t)(RegisterSet_getRegisterU(rs, rd)) & (int32_t)(65535)));
+  CPU_setRegister(cpu, rd, ((int32_t)(CPU_getRegisterU(cpu, rd)) & (int32_t)(65535)));
   return;
   case 3:
-  RegisterSet_setRegister(rs, rd, sign_extend(((int32_t)(RegisterSet_getRegisterU(rs, rd)) & (int32_t)(65535)), 15));
+  CPU_setRegister(cpu, rd, sign_extend(((int32_t)(CPU_getRegisterU(cpu, rd)) & (int32_t)(65535)), 15));
   return;
   case 5:
-  RegisterSet_setRegister(rs, rd, (~RegisterSet_getRegister(rs, rd)));
+  CPU_setRegister(cpu, rd, (~CPU_getRegister(cpu, rd)));
   return;
   }
   return;
@@ -15736,18 +15720,18 @@ static void parse_101_10(CPU* cpu, int32_t inst) {
   int32_t rlist = ((uint32_t)(((int32_t)(inst) & (int32_t)(240))) >> (4));
   int32_t spimm = ((int32_t)((uint32_t)(((int32_t)(inst) & (int32_t)(12))) << (2)));
   int32_t stack_adj = (stack_adj_base[rlist] + spimm);
-  uint32_t sp = RegisterSet_getRegisterU(cpu->registerSet, 2);
+  uint32_t sp = CPU_getRegisterU(cpu, 2);
   int32_t addr = (sp - 4);
   {
     int32_t __forof_idx = rlist;
     for (int32_t __forof_i = 0; __forof_i < xreg_list_lens[__forof_idx]; __forof_i++) {
       int32_t reg = xreg_list[__forof_idx][__forof_i];
-  RP2350_writeUint32(cpu->chip, addr, RegisterSet_getRegisterU(cpu->registerSet, reg));
+  RP2350_writeUint32(cpu->chip, addr, CPU_getRegisterU(cpu, reg));
   (addr -= 4);
   (cpu->cycles++);
     }
   }
-  RegisterSet_setRegisterU(cpu->registerSet, 2, (sp - stack_adj));
+  CPU_setRegisterU(cpu, 2, (sp - stack_adj));
   return;
   }
   case 47618:
@@ -15755,18 +15739,18 @@ static void parse_101_10(CPU* cpu, int32_t inst) {
   int32_t rlist = ((uint32_t)(((int32_t)(inst) & (int32_t)(240))) >> (4));
   int32_t spimm = ((int32_t)((uint32_t)(((int32_t)(inst) & (int32_t)(12))) << (2)));
   int32_t stack_adj = (stack_adj_base[rlist] + spimm);
-  uint32_t sp = RegisterSet_getRegisterU(cpu->registerSet, 2);
+  uint32_t sp = CPU_getRegisterU(cpu, 2);
   int32_t addr = ((sp + stack_adj) - 4);
   {
     int32_t __forof_idx = rlist;
     for (int32_t __forof_i = 0; __forof_i < xreg_list_lens[__forof_idx]; __forof_i++) {
       int32_t reg = xreg_list[__forof_idx][__forof_i];
-  RegisterSet_setRegisterU(cpu->registerSet, reg, RP2350_readUint32(cpu->chip, addr));
+  CPU_setRegisterU(cpu, reg, RP2350_readUint32(cpu->chip, addr));
   (addr -= 4);
   (cpu->cycles++);
     }
   }
-  RegisterSet_setRegisterU(cpu->registerSet, 2, (sp + stack_adj));
+  CPU_setRegisterU(cpu, 2, (sp + stack_adj));
   return;
   }
   case 48130:
@@ -15774,20 +15758,20 @@ static void parse_101_10(CPU* cpu, int32_t inst) {
   int32_t rlist = ((uint32_t)(((int32_t)(inst) & (int32_t)(240))) >> (4));
   int32_t spimm = ((int32_t)((uint32_t)(((int32_t)(inst) & (int32_t)(12))) << (2)));
   int32_t stack_adj = (stack_adj_base[rlist] + spimm);
-  uint32_t sp = RegisterSet_getRegisterU(cpu->registerSet, 2);
+  uint32_t sp = CPU_getRegisterU(cpu, 2);
   int32_t addr = ((sp + stack_adj) - 4);
   {
     int32_t __forof_idx = rlist;
     for (int32_t __forof_i = 0; __forof_i < xreg_list_lens[__forof_idx]; __forof_i++) {
       int32_t reg = xreg_list[__forof_idx][__forof_i];
-  RegisterSet_setRegisterU(cpu->registerSet, reg, RP2350_readUint32(cpu->chip, addr));
+  CPU_setRegisterU(cpu, reg, RP2350_readUint32(cpu->chip, addr));
   (addr -= 4);
   (cpu->cycles++);
     }
   }
-  RegisterSet_setRegisterU(cpu->registerSet, 2, (sp + stack_adj));
-  RegisterSet_setRegister(cpu->registerSet, 10, 0);
-  (cpu->next_pc = RegisterSet_getRegister(cpu->registerSet, 1));
+  CPU_setRegisterU(cpu, 2, (sp + stack_adj));
+  CPU_setRegister(cpu, 10, 0);
+  (cpu->next_pc = CPU_getRegister(cpu, 1));
   (cpu->cycles++);
   return;
   }
@@ -15796,19 +15780,19 @@ static void parse_101_10(CPU* cpu, int32_t inst) {
   int32_t rlist = ((uint32_t)(((int32_t)(inst) & (int32_t)(240))) >> (4));
   int32_t spimm = ((int32_t)((uint32_t)(((int32_t)(inst) & (int32_t)(12))) << (2)));
   int32_t stack_adj = (stack_adj_base[rlist] + spimm);
-  uint32_t sp = RegisterSet_getRegisterU(cpu->registerSet, 2);
+  uint32_t sp = CPU_getRegisterU(cpu, 2);
   int32_t addr = ((sp + stack_adj) - 4);
   {
     int32_t __forof_idx = rlist;
     for (int32_t __forof_i = 0; __forof_i < xreg_list_lens[__forof_idx]; __forof_i++) {
       int32_t reg = xreg_list[__forof_idx][__forof_i];
-  RegisterSet_setRegisterU(cpu->registerSet, reg, RP2350_readUint32(cpu->chip, addr));
+  CPU_setRegisterU(cpu, reg, RP2350_readUint32(cpu->chip, addr));
   (addr -= 4);
   (cpu->cycles++);
     }
   }
-  RegisterSet_setRegisterU(cpu->registerSet, 2, (sp + stack_adj));
-  (cpu->next_pc = RegisterSet_getRegister(cpu->registerSet, 1));
+  CPU_setRegisterU(cpu, 2, (sp + stack_adj));
+  (cpu->next_pc = CPU_getRegister(cpu, 1));
   (cpu->cycles++);
   return;
   }
@@ -15818,18 +15802,16 @@ static void parse_101_10(CPU* cpu, int32_t inst) {
   {
   int32_t r1s = (8 + ((int32_t)(((uint32_t)(inst) >> (7))) & (int32_t)(1)));
   int32_t r2s = (8 + ((int32_t)(((uint32_t)(inst) >> (2))) & (int32_t)(1)));
-  RegisterSet* rs = cpu->registerSet;
-  RegisterSet_setRegister(rs, r1s, RegisterSet_getRegister(rs, 10));
-  RegisterSet_setRegister(rs, r2s, RegisterSet_getRegister(rs, 11));
+  CPU_setRegister(cpu, r1s, CPU_getRegister(cpu, 10));
+  CPU_setRegister(cpu, r2s, CPU_getRegister(cpu, 11));
   return;
   }
   case 44130:
   {
   int32_t r1s = (8 + ((int32_t)(((uint32_t)(inst) >> (7))) & (int32_t)(1)));
   int32_t r2s = (8 + ((int32_t)(((uint32_t)(inst) >> (2))) & (int32_t)(1)));
-  RegisterSet* rs = cpu->registerSet;
-  RegisterSet_setRegister(rs, 10, RegisterSet_getRegister(rs, r1s));
-  RegisterSet_setRegister(rs, 11, RegisterSet_getRegister(rs, r2s));
+  CPU_setRegister(cpu, 10, CPU_getRegister(cpu, r1s));
+  CPU_setRegister(cpu, 11, CPU_getRegister(cpu, r2s));
   return;
   }
   }
@@ -15998,19 +15980,15 @@ static RP2350* RP2350_new(RP2350Options* options) {
   self->sio = RPSIO_new(self, IRQ2350_SIO_IRQ_FIFO, IRQ2350_SIO_IRQ_FIFO, IRQ2350_SIO_IRQ_MTIMECMP);
   self->otp = RP2350OTP_new(self, "OTP_BASE");
   self->watchdog = RPWatchdog_new(self, "WATCHDOG_BASE");
-  self->uart = calloc(2, sizeof(RPUART*));
   self->uart[0] = RPUART_new(self, "UART0", IRQ2350_UART0_IRQ, memcpy(malloc(sizeof(IUARTDMAChannels)), &(IUARTDMAChannels){ .rx = DREQChannel_DREQ_UART0_RX, .tx = DREQChannel_DREQ_UART0_TX }, sizeof(IUARTDMAChannels)));
   self->uart[1] = RPUART_new(self, "UART1", IRQ2350_UART1_IRQ, memcpy(malloc(sizeof(IUARTDMAChannels)), &(IUARTDMAChannels){ .rx = DREQChannel_DREQ_UART1_RX, .tx = DREQChannel_DREQ_UART1_TX }, sizeof(IUARTDMAChannels)));
-  self->i2c = calloc(2, sizeof(RPI2C*));
   self->i2c[0] = RPI2C_new(self, "I2C0", IRQ2350_I2C0_IRQ);
   self->i2c[1] = RPI2C_new(self, "I2C1", IRQ2350_I2C1_IRQ);
   self->pwm = RPPWM_new(self, "PWM_BASE", IRQ2350_PWM_IRQ_WRAP_0, DREQChannel_DREQ_PWM_WRAP0);
   self->adc = RPADC_new(self, "ADC", IRQ2350_ADC_IRQ_FIFO, DREQChannel_DREQ_ADC);
-  self->gpio = calloc(48, sizeof(GPIOPin*));
   for (int32_t i = 0; i < 48; i++) {
     self->gpio[i] = GPIOPin_new(self, i, 0);
   }
-  self->qspi = calloc(6, sizeof(GPIOPin*));
   self->qspi[0] = GPIOPin_new(self, 0, "SCLK");
   self->qspi[1] = GPIOPin_new(self, 1, "SS");
   self->qspi[2] = GPIOPin_new(self, 2, "SD0");
@@ -16018,12 +15996,10 @@ static RP2350* RP2350_new(RP2350Options* options) {
   self->qspi[4] = GPIOPin_new(self, 4, "SD2");
   self->qspi[5] = GPIOPin_new(self, 5, "SD3");
   self->dma = RPDMA_new(self, "DMA", IRQ2350_DMA_IRQ_0);
-  self->pio = calloc(3, sizeof(RPPIO*));
   self->pio[0] = RPPIO_new(self, "PIO0", IRQ2350_PIO0_IRQ_0, 0, DREQChannel_DREQ_PIO0_RX0, DREQChannel_DREQ_PIO0_TX0);
   self->pio[1] = RPPIO_new(self, "PIO1", IRQ2350_PIO1_IRQ_0, 1, DREQChannel_DREQ_PIO1_RX0, DREQChannel_DREQ_PIO1_TX0);
   self->pio[2] = RPPIO_new(self, "PIO2", IRQ2350_PIO2_IRQ_0, 2, DREQChannel_DREQ_PIO2_RX0, DREQChannel_DREQ_PIO2_TX0);
   self->usbCtrl = RPUSBController_new(self, "USB", IRQ2350_USBCTRL_IRQ);
-  self->spi = calloc(2, sizeof(RPSPI*));
   self->spi[0] = RPSPI_new(self, "SPI0", IRQ2350_SPI0_IRQ, memcpy(malloc(sizeof(ISPIDMAChannels)), &(ISPIDMAChannels){ .rx = DREQChannel_DREQ_SPI0_RX, .tx = DREQChannel_DREQ_SPI0_TX }, sizeof(ISPIDMAChannels)));
   self->spi[1] = RPSPI_new(self, "SPI1", IRQ2350_SPI1_IRQ, memcpy(malloc(sizeof(ISPIDMAChannels)), &(ISPIDMAChannels){ .rx = DREQChannel_DREQ_SPI1_RX, .tx = DREQChannel_DREQ_SPI1_TX }, sizeof(ISPIDMAChannels)));
   self->logger = ConsoleLogger_new(LogLevel_Debug, true);
@@ -16078,15 +16054,15 @@ static RP2350* RP2350_new(RP2350Options* options) {
   self->onTrace_ctx = self;
   self->currentCore = 0;
   self->disassembly = "";
+  self->pioActiveSmCount = 0;
+  self->pioActivePioCount = 0;
   (self->coreArch = (options->coreArch ? options->coreArch : "riscv"));
   (self->isArmCore = (strcmp(self->coreArch, "arm") == 0));
   if (self->isArmCore) {
-  self->core = calloc(2, sizeof(ICpuCore));
   self->core[0] = (ICpuCore){ .obj = (void*)(CortexM33Core_new(self, "ARMCore0", 0)), .vtable = &CortexM33Core_ICpuCore_vtable };
   self->core[1] = (ICpuCore){ .obj = (void*)(CortexM33Core_new(self, "ARMCore1", 1)), .vtable = &CortexM33Core_ICpuCore_vtable };
   (self->ppb = RPPPB2350_new(self, "PPB"));
   } else {
-  self->core = calloc(2, sizeof(ICpuCore));
   self->core[0] = (ICpuCore){ .obj = (void*)(CPU_new(self, "RISCVCore0", 0)), .vtable = &CPU_ICpuCore_vtable };
   self->core[1] = (ICpuCore){ .obj = (void*)(CPU_new(self, "RISCVCore1", 1)), .vtable = &CPU_ICpuCore_vtable };
   }
@@ -16447,13 +16423,51 @@ static int32_t RP2350_stepCores(RP2350* self) {
   return elapsed;
 }
 
-static void RP2350_stepThings(RP2350* self, int32_t cycles) {
+static void RP2350_updatePioActiveLists(RP2350* self) {
+  int32_t smCount = 0;
+  int32_t pioCount = 0;
+  {
+    int32_t __forof_n = 3;
+    for (int32_t __forof_i = 0; __forof_i < __forof_n; __forof_i++) {
+      RPPIO* pio = self->pio[__forof_i];
+  if (pio->machinesRunning) {
+  (self->pioActivePios[pioCount] = pio);
+  (pioCount++);
+  for (
+int32_t i = 0
+; (i < 4); (i++)) {
+  if (((int32_t)(pio->machinesRunning) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(i)) & 31)))))) {
+  (self->pioActiveSms[smCount] = pio->machines[i]);
+  (smCount++);
+  }
+  }
+  }
+    }
+  }
+  (self->pioActiveSmCount = smCount);
+  (self->pioActivePioCount = pioCount);
+}
+
+__attribute__((noinline)) static void RP2350_stepPios(RP2350* self, int32_t cycles) {
   for (
 int32_t cycle = 0
 ; (cycle < cycles); (cycle++)) {
-  RPPIO_step(self->pio[0]);
-  RPPIO_step(self->pio[1]);
-  RPPIO_step(self->pio[2]);
+  for (
+int32_t i = 0
+; (i < self->pioActiveSmCount); (i++)) {
+  StateMachine_stepUnchecked(self->pioActiveSms[i]);
+  }
+  for (
+int32_t i = 0
+; (i < self->pioActivePioCount); (i++)) {
+  RPPIO_checkChangedPins(self->pioActivePios[i]);
+  }
+  }
+}
+
+static void RP2350_stepThings(RP2350* self, int32_t cycles) {
+  if (self->pioActiveSmCount) {
+  RP2350_stepPios(self, cycles);
   }
   double cycleNanos = ((double)(1000000000) / (double)(self->clkSys));
   SimulationClock_tick(self->clock, (cycles * cycleNanos));
@@ -16873,17 +16887,14 @@ static RPSIO* RPSIO_new(RP2350* rp2040, int32_t sio_proc0_irq, int32_t sio_proc1
   self->gpioHiOutputEnable = 0;
   self->spinLock = 0;
   self->mtimeCtrl = 13;
-  self->mtimecmpHigh = calloc(2, sizeof(int32_t));
   self->mtimecmpHigh[0] = 0;
   self->mtimecmpHigh[1] = 0;
   FIFO* rxFIFO = FIFO_new(8);
   FIFO* txFIFO = FIFO_new(8);
-  self->sioCore = calloc(2, sizeof(RPSIOCore*));
   self->sioCore[0] = RPSIOCore_new(rp2040, rxFIFO, txFIFO, sio_proc0_irq, sio_proc1_irq, 0, 1);
   self->sioCore[1] = RPSIOCore_new(rp2040, txFIFO, rxFIFO, sio_proc1_irq, sio_proc0_irq, 1, 0);
   (self->mtimeTimer = Timer32_new("SIO_mtime", rp2040->clock, MTIME_FREQUENCY));
   Timer32_mode_set(self->mtimeTimer, TimerMode_Increment);
-  self->mtimecmpAlarm = calloc(2, sizeof(Timer32PeriodicAlarm*));
   self->mtimecmpAlarm[0] = RPSIO_createMtimecmpAlarm(self, rp2040, sio_mtimecmp_irq, 0);
   self->mtimecmpAlarm[1] = RPSIO_createMtimecmpAlarm(self, rp2040, sio_mtimecmp_irq, 1);
   return self;
