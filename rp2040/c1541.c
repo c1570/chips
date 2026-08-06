@@ -131,6 +131,21 @@ void write_iec_signals(uint8_t signals) {
     gpio_set_dir(IEC_PIN_SRQ, GPIO_IN);
 }
 
+#include "../docs/1541_test_demo.h"
+#pragma message "Using ../docs/1541_test_demo.h as disk image"
+bool c1541_fetch_track(c1541_t* sys) {
+    const uint8_t* gcr_data = (const uint8_t*) gcr_1541_test_demo_g64;
+    const uint32_t half_track_data_offset = ((uint32_t *)(gcr_data + 0xc))[sys->half_track];
+    if(!half_track_data_offset) return false;
+    const uint32_t data_size = ((uint32_t)gcr_data[half_track_data_offset+0]) + ((uint32_t)gcr_data[half_track_data_offset+1] << 8);
+    for (uint16_t i=0; i < data_size; i++) {
+        sys->gcr_bytes[i] = gcr_data[half_track_data_offset+2+i];
+    }
+    sys->gcr_bytes[data_size] = 0; // mark track done, protection against memory garbage
+    sys->gcr_size = data_size;
+    return true;
+}
+
 int main(int argc, char **argv) {
     struct timespec ts;
     struct timespec sleep_ts;
@@ -175,6 +190,7 @@ int main(int argc, char **argv) {
 
     c1541_init(&state.c1541, &floppy_desc);
     iecbus_device_t* host_iec = iec_connect(&state.c1541.iec_bus, false);
+    c1541_fetch_track(&state.c1541); // read initial track
 
     do {
       // Read IEC incoming signals from GPIOs and update the IEC bus
