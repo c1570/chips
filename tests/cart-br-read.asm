@@ -1,20 +1,15 @@
 ; ============================================================
-; C64 Cartridge — B-R (Block-Read) Sector Read Demo
+; C64 Cartridge — Block-Read Sector Read Demo
 ;
 ; This code is placed at $8000 in C64 RAM.  On power-on / reset,
 ; the KERNAL cold-start sequence at $FCE2 checks bytes
 ; $8004–$8008 for the "CBM80" signature ($C3 $C2 $CD $38 $30).
 ; If found, it executes  JMP ($8000)  — entering our cartridge.
 ;
-; The cartridge sends a "B-R" (block-read) command to the
+; The cartridge sends a U1/block-read command to the
 ; Commodore 1541 floppy drive to read track 18, sector 0
 ; (the BAM / directory header block), then dumps the 256-byte
 ; result to the screen as hexadecimal.
-;
-; The 1541 DOS parses B-R parameters as ASCII DECIMAL digits
-; (not binary CHR$ bytes).  The format is:
-;
-;       B-R:<channel>,<drive>,<track>,<sector>
 ;
 ; Assemble:  acme -f plain -o cart-br-read.bin cart-br-read.asm
 ; ============================================================
@@ -91,8 +86,8 @@ banner_done:
     BCS open_error
 
     ; =====================================================
-    ; Step 2:  OPEN 15,8,15,"B-R:2,0,18,0"
-    ;          Opens the command channel AND sends the B-R
+    ; Step 2:  OPEN 15,8,15,"U1:2 0 18 0"
+    ;          Opens the command channel AND sends the
     ;          command (the "filename" IS the command).
     ; =====================================================
     LDA #(br_cmd_end - br_cmd)   ; command length
@@ -209,13 +204,13 @@ hex_tab:
 hash_char:
     !text "#"
 
-; B-R command — 1541 DOS parses parameters as ASCII decimal.
+; U1/Block Read command — 1541 DOS parses parameters as ASCII decimal.
 ; Channel 2, drive 0, track 18, sector 0.
 br_cmd:
-    !text "B-R:2,0,18,0"
+    !text "U1:2 0 18 0"
 br_cmd_end:
 
 banner:
     !byte $13            ; HOME cursor
-    !text "B-R READ DEV8 T18 S0"
+    !text "BLOCK READ DEV8 T18 S0"
     !byte $0D, $0D, 0    ; two newlines, NUL terminator
