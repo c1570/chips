@@ -374,6 +374,11 @@ bool w65c816_e(w65c816_t* cpu) { return 0 != cpu->E; }
 #define _X8() (c->E||(c->P&W65C816_XF))
 /* effective stack pointer (in emulation mode, S is forced to page one) */
 #define _SH() (c->E?(uint16_t)(0x0100|(c->S&0xFF)):c->S)
+/* stack pointer +/- n, wrapping inside page 1 in emulation mode */
+#define _SPADD(n) (c->E?(uint16_t)(0x0100|((c->S+(n))&0xFF)):(uint16_t)(c->S+(n)))
+/* like _SPADD, but the address is computed linearly (no page-1 wrap) from
+   the forced emulation-mode stack pointer (used by PLB/PLD/RTL) */
+#define _SPLIN(n) (c->E?(uint16_t)((0x0100|(c->S&0xFF))+(n)):(uint16_t)(c->S+(n)))
 /* output the emulation mode and M/X flag state pins */
 #define _STATUS_PINS() {if(c->E){_ON(W65C816_E);}else{_OFF(W65C816_E);}if(c->P&W65C816_MF){_ON(W65C816_MXM);}else{_OFF(W65C816_MXM);}if(c->P&W65C816_XF){_ON(W65C816_MXX);}else{_OFF(W65C816_MXX);}}
 
@@ -788,6 +793,126 @@ bool w65c816_e(w65c816_t* cpu) { return 0 != cpu->E; }
 /* read/modify/write on the accumulator */
 #define _ACC_RMW(OP) do { _RMW_##OP(c->C); if (_W8()) { c->C=(uint16_t)((c->C&0xFF00)|(c->RR&0xFF)); } else { c->C=c->RR; } } while (0)
 
+/*--- branches, jumps and subroutines ---*/
+
+/* 8-bit relative branch: 2 cycles if not taken, 3 if taken (the 65816
+   never adds a page-cross penalty for taken branches)
+*/
+#define _M_BRANCH(op, cond) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|1: { int8_t off=(int8_t)_GD(); \
+        if (cond) { c->AD=(uint16_t)(c->PC+off); _DUMMY_PP(); \
+                    if (!(c->E && (((c->PC^c->AD)&0xFF00)!=0))) { c->IR++; } } \
+        else { _FETCH(); } } break; \
+    case ((op)<<4)|2: _DUMMY_PP(); break; \
+    case ((op)<<4)|3: c->PC=c->AD; _FETCH(); break;
+
+/* 16-bit relative branch (BRL): 4 cycles */
+#define _M_BRL(op) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|1: c->TA=_GD(); _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|2: { uint16_t tgt=(uint16_t)(c->PC+(int16_t)(c->TA|(((uint16_t)_GD())<<8))); _DUMMY_PP(); c->PC=tgt; } break; \
+    case ((op)<<4)|3: _FETCH(); break;
+
+/* JMP abs: 3 cycles */
+#define _M_JMP_ABS(op) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|1: c->TA=_GD(); _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|2: c->PC=(uint16_t)(c->TA|(((uint16_t)_GD())<<8)); _FETCH(); break;
+
+/* JMP al (long): 4 cycles */
+#define _M_JMP_AL(op) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|1: c->TA=_GD(); _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|2: c->TB=(uint16_t)(c->TA|(((uint16_t)_GD())<<8)); _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|3: c->PBR=_GD(); c->PC=c->TB; _FETCH(); break;
+
+/* JMP (abs): 5 cycles, the pointer high byte is fetched from the same
+   256-byte page (NMOS-style wrap, per WDC docs; not covered by tests) */
+#define _M_JMP_IND(op) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|1: c->AA=_GD(); _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|2: c->AA=(uint16_t)(c->AA|(((uint16_t)_GD())<<8)); _SA(c->AA); _VDA(); break; \
+    case ((op)<<4)|3: c->TA=_GD(); _SA((c->AA+1)&0xFFFF); _VDA(); break; \
+    case ((op)<<4)|4: c->PC=(uint16_t)(c->TA|(((uint16_t)_GD())<<8)); _FETCH(); break;
+
+/* JMP (abs,X): 6 cycles, pointer in the program bank, X add done on a
+   separate dummy cycle */
+#define _M_JMP_INDX(op) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|1: c->TA=_GD(); _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|2: c->TA=(uint16_t)(c->TA|(((uint16_t)_GD())<<8)); c->AA=(uint16_t)(c->TA+c->X); _DUMMY_PP(); break; \
+    case ((op)<<4)|3: _SA((((uint32_t)c->PBR)<<16)|c->AA); _VDA(); break; \
+    case ((op)<<4)|4: c->TA=_GD(); _SA((((uint32_t)c->PBR)<<16)|((c->AA+1)&0xFFFF)); _VDA(); break; \
+    case ((op)<<4)|5: c->PC=(uint16_t)(c->TA|(((uint16_t)_GD())<<8)); _FETCH(); break;
+
+/* JML (al): 6 cycles, the 24-bit pointer is fetched from bank zero */
+#define _M_JML_IND(op) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|1: c->AA=_GD(); _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|2: c->AA=(uint16_t)(c->AA|(((uint16_t)_GD())<<8)); _SA(c->AA); _VDA(); break; \
+    case ((op)<<4)|3: c->TB=_GD(); _SA((c->AA+1)&0xFFFF); _VDA(); break; \
+    case ((op)<<4)|4: c->TB|=((uint16_t)_GD())<<8; _SA((c->AA+2)&0xFFFF); _VDA(); break; \
+    case ((op)<<4)|5: c->PBR=_GD(); c->PC=c->TB; _FETCH(); break;
+
+/* JSR abs: 6 cycles, pushes PCH/PCL (return address = address of the
+   last operand byte) */
+#define _M_JSR_ABS(op) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|1: c->TA=_GD(); _SA(_PB_PC()); _VPA(); break; \
+    case ((op)<<4)|2: c->TB=_GD(); _DUMMY(); break; \
+    case ((op)<<4)|3: _SA(_SH()); _VDA(); _SD((uint8_t)(c->PC>>8)); _WR(); c->S=_SPADD(-1); break; \
+    case ((op)<<4)|4: _SA(_SH()); _VDA(); _SD((uint8_t)c->PC); _WR(); c->S=_SPADD(-1); break; \
+    case ((op)<<4)|5: c->PC=(uint16_t)(c->TA|(((uint16_t)c->TB)<<8)); _FETCH(); break;
+
+/* JSL al: 8 cycles, pushes PBR/PCH/PCL (return = address of the bank byte).
+   NOTE: the push addresses are computed linearly from the page-one stack
+   pointer in emulation mode and can cross the page boundary (verified:
+   an S of 0x0100 pushes to 0x0100/0x00FF/0x00FE, with S ending at 0x01FD),
+   the S register itself is only updated once at the end */
+#define _M_JSL(op) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|1: c->TA=_GD(); _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|2: c->TB=_GD(); _SA(_SH()); _VDA(); _SD(c->PBR); _WR(); c->AA=_SPLIN(-1); break; \
+    case ((op)<<4)|3: _SA(_SPLIN(0)); break; \
+    case ((op)<<4)|4: _SA(_PB_PC()); _VPA(); break; \
+    case ((op)<<4)|5: { uint8_t bank=_GD(); _SA(c->AA); _VDA(); _SD((uint8_t)(c->PC>>8)); _WR(); c->AA=_SPLIN(-2); c->PBR=bank; } break; \
+    case ((op)<<4)|6: _SA(c->AA); _VDA(); _SD((uint8_t)c->PC); _WR(); c->AA=_SPLIN(-3); c->S=_SPADD(-3); break; \
+    case ((op)<<4)|7: c->PC=c->TA|(((uint16_t)c->TB)<<8); _FETCH(); break;
+
+/* JSR (abs,X): 8 cycles, pushes the return address before fetching the
+   pointer (which lives in the program bank) */
+#define _M_JSR_INDX(op) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|1: c->TA=_GD(); _SA(_SH()); _VDA(); _SD((uint8_t)(c->PC>>8)); _WR(); c->S=_SPADD(-1); break; \
+    case ((op)<<4)|2: _SA(_SH()); _VDA(); _SD((uint8_t)c->PC); _WR(); c->S=_SPADD(-1); break; \
+    case ((op)<<4)|3: _SA(_PB_PC()); _VPA(); c->PC++; break; \
+    case ((op)<<4)|4: c->TB=_GD(); c->TA=(uint16_t)(c->TA|(((uint16_t)c->TB)<<8)); c->AA=(uint16_t)(c->TA+c->X); _DUMMY_PP(); break; \
+    case ((op)<<4)|5: _SA((((uint32_t)c->PBR)<<16)|c->AA); _VDA(); break; \
+    case ((op)<<4)|6: c->TA=_GD(); _SA((((uint32_t)c->PBR)<<16)|((c->AA+1)&0xFFFF)); _VDA(); break; \
+    case ((op)<<4)|7: c->PC=(uint16_t)(c->TA|(((uint16_t)_GD())<<8)); _FETCH(); break;
+
+/* RTS: 6 cycles, pulled PC is incremented */
+#define _M_RTS(op) \
+    case ((op)<<4)|0: _DUMMY(); break; \
+    case ((op)<<4)|1: _DUMMY(); break; \
+    case ((op)<<4)|2: c->AA=_SPADD(1); _SA(c->AA); _VDA(); break; \
+    case ((op)<<4)|3: c->TA=_GD(); c->AA=_SPADD(2); _SA(c->AA); _VDA(); break; \
+    case ((op)<<4)|4: c->TA|=((uint16_t)_GD())<<8; c->S=c->AA; c->PC=(uint16_t)(c->TA+1); _SA(_SH()); break; \
+    case ((op)<<4)|5: _FETCH(); break;
+
+/* RTL: 6 cycles, pulls PBR too, pulled PC is incremented */
+/* NOTE: unlike RTS/RTI, RTL's pull addresses are computed linearly from the
+   page-one stack pointer in emulation mode (verified against traces: an
+   S of 0x01FF pulls from 0x0200..0x0202), the S register itself wraps */
+#define _M_RTL(op) \
+    case ((op)<<4)|0: _DUMMY(); break; \
+    case ((op)<<4)|1: _DUMMY(); break; \
+    case ((op)<<4)|2: c->AA=_SPLIN(1); _SA(c->AA); _VDA(); break; \
+    case ((op)<<4)|3: c->TA=_GD(); c->AA=_SPLIN(2); _SA(c->AA); _VDA(); break; \
+    case ((op)<<4)|4: c->TA|=((uint16_t)_GD())<<8; c->AA=_SPLIN(3); _SA(c->AA); _VDA(); break; \
+    case ((op)<<4)|5: c->S=_SPADD(3); c->PBR=_GD(); c->PC=(uint16_t)(c->TA+1); _FETCH(); break;
+
 /* placeholder for not-yet implemented opcodes:
    keeps the CPU jammed on the same microstep (reads at PB:PC) so that
    a test harness fails fast instead of running away.
@@ -1060,8 +1185,8 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _M_ABS_RMW(0x0E, _RMW_ASL)
     /* ORA al */
         _M_ABL_RD(0x0F, _ORA)
-    /* TODO: 10 BPL */
-        _W65C816_TODO(0x10)
+    /* BPL */
+        _M_BRANCH(0x10, !(c->P&W65C816_NF))
     /* ORA (dp),Y */
         _M_IDY_RD(0x11, _ORA)
     /* ORA (dp) */
@@ -1090,12 +1215,12 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _M_ABXY_RMW(0x1E, _RMW_ASL, c->X)
     /* ORA al,X */
         _M_ABLX_RD(0x1F, _ORA)
-    /* TODO: 20 JSR abs */
-        _W65C816_TODO(0x20)
+    /* JSR abs */
+        _M_JSR_ABS(0x20)
     /* AND (dp,X) */
         _M_IDX_RD(0x21, _AND)
-    /* TODO: 22 JSL al */
-        _W65C816_TODO(0x22)
+    /* JSL al */
+        _M_JSL(0x22)
     /* AND sr,S */
         _M_SR_RD(0x23, _AND)
     /* TODO: 24 BIT dp */
@@ -1122,8 +1247,8 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _M_ABS_RMW(0x2E, _RMW_ROL)
     /* AND al */
         _M_ABL_RD(0x2F, _AND)
-    /* TODO: 30 BMI */
-        _W65C816_TODO(0x30)
+    /* BMI */
+        _M_BRANCH(0x30, (c->P&W65C816_NF))
     /* AND (dp),Y */
         _M_IDY_RD(0x31, _AND)
     /* AND (dp) */
@@ -1179,16 +1304,16 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _M_IMPLIED(0x4A, _ACC_RMW(LSR);)
     /* TODO: 4B PHK */
         _W65C816_TODO(0x4B)
-    /* TODO: 4C JMP abs */
-        _W65C816_TODO(0x4C)
+    /* JMP abs */
+        _M_JMP_ABS(0x4C)
     /* EOR abs */
         _M_ABS_RD(0x4D, _EOR)
     /* LSR abs */
         _M_ABS_RMW(0x4E, _RMW_LSR)
     /* EOR al */
         _M_ABL_RD(0x4F, _EOR)
-    /* TODO: 50 BVC */
-        _W65C816_TODO(0x50)
+    /* BVC */
+        _M_BRANCH(0x50, !(c->P&W65C816_VF))
     /* EOR (dp),Y */
         _M_IDY_RD(0x51, _EOR)
     /* EOR (dp) */
@@ -1211,16 +1336,16 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _W65C816_TODO(0x5A)
     /* TODO: 5B TCD */
         _W65C816_TODO(0x5B)
-    /* TODO: 5C JMP al */
-        _W65C816_TODO(0x5C)
+    /* JMP al */
+        _M_JMP_AL(0x5C)
     /* EOR abs,X */
         _M_ABXY_RD(0x5D, _EOR, c->X)
     /* LSR abs,X */
         _M_ABXY_RMW(0x5E, _RMW_LSR, c->X)
     /* EOR al,X */
         _M_ABLX_RD(0x5F, _EOR)
-    /* TODO: 60 RTS */
-        _W65C816_TODO(0x60)
+    /* RTS */
+        _M_RTS(0x60)
     /* ADC (dp,X) */
         _M_IDX_RD(0x61, _ADC)
     /* TODO: 62 PER */
@@ -1241,18 +1366,18 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _M_IMM_RD(0x69, _ADC)
     /* ROR A */
         _M_IMPLIED(0x6A, _ACC_RMW(ROR);)
-    /* TODO: 6B RTL */
-        _W65C816_TODO(0x6B)
-    /* TODO: 6C JMP (abs) */
-        _W65C816_TODO(0x6C)
+    /* RTL */
+        _M_RTL(0x6B)
+    /* JMP (abs) */
+        _M_JMP_IND(0x6C)
     /* ADC abs */
         _M_ABS_RD(0x6D, _ADC)
     /* ROR abs */
         _M_ABS_RMW(0x6E, _RMW_ROR)
     /* ADC al */
         _M_ABL_RD(0x6F, _ADC)
-    /* TODO: 70 BVS */
-        _W65C816_TODO(0x70)
+    /* BVS */
+        _M_BRANCH(0x70, (c->P&W65C816_VF))
     /* ADC (dp),Y */
         _M_IDY_RD(0x71, _ADC)
     /* ADC (dp) */
@@ -1275,20 +1400,20 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _W65C816_TODO(0x7A)
     /* TODO: 7B TDC */
         _W65C816_TODO(0x7B)
-    /* TODO: 7C JMP (abs,X) */
-        _W65C816_TODO(0x7C)
+    /* JMP (abs,X) */
+        _M_JMP_INDX(0x7C)
     /* ADC abs,X */
         _M_ABXY_RD(0x7D, _ADC, c->X)
     /* ROR abs,X */
         _M_ABXY_RMW(0x7E, _RMW_ROR, c->X)
     /* ADC al,X */
         _M_ABLX_RD(0x7F, _ADC)
-    /* TODO: 80 BRA */
-        _W65C816_TODO(0x80)
+    /* BRA */
+        _M_BRANCH(0x80, 1)
     /* STA (dp,X) */
         _M_IDX_WR(0x81, c->C, _W8())
-    /* TODO: 82 BRL */
-        _W65C816_TODO(0x82)
+    /* BRL */
+        _M_BRL(0x82)
     /* STA sr,S */
         _M_SR_WR(0x83, c->C, _W8())
     /* STY dp */
@@ -1315,8 +1440,8 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _M_ABS_WR(0x8E, c->X, _X8())
     /* STA al */
         _M_ABL_WR(0x8F, c->C, _W8())
-    /* TODO: 90 BCC */
-        _W65C816_TODO(0x90)
+    /* BCC */
+        _M_BRANCH(0x90, !(c->P&W65C816_CF))
     /* STA (dp),Y */
         _M_IDY_WR(0x91, c->C, _W8())
     /* STA (dp) */
@@ -1379,8 +1504,8 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _W65C816_TODO(0xAE)
     /* LDA al */
         _M_ABL_RD(0xAF, _LDA)
-    /* TODO: B0 BCS */
-        _W65C816_TODO(0xB0)
+    /* BCS */
+        _M_BRANCH(0xB0, (c->P&W65C816_CF))
     /* LDA (dp),Y */
         _M_IDY_RD(0xB1, _LDA)
     /* LDA (dp) */
@@ -1443,8 +1568,8 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _M_ABS_RMW(0xCE, _RMW_DEC)
     /* CMP al */
         _M_ABL_RD(0xCF, _CMPA)
-    /* TODO: D0 BNE */
-        _W65C816_TODO(0xD0)
+    /* BNE */
+        _M_BRANCH(0xD0, !(c->P&W65C816_ZF))
     /* CMP (dp),Y */
         _M_IDY_RD(0xD1, _CMPA)
     /* CMP (dp) */
@@ -1467,8 +1592,8 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _W65C816_TODO(0xDA)
     /* TODO: DB STP */
         _W65C816_TODO(0xDB)
-    /* TODO: DC JML (al) */
-        _W65C816_TODO(0xDC)
+    /* JML (al) */
+        _M_JML_IND(0xDC)
     /* CMP abs,X */
         _M_ABXY_RD(0xDD, _CMPA, c->X)
     /* DEC abs,X */
@@ -1507,8 +1632,8 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _M_ABS_RMW(0xEE, _RMW_INC)
     /* SBC al */
         _M_ABL_RD(0xEF, _SBC)
-    /* TODO: F0 BEQ */
-        _W65C816_TODO(0xF0)
+    /* BEQ */
+        _M_BRANCH(0xF0, (c->P&W65C816_ZF))
     /* SBC (dp),Y */
         _M_IDY_RD(0xF1, _SBC)
     /* SBC (dp) */
@@ -1531,8 +1656,8 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _W65C816_TODO(0xFA)
     /* TODO: FB XCE */
         _W65C816_TODO(0xFB)
-    /* TODO: FC JSR (abs,X) */
-        _W65C816_TODO(0xFC)
+    /* JSR (abs,X) */
+        _M_JSR_INDX(0xFC)
     /* SBC abs,X */
         _M_ABXY_RD(0xFD, _SBC, c->X)
     /* INC abs,X */
