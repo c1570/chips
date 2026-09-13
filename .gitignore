@@ -4,3 +4,5 @@
 .fips-*
 *.pyc
 #<fips
+SingleStepTests_65816/
+build/

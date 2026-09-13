@@ -1,0 +1,1346 @@
+#pragma once
+/*#
+    # w65c816.h
+
+    WDC W65C816 CPU emulator.
+
+    Project repo: https://github.com/floooh/chips/
+
+    NOTE: this file is work-in-progress, it is currently hand-written
+    (m6502.h is code-generated from the codegen directory, this may or
+    may not happen for the 65816 too).
+
+    Implementation status: scaffold, only CLC (0x18) is implemented, all
+    other opcodes are placeholders marked with TODO.
+
+    Do this:
+    ~~~C
+    #define CHIPS_IMPL
+    ~~~
+    before you include this file in *one* C or C++ file to create the
+    implementation.
+
+    Optionally provide the following macros with your own implementation
+    ~~~C
+    CHIPS_ASSERT(c)
+    ~~~
+
+    ## Emulated Pins
+
+    ***********************************
+    *           +-----------+         *
+    *   IRQ --->|           |---> A0  *
+    *   NMI --->|           |...      *
+    *  ABORT--->|           |---> A23 *
+    *   RES--->|            |         *
+    *   RDY--->|            |         *
+    *    RW <---|           |         *
+    *   VPA <---|           |         *
+    *   VDA <---|           |<--> D0  *
+    *   VPB <---|           |...      *
+    *   MLB <---|           |<--> D7  *
+    *  SYNC <---|           |         *
+    *  (E)  <---|           |         *
+    *  (MX) <---|           |         *
+    *           +-----------+         *
+    ***********************************
+
+    ## Overview
+
+    w65c816.h implements a cycle-stepped W65C816 CPU emulator, meaning
+    that the emulation state can be ticked forward in clock cycles instead
+    of full instructions, and all memory accesses are performed through
+    a 64-bit pin mask, just like the other chips CPU emulators.
+
+    The 65816 has a 24-bit address bus (A0..A23 in pin bits 0..23), an
+    8-bit data bus (D0..D7 in pin bits 24..31), and the following
+    control pins:
+
+        RW      out: 1 for memory read, 0 for memory write
+        VPA     out: valid program address (opcode/operand fetch)
+        VDA     out: valid data address (data memory access)
+        VPB     out: valid program bank address (vector fetch)
+        MLB     out: memory lock (asserted during read-modify-write cycles)
+        E       out: current emulation mode flag state
+        MXM     out: current M status flag state (8-bit A/memory)
+        MXX     out: current X status flag state (8-bit X/Y)
+        SYNC    out: set on the opcode fetch cycle (chips-specific helper
+                     pin, the real 65816 only has VPA/VDA/VPB)
+
+    Machine state is transferred through pins: set the RES pin to start
+    a reset sequence, the IRQ or NMI pins to request an interrupt.
+
+    A minimal execution loop looks like this:
+
+    ~~~C
+    // 16 MBytes of RAM
+    uint8_t mem[1<<24];
+    w65c816_t cpu;
+    uint64_t pins = w65c816_init(&cpu, &(w65c816_desc_t){0});
+    while (...) {
+        pins = w65c816_tick(&cpu, pins);
+        const uint32_t addr = W65C816_GET_ADDR(pins);
+        if (pins & W65C816_RW) {
+            W65C816_SET_DATA(pins, mem[addr]);
+        }
+        else {
+            mem[addr] = W65C816_GET_DATA(pins);
+        }
+    }
+    ~~~
+
+    NOTE: the 24-bit address bus means that the memory access code must
+    handle bank windowing (usually through a pagetable).
+
+    ## Functions
+    ~~~C
+    uint64_t w65c816_init(w65c816_t* cpu, const w65c816_desc_t* desc)
+    uint64_t w65c816_tick(w65c816_t* cpu, uint64_t pins)
+    // plus register get/set functions (see below)
+    ~~~
+
+    ## zlib/libpng license
+
+    Copyright (c) 2026 Andre Weissflog
+    This software is provided 'as-is', without any express or implied warranty.
+    In no event will the authors be held liable for any damages arising from the
+    use of this software.
+    Permission is granted to anyone to use this software for any purpose,
+    including commercial applications, and to alter it and redistribute it
+    freely, subject to the following restrictions:
+        1. The origin of this software must not be misrepresented; you must not
+        claim that you wrote the original software. If you use this software in a
+        product, an acknowledgment in the product documentation would be
+        appreciated but is not required.
+        2. Altered source versions must be plainly marked as such, and must not
+        be misrepresented as being the original software.
+        3. This notice may not be removed or altered from any source
+        distribution.
+#*/
+#include <stdint.h>
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// address bus pins (24-bit address space)
+#define W65C816_PIN_A0    (0)
+#define W65C816_PIN_A1    (1)
+#define W65C816_PIN_A2    (2)
+#define W65C816_PIN_A3    (3)
+#define W65C816_PIN_A4    (4)
+#define W65C816_PIN_A5    (5)
+#define W65C816_PIN_A6    (6)
+#define W65C816_PIN_A7    (7)
+#define W65C816_PIN_A8    (8)
+#define W65C816_PIN_A9    (9)
+#define W65C816_PIN_A10   (10)
+#define W65C816_PIN_A11   (11)
+#define W65C816_PIN_A12   (12)
+#define W65C816_PIN_A13   (13)
+#define W65C816_PIN_A14   (14)
+#define W65C816_PIN_A15   (15)
+#define W65C816_PIN_A16   (16)
+#define W65C816_PIN_A17   (17)
+#define W65C816_PIN_A18   (18)
+#define W65C816_PIN_A19   (19)
+#define W65C816_PIN_A20   (20)
+#define W65C816_PIN_A21   (21)
+#define W65C816_PIN_A22   (22)
+#define W65C816_PIN_A23   (23)
+
+// data bus pins
+#define W65C816_PIN_D0    (24)
+#define W65C816_PIN_D1    (25)
+#define W65C816_PIN_D2    (26)
+#define W65C816_PIN_D3    (27)
+#define W65C816_PIN_D4    (28)
+#define W65C816_PIN_D5    (29)
+#define W65C816_PIN_D6    (30)
+#define W65C816_PIN_D7    (31)
+
+// control pins
+#define W65C816_PIN_RW    (32)     // out: 1=read, 0=write
+#define W65C816_PIN_VPA   (33)     // out: valid program address
+#define W65C816_PIN_VDA   (34)     // out: valid data address
+#define W65C816_PIN_VPB   (35)     // out: valid program bank address (vector fetch)
+#define W65C816_PIN_MLB   (36)     // out: memory lock (read-modify-write)
+#define W65C816_PIN_E     (37)     // out: emulation mode flag
+#define W65C816_PIN_MXM   (38)     // out: M flag state (8-bit accumulator)
+#define W65C816_PIN_MXX   (39)     // out: X flag state (8-bit index regs)
+#define W65C816_PIN_RDY   (40)     // in: freeze execution at next read cycle
+#define W65C816_PIN_SYNC  (41)     // out: opcode fetch cycle (chips-specific)
+#define W65C816_PIN_IRQ   (42)     // in: maskable interrupt requested
+#define W65C816_PIN_NMI   (43)     // in: non-maskable interrupt requested
+#define W65C816_PIN_ABORT (44)     // in: abort requested
+#define W65C816_PIN_RES   (45)     // in: request RESET
+
+// pin bit masks
+#define W65C816_A0    (1ULL<<W65C816_PIN_A0)
+#define W65C816_A8    (1ULL<<W65C816_PIN_A8)
+#define W65C816_A16   (1ULL<<W65C816_PIN_A16)
+#define W65C816_D0    (1ULL<<W65C816_PIN_D0)
+#define W65C816_RW    (1ULL<<W65C816_PIN_RW)
+#define W65C816_VPA   (1ULL<<W65C816_PIN_VPA)
+#define W65C816_VDA   (1ULL<<W65C816_PIN_VDA)
+#define W65C816_VPB   (1ULL<<W65C816_PIN_VPB)
+#define W65C816_MLB   (1ULL<<W65C816_PIN_MLB)
+#define W65C816_E     (1ULL<<W65C816_PIN_E)
+#define W65C816_MXM   (1ULL<<W65C816_PIN_MXM)
+#define W65C816_MXX   (1ULL<<W65C816_PIN_MXX)
+#define W65C816_RDY   (1ULL<<W65C816_PIN_RDY)
+#define W65C816_SYNC  (1ULL<<W65C816_PIN_SYNC)
+#define W65C816_IRQ   (1ULL<<W65C816_PIN_IRQ)
+#define W65C816_NMI   (1ULL<<W65C816_PIN_NMI)
+#define W65C816_ABORT (1ULL<<W65C816_PIN_ABORT)
+#define W65C816_RES   (1ULL<<W65C816_PIN_RES)
+
+/* bit mask for all CPU pins (up to bit pos 46) */
+#define W65C816_PIN_MASK ((1ULL<<46)-1)
+
+/* status flag bits in P (WDC 65816 layout) */
+#define W65C816_CF    (1<<0)  /* carry */
+#define W65C816_ZF    (1<<1)  /* zero */
+#define W65C816_IF    (1<<2)  /* IRQ disable */
+#define W65C816_DF    (1<<3)  /* decimal mode */
+#define W65C816_XF    (1<<4)  /* index select: 1=8-bit X/Y (doubles as B flag) */
+#define W65C816_MF    (1<<5)  /* memory/accumulator select: 1=8-bit */
+#define W65C816_VF    (1<<6)  /* overflow */
+#define W65C816_NF    (1<<7)  /* negative */
+
+/* internal BRK state flags */
+#define W65C816_BRK_IRQ   (1<<0)  /* IRQ was triggered */
+#define W65C816_BRK_NMI   (1<<1)  /* NMI was triggered */
+#define W65C816_BRK_RESET (1<<2)  /* RES was triggered */
+#define W65C816_BRK_ABORT (1<<3)  /* ABORT was triggered */
+
+/* the desc structure provided to w65c816_init() */
+typedef struct {
+    bool abort_disabled;    /* ignore the ABORT pin */
+} w65c816_desc_t;
+
+/* CPU state */
+typedef struct {
+    uint16_t IR;        /* internal instruction register: (opcode<<4)|microstep */
+    uint16_t PC;        /* program counter (relative to PBR) */
+    uint16_t C;         /* 16-bit accumulator (A=low byte, B=high byte) */
+    uint16_t X, Y;      /* index registers */
+    uint16_t S;         /* stack pointer (in emulation mode: 0x01xx page) */
+    uint16_t D;         /* direct page register */
+    uint8_t PBR;        /* program bank register */
+    uint8_t DBR;        /* data bank register */
+    uint8_t P;          /* status flags */
+    uint8_t E;          /* emulation mode flag */
+    /* internal state */
+    uint32_t AD;        /* 24-bit effective address latch */
+    uint16_t TA;        /* temp latch (address bytes / dp offset) */
+    uint16_t TD;        /* data latch (8 or 16-bit operand data) */
+    uint16_t AA;        /* temp address (e.g. pointer location) */
+    uint16_t RR;        /* temp result latch (read-modify-write) */
+    uint16_t TB;        /* temp bank/pointer latch (16-bit: lo|mid<<8) */
+    uint8_t CRS;        /* page-crossing flag */
+    uint16_t MC;        /* block move counter (MVN/MVP) */
+    uint8_t halted;     /* 0: running, 1: WAI, 2: STP */
+    uint64_t PINS;      /* last stored pin state (do NOT modify) */
+    uint16_t irq_pip;
+    uint16_t nmi_pip;
+    uint16_t abrt_pip;
+    uint8_t brk_flags;  /* W65C816_BRK_* */
+} w65c816_t;
+
+/* initialize a new w65c816 instance and return initial pin mask */
+uint64_t w65c816_init(w65c816_t* cpu, const w65c816_desc_t* desc);
+/* execute one tick */
+uint64_t w65c816_tick(w65c816_t* cpu, uint64_t pins);
+/* prepare w65c816_t snapshot for saving */
+void w65c816_snapshot_onsave(w65c816_t* snapshot);
+/* fixup w65c816_t snapshot after loading */
+void w65c816_snapshot_onload(w65c816_t* snapshot, w65c816_t* sys);
+
+/* register access functions */
+void w65c816_set_a(w65c816_t* cpu, uint8_t v);      /* low byte of C */
+void w65c816_set_c(w65c816_t* cpu, uint16_t v);     /* full 16-bit accumulator */
+void w65c816_set_x(w65c816_t* cpu, uint16_t v);
+void w65c816_set_y(w65c816_t* cpu, uint16_t v);
+void w65c816_set_s(w65c816_t* cpu, uint16_t v);
+void w65c816_set_d(w65c816_t* cpu, uint16_t v);
+void w65c816_set_p(w65c816_t* cpu, uint8_t v);
+void w65c816_set_pbr(w65c816_t* cpu, uint8_t v);
+void w65c816_set_dbr(w65c816_t* cpu, uint8_t v);
+void w65c816_set_pc(w65c816_t* cpu, uint16_t v);
+void w65c816_set_e(w65c816_t* cpu, bool v);
+uint8_t w65c816_a(w65c816_t* cpu);
+uint16_t w65c816_c(w65c816_t* cpu);
+uint16_t w65c816_x(w65c816_t* cpu);
+uint16_t w65c816_y(w65c816_t* cpu);
+uint16_t w65c816_s(w65c816_t* cpu);
+uint16_t w65c816_d(w65c816_t* cpu);
+uint8_t w65c816_p(w65c816_t* cpu);
+uint8_t w65c816_pbr(w65c816_t* cpu);
+uint8_t w65c816_dbr(w65c816_t* cpu);
+uint16_t w65c816_pc(w65c816_t* cpu);
+bool w65c816_e(w65c816_t* cpu);
+
+/* extract 24-bit address bus from 64-bit pins */
+#define W65C816_GET_ADDR(p) ((uint32_t)((p)&0xFFFFFFULL))
+/* merge 24-bit address bus value into 64-bit pins */
+#define W65C816_SET_ADDR(p,a) {p=(((p)&~0xFFFFFFULL)|((uint32_t)(a)&0xFFFFFFULL));}
+/* extract 8-bit data bus from 64-bit pins */
+#define W65C816_GET_DATA(p) ((uint8_t)(((p)&0xFF000000ULL)>>24))
+/* merge 8-bit data bus value into 64-bit pins */
+#define W65C816_SET_DATA(p,d) {p=(((p)&~0xFF000000ULL)|((((uint32_t)(d))<<24)&0xFF000000ULL));}
+/* copy data bus value from other pin mask */
+#define W65C816_COPY_DATA(p0,p1) (((p0)&~0xFF000000ULL)|((p1)&0xFF000000ULL))
+/* return a pin mask with control-pins, address and data bus */
+#define W65C816_MAKE_PINS(ctrl, addr, data) ((ctrl)|((((uint64_t)(data))<<24)&0xFF000000ULL)|((uint32_t)(addr)&0xFFFFFFULL))
+
+#ifdef __cplusplus
+} /* extern "C" */
+#endif
+
+/*-- IMPLEMENTATION ----------------------------------------------------------*/
+#ifdef CHIPS_IMPL
+#include <string.h>
+#ifndef CHIPS_ASSERT
+    #include <assert.h>
+    #define CHIPS_ASSERT(c) assert(c)
+#endif
+
+/* register access functions */
+void w65c816_set_a(w65c816_t* cpu, uint8_t v) { cpu->C = (cpu->C & 0xFF00) | v; }
+void w65c816_set_c(w65c816_t* cpu, uint16_t v) { cpu->C = v; }
+void w65c816_set_x(w65c816_t* cpu, uint16_t v) { cpu->X = v; }
+void w65c816_set_y(w65c816_t* cpu, uint16_t v) { cpu->Y = v; }
+void w65c816_set_s(w65c816_t* cpu, uint16_t v) { cpu->S = v; }
+void w65c816_set_d(w65c816_t* cpu, uint16_t v) { cpu->D = v; }
+void w65c816_set_p(w65c816_t* cpu, uint8_t v) { cpu->P = v; }
+void w65c816_set_pbr(w65c816_t* cpu, uint8_t v) { cpu->PBR = v; }
+void w65c816_set_dbr(w65c816_t* cpu, uint8_t v) { cpu->DBR = v; }
+void w65c816_set_pc(w65c816_t* cpu, uint16_t v) { cpu->PC = v; }
+void w65c816_set_e(w65c816_t* cpu, bool v) { cpu->E = v; }
+uint8_t w65c816_a(w65c816_t* cpu) { return (uint8_t)cpu->C; }
+uint16_t w65c816_c(w65c816_t* cpu) { return cpu->C; }
+uint16_t w65c816_x(w65c816_t* cpu) { return cpu->X; }
+uint16_t w65c816_y(w65c816_t* cpu) { return cpu->Y; }
+uint16_t w65c816_s(w65c816_t* cpu) { return cpu->S; }
+uint16_t w65c816_d(w65c816_t* cpu) { return cpu->D; }
+uint8_t w65c816_p(w65c816_t* cpu) { return cpu->P; }
+uint8_t w65c816_pbr(w65c816_t* cpu) { return cpu->PBR; }
+uint8_t w65c816_dbr(w65c816_t* cpu) { return cpu->DBR; }
+uint16_t w65c816_pc(w65c816_t* cpu) { return cpu->PC; }
+bool w65c816_e(w65c816_t* cpu) { return 0 != cpu->E; }
+
+/* helper macros for the code-generated instruction decoder */
+/* set 24-bit address in 64-bit pin mask */
+#define _SA(addr) pins=(pins&~0xFFFFFFULL)|((uint32_t)(addr)&0xFFFFFFULL)
+/* set 24-bit address and 8-bit data in 64-bit pin mask */
+#define _SAD(addr,data) pins=(pins&~0xFFFFFFULL)|((uint32_t)(addr)&0xFFFFFFULL)|((((uint32_t)(data))<<24)&0xFF000000ULL)
+/* set 8-bit data in 64-bit pin mask */
+#define _SD(data) pins=(pins&~0xFF000000ULL)|((((uint32_t)(data))<<24)&0xFF000000ULL)
+/* extract 8-bit data from 64-bit pin mask */
+#define _GD() ((uint8_t)((pins&0xFF000000ULL)>>24))
+/* set address to PBR:PC (opcode fetch position) */
+#define _PB_PC() ((((uint32_t)c->PBR)<<16)|c->PC)
+/* enable control pins */
+#define _ON(m) pins|=(m)
+/* disable control pins */
+#define _OFF(m) pins&=~(m)
+/* a memory read tick (reads are default, this is just for readability) */
+#define _RD() _ON(W65C816_RW)
+/* a memory write tick */
+#define _WR() _OFF(W65C816_RW)
+/* valid-program-address cycle */
+#define _VPA() _ON(W65C816_VPA)
+/* valid-data-address cycle */
+#define _VDA() _ON(W65C816_VDA)
+/* valid-program-bank-address cycle (vector fetch) */
+#define _VPB() _ON(W65C816_VPB)
+/* memory-lock cycle (read-modify-write) */
+#define _MLB() _ON(W65C816_MLB)
+/* fetch next opcode byte (the next instruction's first bus cycle) */
+#define _FETCH() _SA(_PB_PC());_ON(W65C816_SYNC);_VPA();_VDA()
+/* internal cycle: dummy read at PB:PC without any valid-address pins */
+#define _DUMMY() _SA(_PB_PC())
+/* dummy read at the address of the previously fetched operand byte */
+#define _DUMMY_PP() _SA((((uint32_t)c->PBR)<<16)|(uint16_t)(c->PC-1))
+/* set N and Z flags depending on 8-bit value */
+#define _NZ8(v) c->P=((c->P&~(W65C816_NF|W65C816_ZF))|((v&0xFF)?(v&W65C816_NF):W65C816_ZF))
+/* set N and Z flags depending on 16-bit value */
+#define _NZ16(v) c->P=((c->P&~(W65C816_NF|W65C816_ZF))|((v&0xFFFF)?(((v)>>8)&W65C816_NF):W65C816_ZF))
+/* true if accumulator/memory operations are 8-bit */
+#define _W8() (c->E||(c->P&W65C816_MF))
+/* true if index register operations are 8-bit */
+#define _X8() (c->E||(c->P&W65C816_XF))
+/* effective stack pointer (in emulation mode, S is forced to page one) */
+#define _SH() (c->E?(uint16_t)(0x0100|(c->S&0xFF)):c->S)
+/* output the emulation mode and M/X flag state pins */
+#define _STATUS_PINS() {if(c->E){_ON(W65C816_E);}else{_OFF(W65C816_E);}if(c->P&W65C816_MF){_ON(W65C816_MXM);}else{_OFF(W65C816_MXM);}if(c->P&W65C816_XF){_ON(W65C816_MXX);}else{_OFF(W65C816_MXX);}}
+
+/*--- ALU operation macros (width-aware, applied to the latched data) ---*/
+#define _ORA(v) do { if (_W8()) { c->C=(uint16_t)((c->C&0xFF00)|((c->C|(v))&0xFF)); _NZ8(c->C); } else { c->C=(uint16_t)(c->C|(v)); _NZ16(c->C); } } while (0)
+#define _AND(v) do { if (_W8()) { c->C=(uint16_t)((c->C&0xFF00)|((c->C&(v))&0xFF)); _NZ8(c->C); } else { c->C=(uint16_t)(c->C&(v)); _NZ16(c->C); } } while (0)
+#define _EOR(v) do { if (_W8()) { c->C=(uint16_t)((c->C&0xFF00)|((c->C^(v))&0xFF)); _NZ8(c->C); } else { c->C=(uint16_t)(c->C^(v)); _NZ16(c->C); } } while (0)
+#define _ADC(v) do { _w65c816_adc(c,(uint16_t)(v),!_W8()); } while (0)
+#define _SBC(v) do { _w65c816_sbc(c,(uint16_t)(v),!_W8()); } while (0)
+#define _LDA(v) do { if (_W8()) { c->C=(uint16_t)(((v)&0xFF)|(c->C&0xFF00)); _NZ8(c->C); } else { c->C=(v); _NZ16(c->C); } } while (0)
+#define _CMPA(v) do { if (_W8()) { uint32_t t=(uint32_t)(c->C&0xFF)-((v)&0xFF); _NZ8((uint16_t)t); if (0==(t&0x100)) { c->P|=W65C816_CF; } else { c->P&=(uint8_t)~W65C816_CF; } } else { uint32_t t=(uint32_t)c->C-((v)&0xFFFF); _NZ16((uint16_t)t); if (0==(t&0x10000)) { c->P|=W65C816_CF; } else { c->P&=(uint8_t)~W65C816_CF; } } } while (0)
+
+/*--- addressing mode microcode macros (read flavour) ---
+   slot layout notes:
+   - slot 0 is executed in the same tick that loads the opcode from the
+     instruction-fetch cycle, it produces bus cycle 2 of the instruction
+   - conditional extra cycles (D-alignment penalty, page crossing) are
+     decided in the slot *before* the extra slot by advancing c->IR
+   - the last addressing slot branches by width: 8-bit ops execute and
+     fetch the next opcode, 16-bit ops read/write the high byte first
+---*/
+
+/* shared 2-slot tail for all read modes: consume the low data byte and
+   either execute (8-bit) or read the high byte and execute (16-bit)
+   ...'nextaddr' is the address expression for the high data byte
+*/
+#define _TAIL_RD(op, s, exec, nextaddr) \
+    case ((op)<<4)|(s): c->TD=_GD(); if (_W8()) { exec(c->TD); _FETCH(); } else { _SA(nextaddr); _VDA(); } break; \
+    case ((op)<<4)|((s)+1): c->TD|=((uint16_t)_GD())<<8; exec(c->TD); _FETCH(); break;
+
+/* immediate: 2 cycles (8-bit) / 3 cycles (16-bit) */
+#define _M_IMM_RD(op, exec) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); if (_W8()) { c->IR++; } break; \
+    case ((op)<<4)|1: _SA(_PB_PC()); c->PC++; _VPA(); c->TA=_GD(); break; \
+    case ((op)<<4)|2: if (_W8()) { exec(_GD()); } else { exec((uint16_t)(c->TA|(((uint16_t)_GD())<<8))); } _FETCH(); break;
+
+/* direct page: 3 cycles + 1 if D low byte != 0 + 1 if 16-bit */
+#define _M_DP_RD(op, exec) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); if (!(c->D&0xFF)) { c->IR++; } break; \
+    case ((op)<<4)|1: c->TA=_GD(); _DUMMY_PP(); break; \
+    case ((op)<<4)|2: c->AD=(uint16_t)((((c->D&0xFF)?c->TA:_GD())+c->D)&0xFFFF); _SA(c->AD); _VDA(); break; \
+    _TAIL_RD(op, 3, exec, ((c->AD+1)&0xFFFF))
+
+/* direct page indexed (X or Y): 4 cycles + 1 if D low byte != 0 + 1 if 16-bit.
+   QUIRK (verified against SingleStepTests): with 8-bit index registers and a
+   page-aligned direct page, the index add wraps at 8 bits (the carry into
+   the high byte is discarded); in all other cases the index add is a full
+   16-bit add.
+*/
+#define _M_DPXY_RD(op, exec, idx) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); if (!(c->D&0xFF)) { c->IR++; } break; \
+    case ((op)<<4)|1: c->TA=_GD(); _DUMMY_PP(); break; \
+    case ((op)<<4)|2: { uint8_t dpb=(uint8_t)((c->D&0xFF)?c->TA:_GD()); \
+        if (c->E && !(c->D&0xFF)) { c->TA=(uint16_t)(c->D+(uint8_t)(dpb+(idx))); } \
+        else { c->TA=(uint16_t)(dpb+c->D+(idx)); } } \
+        _DUMMY_PP(); break; \
+    case ((op)<<4)|3: _SA(c->TA); _VDA(); break; \
+    _TAIL_RD(op, 4, exec, ((c->TA+1)&0xFFFF))
+
+/* absolute: 4 cycles + 1 if 16-bit */
+#define _M_ABS_RD(op, exec) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|1: c->TA=_GD(); _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|2: c->AD=((((uint32_t)c->DBR)<<16)|(((uint16_t)_GD())<<8)|c->TA); _SA(c->AD); _VDA(); break; \
+    _TAIL_RD(op, 3, exec, (((c->AD&0xFF0000u)|((c->AD+1)&0xFFFF))))
+
+/* absolute indexed (X or Y): 4 cycles + 1 fixup + 1 if 16-bit data.
+   - 8-bit index (X flag set or emulation mode): fixup cycle only on page cross
+   - 16-bit index: fixup cycle always (the low-byte add can't merge)
+   NOTE: the carry out of the 16-bit index add propagates into the bank byte!
+*/
+#define _M_ABXY_RD(op, exec, idx) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|1: c->TA=_GD(); _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|2: { uint16_t base=(uint16_t)(c->TA|(((uint16_t)_GD())<<8)); \
+        uint32_t sum32=(uint32_t)base+(uint16_t)(idx); \
+        c->CRS=((base^sum32)&0xFF00)?1:0; c->AA=(uint16_t)sum32; \
+        c->TB=(uint16_t)((c->DBR+(sum32>>16))&0xFF); \
+        c->AD=((((uint32_t)c->TB)<<16)|(sum32&0xFFFF)); \
+        _SA(((((uint32_t)c->DBR)<<16)|(base&0xFF00)|(sum32&0xFF))); \
+        if (_X8() && !c->CRS) { _VDA(); c->IR++; } } break; \
+    case ((op)<<4)|3: _SA((((uint32_t)c->TB)<<16)|c->AA); _VDA(); break; \
+    _TAIL_RD(op, 4, exec, ((c->AD+1)&0xFFFFFF))
+
+/* (dp,X): 6 cycles + 1 if D low byte != 0 + 1 if 16-bit
+   (same 8-bit-index wrap quirk on page-aligned D as dp,X)
+*/
+#define _M_IDX_RD(op, exec) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); if (!(c->D&0xFF)) { c->IR++; } break; \
+    case ((op)<<4)|1: c->TA=_GD(); _DUMMY_PP(); break; \
+    case ((op)<<4)|2: { uint8_t dpb=(uint8_t)((c->D&0xFF)?c->TA:_GD()); \
+        if (c->E && !(c->D&0xFF)) { c->AA=(uint16_t)(c->D+(uint8_t)(dpb+c->X)); } \
+        else { c->AA=(uint16_t)(dpb+c->D+c->X); } } \
+        _DUMMY_PP(); break; \
+    case ((op)<<4)|3: _SA(c->AA); _VDA(); break; \
+    case ((op)<<4)|4: c->TA=_GD(); _SA((c->AA+1)&0xFFFF); _VDA(); break; \
+    case ((op)<<4)|5: c->TA|=((uint16_t)_GD())<<8; c->AD=((((uint32_t)c->DBR)<<16)|c->TA); _SA(c->AD); _VDA(); break; \
+    _TAIL_RD(op, 6, exec, (((c->AD&0xFF0000u)|((c->AD+1)&0xFFFF))))
+
+/* (dp): 5 cycles + 1 if D low byte != 0 + 1 if 16-bit */
+#define _M_DPIND_RD(op, exec) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); if (!(c->D&0xFF)) { c->IR++; } break; \
+    case ((op)<<4)|1: c->TA=_GD(); _DUMMY_PP(); break; \
+    case ((op)<<4)|2: c->AA=(uint16_t)((((c->D&0xFF)?c->TA:_GD())+c->D)&0xFFFF); _SA(c->AA); _VDA(); break; \
+    case ((op)<<4)|3: c->TA=_GD(); _SA((c->AA+1)&0xFFFF); _VDA(); break; \
+    case ((op)<<4)|4: c->TA|=((uint16_t)_GD())<<8; c->AD=((((uint32_t)c->DBR)<<16)|c->TA); _SA(c->AD); _VDA(); break; \
+    _TAIL_RD(op, 5, exec, (((c->AD&0xFF0000u)|((c->AD+1)&0xFFFF))))
+
+/* (dp),Y: 5 cycles + 1 if D low byte != 0 + 1 on page cross + 1 if 16-bit
+    NOTE: like abs,X/abs,Y the 16-bit add carry propagates into the bank byte.
+    Fixup rule as in abs,X/abs,Y: unconditional with 16-bit index, otherwise
+    only on page cross.
+*/
+#define _M_IDY_RD(op, exec) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); if (!(c->D&0xFF)) { c->IR++; } break; \
+    case ((op)<<4)|1: c->TA=_GD(); _DUMMY_PP(); break; \
+    case ((op)<<4)|2: c->AA=(uint16_t)((((c->D&0xFF)?c->TA:_GD())+c->D)&0xFFFF); _SA(c->AA); _VDA(); break; \
+    case ((op)<<4)|3: c->TA=_GD(); _SA((c->AA+1)&0xFFFF); _VDA(); break; \
+    case ((op)<<4)|4: { uint16_t base=(uint16_t)(c->TA|(((uint16_t)_GD())<<8)); \
+        uint32_t sum32=(uint32_t)base+c->Y; \
+        c->CRS=((base^sum32)&0xFF00)?1:0; c->AA=(uint16_t)sum32; \
+        c->TB=(uint16_t)((c->DBR+(sum32>>16))&0xFF); \
+        c->AD=((((uint32_t)c->TB)<<16)|(sum32&0xFFFF)); \
+        _SA(((((uint32_t)c->DBR)<<16)|(base&0xFF00)|(sum32&0xFF))); \
+        if (_X8() && !c->CRS) { _VDA(); c->IR++; } } break; \
+    case ((op)<<4)|5: _SA((((uint32_t)c->TB)<<16)|c->AA); _VDA(); break; \
+    _TAIL_RD(op, 6, exec, ((c->AD+1)&0xFFFFFF))
+
+/* [dp] long indirect: 6 cycles + 1 if D low byte != 0 + 1 if 16-bit */
+#define _M_IDL_RD(op, exec) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); if (!(c->D&0xFF)) { c->IR++; } break; \
+    case ((op)<<4)|1: c->TA=_GD(); _DUMMY_PP(); break; \
+    case ((op)<<4)|2: c->AA=(uint16_t)((((c->D&0xFF)?c->TA:_GD())+c->D)&0xFFFF); _SA(c->AA); _VDA(); break; \
+    case ((op)<<4)|3: c->TB=_GD(); _SA((c->AA+1)&0xFFFF); _VDA(); break; \
+    case ((op)<<4)|4: c->TB|=((uint16_t)_GD())<<8; _SA((c->AA+2)&0xFFFF); _VDA(); break; \
+    case ((op)<<4)|5: c->AD=((((uint32_t)_GD())<<16)|c->TB); _SA(c->AD); _VDA(); break; \
+    _TAIL_RD(op, 6, exec, ((c->AD+1)&0xFFFFFF))
+
+/* [dp],Y long indirect indexed: same as [dp], Y added to the 24-bit pointer
+   (no page-cross penalty), 6 cycles + 1 if D low byte != 0 + 1 if 16-bit */
+#define _M_IDLY_RD(op, exec) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); if (!(c->D&0xFF)) { c->IR++; } break; \
+    case ((op)<<4)|1: c->TA=_GD(); _DUMMY_PP(); break; \
+    case ((op)<<4)|2: c->AA=(uint16_t)((((c->D&0xFF)?c->TA:_GD())+c->D)&0xFFFF); _SA(c->AA); _VDA(); break; \
+    case ((op)<<4)|3: c->TB=_GD(); _SA((c->AA+1)&0xFFFF); _VDA(); break; \
+    case ((op)<<4)|4: c->TB|=((uint16_t)_GD())<<8; _SA((c->AA+2)&0xFFFF); _VDA(); break; \
+    case ((op)<<4)|5: c->AD=(((((uint32_t)_GD())<<16)|c->TB)+c->Y)&0xFFFFFF; _SA(c->AD); _VDA(); break; \
+    _TAIL_RD(op, 6, exec, ((c->AD+1)&0xFFFFFF))
+
+/* stack relative: 4 cycles + 1 if 16-bit */
+#define _M_SR_RD(op, exec) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|1: c->TA=_GD(); _DUMMY_PP(); break; \
+    case ((op)<<4)|2: c->AD=(uint16_t)(_SH()+c->TA); _SA(c->AD); _VDA(); break; \
+    _TAIL_RD(op, 3, exec, ((c->AD+1)&0xFFFF))
+
+/* (sr,S),Y: 7 cycles + 1 if 16-bit (no page-cross penalty) */
+#define _M_SRIY_RD(op, exec) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|1: c->TA=_GD(); _DUMMY_PP(); break; \
+    case ((op)<<4)|2: c->AA=(uint16_t)(_SH()+c->TA); _SA(c->AA); _VDA(); break; \
+    case ((op)<<4)|3: c->TA=_GD(); _SA((c->AA+1)&0xFFFF); _VDA(); break; \
+    case ((op)<<4)|4: c->TA|=((uint16_t)_GD())<<8; _SA((c->AA+1)&0xFFFF); break; \
+    case ((op)<<4)|5: { uint32_t sum32=(uint32_t)c->TA+c->Y; \
+        c->AD=((((uint32_t)((c->DBR+(sum32>>16))&0xFF))<<16)|(sum32&0xFFFF)); \
+        _SA(c->AD); _VDA(); } break; \
+    _TAIL_RD(op, 6, exec, ((c->AD+1)&0xFFFFFF))
+
+/* absolute long: 5 cycles + 1 if 16-bit */
+#define _M_ABL_RD(op, exec) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|1: c->TA=_GD(); _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|2: c->TB=(uint16_t)(c->TA|(((uint16_t)_GD())<<8)); _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|3: c->AD=((((uint32_t)_GD())<<16)|c->TB); _SA(c->AD); _VDA(); break; \
+    _TAIL_RD(op, 4, exec, ((c->AD+1)&0xFFFFFF))
+
+/* absolute long indexed X: same as al, X added to the 24-bit base address */
+#define _M_ABLX_RD(op, exec) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|1: c->TA=_GD(); _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|2: c->TB=(uint16_t)(c->TA|(((uint16_t)_GD())<<8)); _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|3: c->AD=(((((uint32_t)_GD())<<16)|c->TB)+c->X)&0xFFFFFF; _SA(c->AD); _VDA(); break; \
+    _TAIL_RD(op, 4, exec, ((c->AD+1)&0xFFFFFF))
+
+/* placeholder for not-yet implemented opcodes:
+   keeps the CPU jammed on the same microstep (reads at PB:PC) so that
+   a test harness fails fast instead of running away.
+*/
+#define _W65C816_TODO(op) \
+    case ((op)<<4)|0: case ((op)<<4)|1: case ((op)<<4)|2: case ((op)<<4)|3: \
+    case ((op)<<4)|4: case ((op)<<4)|5: case ((op)<<4)|6: case ((op)<<4)|7: \
+    case ((op)<<4)|8: case ((op)<<4)|9: case ((op)<<4)|10: case ((op)<<4)|11: \
+    case ((op)<<4)|12: case ((op)<<4)|13: case ((op)<<4)|14: case ((op)<<4)|15: \
+        c->IR--; _DUMMY(); break;
+
+uint64_t w65c816_init(w65c816_t* c, const w65c816_desc_t* desc) {
+    CHIPS_ASSERT(c && desc);
+    memset(c, 0, sizeof(*c));
+    /* reset state (see WDC datasheet): emulation mode, 8-bit M/X flags,
+       IRQ and decimal flags set, stack pointer on page 1
+    */
+    c->E = 1;
+    c->P = W65C816_IF | W65C816_DF | W65C816_MF | W65C816_XF;
+    c->S = 0x01FF;
+    c->PINS = W65C816_RW | W65C816_SYNC | W65C816_VPA | W65C816_VDA | W65C816_RES;
+    return c->PINS;
+}
+
+void w65c816_snapshot_onsave(w65c816_t* snapshot) {
+    CHIPS_ASSERT(snapshot);
+    /* no pointer fixups needed */
+}
+
+void w65c816_snapshot_onload(w65c816_t* snapshot, w65c816_t* sys) {
+    CHIPS_ASSERT(snapshot && sys);
+    (void)sys;
+    /* no pointer fixups needed */
+}
+
+/* ADC helper (8/16-bit, binary and decimal mode).
+   Decimal mode (fitted against SingleStepTests traces):
+   - result is a chained BCD add (two digit pairs for 16-bit)
+   - C comes from the final BCD carry
+   - N and Z come from the BCD result
+   - V = ~((A^M) & sign) & (A ^ (raw high nibble sum << shift)), i.e. it is
+     computed like binary mode but with the raw (pre-adjust) high nibble
+     sum instead of the binary result
+*/
+static inline void _w65c816_adc(w65c816_t* c, uint16_t v, bool w16) {
+    const bool cf = 0 != (c->P & W65C816_CF);
+    const int ci = cf ? 1 : 0;
+    if (!w16) {
+        const uint16_t a = c->C & 0xFF;
+        const uint16_t bin = (uint16_t)(a + (v & 0xFF) + ci);
+        c->P &= (uint8_t)~(W65C816_CF|W65C816_ZF|W65C816_VF|W65C816_NF);
+        if (c->P & W65C816_DF) {
+            int al = (a & 0x0F) + (v & 0x0F) + ci;
+            if (al > 9) { al += 6; }
+            int ah = (a >> 4) + (v >> 4) + (al > 0x0F);
+            const int ahr = ah;
+            if (ah > 9) { ah += 6; }
+            const uint16_t r = (uint16_t)(((ah & 0x0F) << 4) | (al & 0x0F));
+            if (ahr > 9) { c->P |= W65C816_CF; }
+            if (!(r & 0xFF)) { c->P |= W65C816_ZF; }
+            if (~(a ^ v) & (a ^ (ahr << 4)) & 0x80) { c->P |= W65C816_VF; }
+            if (r & 0x80) { c->P |= W65C816_NF; }
+            c->C = (uint16_t)((c->C & 0xFF00) | r);
+        }
+        else {
+            if (bin & 0x100) { c->P |= W65C816_CF; }
+            if (!(bin & 0xFF)) { c->P |= W65C816_ZF; }
+            if (~(a ^ v) & (a ^ bin) & 0x80) { c->P |= W65C816_VF; }
+            if (bin & 0x80) { c->P |= W65C816_NF; }
+            c->C = (uint16_t)((c->C & 0xFF00) | (bin & 0xFF));
+        }
+    }
+    else {
+        const uint32_t a = c->C;
+        const uint32_t bin = a + v + ci;
+        c->P &= (uint8_t)~(W65C816_CF|W65C816_ZF|W65C816_VF|W65C816_NF);
+        if (c->P & W65C816_DF) {
+            int al = (a & 0x0F) + (v & 0x0F) + ci;
+            if (al > 9) { al += 6; }
+            int ah = ((a >> 4) & 0x0F) + ((v >> 4) & 0x0F) + (al > 0x0F);
+            if (ah > 9) { ah += 6; }
+            const int c8 = ah > 0x0F;
+            const uint32_t lo = (uint32_t)(((ah & 0x0F) << 4) | (al & 0x0F)) & 0xFF;
+            al = ((a >> 8) & 0x0F) + ((v >> 8) & 0x0F) + c8;
+            if (al > 9) { al += 6; }
+            int ahr = ((a >> 12) & 0x0F) + ((v >> 12) & 0x0F) + (al > 0x0F);
+            ah = ahr;
+            if (ah > 9) { ah += 6; }
+            const uint16_t r = (uint16_t)((((((ah & 0x0F) << 4) | (al & 0x0F)) & 0xFF) << 8) | lo);
+            if (ahr > 9) { c->P |= W65C816_CF; }
+            if (!(r & 0xFFFF)) { c->P |= W65C816_ZF; }
+            if (~(a ^ v) & (a ^ (ahr << 12)) & 0x8000) { c->P |= W65C816_VF; }
+            if (r & 0x8000) { c->P |= W65C816_NF; }
+            c->C = r;
+        }
+        else {
+            if (bin & 0x10000) { c->P |= W65C816_CF; }
+            if (!(bin & 0xFFFF)) { c->P |= W65C816_ZF; }
+            if (~(a ^ v) & (a ^ bin) & 0x8000) { c->P |= W65C816_VF; }
+            if (bin & 0x8000) { c->P |= W65C816_NF; }
+            c->C = (uint16_t)(bin & 0xFFFF);
+        }
+    }
+}
+
+/* SBC helper (8/16-bit, binary and decimal mode).
+   Decimal mode (fitted against SingleStepTests traces):
+   - result is a chained BCD subtract (two digit pairs for 16-bit)
+   - C and V come from the binary subtraction
+   - N and Z come from the BCD result
+*/
+static inline void _w65c816_sbc(w65c816_t* c, uint16_t v, bool w16) {
+    const bool nb = 0 == (c->P & W65C816_CF);   /* borrow when carry clear */
+    const int bi = nb ? 1 : 0;
+    if (!w16) {
+        const uint16_t a = c->C & 0xFF;
+        const uint16_t vv = v & 0xFF;
+        const uint16_t bin = (uint16_t)(a - vv - bi);
+        c->P &= (uint8_t)~(W65C816_CF|W65C816_ZF|W65C816_VF|W65C816_NF);
+        if (c->P & W65C816_DF) {
+            int al = (a & 0x0F) - (vv & 0x0F) - bi;
+            int ah = (a >> 4) - (vv >> 4);
+            if (al < 0) { ah--; al -= 6; }
+            if (ah < 0) { ah -= 6; }
+            const uint16_t r = (uint16_t)((((ah & 0x0F) << 4) | (al & 0x0F)) & 0xFF);
+            if (!(bin & 0xFF00)) { c->P |= W65C816_CF; }
+            if (!(r & 0xFF)) { c->P |= W65C816_ZF; }
+            if ((a ^ vv) & (a ^ bin) & 0x80) { c->P |= W65C816_VF; }
+            if (r & 0x80) { c->P |= W65C816_NF; }
+            c->C = (uint16_t)((c->C & 0xFF00) | r);
+        }
+        else {
+            if (!(bin & 0xFF00)) { c->P |= W65C816_CF; }
+            if (!(bin & 0xFF)) { c->P |= W65C816_ZF; }
+            if ((a ^ vv) & (a ^ bin) & 0x80) { c->P |= W65C816_VF; }
+            if (bin & 0x80) { c->P |= W65C816_NF; }
+            c->C = (uint16_t)((c->C & 0xFF00) | (bin & 0xFF));
+        }
+    }
+    else {
+        const uint32_t a = c->C;
+        const uint32_t vv = v;
+        const uint32_t bin = a - vv - bi;
+        c->P &= (uint8_t)~(W65C816_CF|W65C816_ZF|W65C816_VF|W65C816_NF);
+        if (c->P & W65C816_DF) {
+            int al = (a & 0x0F) - (vv & 0x0F) - bi;
+            int ah = ((a >> 4) & 0x0F) - ((vv >> 4) & 0x0F);
+            if (al < 0) { ah--; al -= 6; }
+            if (ah < 0) { ah -= 6; }
+            const int b8 = ah < 0;
+            const uint32_t lo = (uint32_t)(((ah & 0x0F) << 4) | (al & 0x0F)) & 0xFF;
+            al = ((a >> 8) & 0x0F) - ((vv >> 8) & 0x0F) - b8;
+            ah = ((a >> 12) & 0x0F) - ((vv >> 12) & 0x0F);
+            if (al < 0) { ah--; al -= 6; }
+            if (ah < 0) { ah -= 6; }
+            const uint16_t r = (uint16_t)((((((ah & 0x0F) << 4) | (al & 0x0F)) & 0xFF) << 8) | lo);
+            if (!(bin & 0x10000)) { c->P |= W65C816_CF; }
+            if (!(r & 0xFFFF)) { c->P |= W65C816_ZF; }
+            if ((a ^ vv) & (a ^ bin) & 0x8000) { c->P |= W65C816_VF; }
+            if (r & 0x8000) { c->P |= W65C816_NF; }
+            c->C = r;
+        }
+        else {
+            if (!(bin & 0x10000)) { c->P |= W65C816_CF; }
+            if (!(bin & 0xFFFF)) { c->P |= W65C816_ZF; }
+            if ((a ^ vv) & (a ^ bin) & 0x8000) { c->P |= W65C816_VF; }
+            if (bin & 0x8000) { c->P |= W65C816_NF; }
+            c->C = (uint16_t)(bin & 0xFFFF);
+        }
+    }
+}
+
+uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
+    if (pins & (W65C816_SYNC|W65C816_IRQ|W65C816_NMI|W65C816_ABORT|W65C816_RDY|W65C816_RES)) {
+        // interrupt detection also works in RDY phases, but only NMI is "sticky"
+
+        // NMI is edge-triggered
+        if (0 != ((pins & (pins ^ c->PINS)) & W65C816_NMI)) {
+            c->nmi_pip |= 0x100;
+        }
+        // ABORT is edge-triggered
+        if (0 != ((pins & (pins ^ c->PINS)) & W65C816_ABORT)) {
+            c->abrt_pip |= 0x100;
+        }
+        // IRQ test is level triggered
+        if ((pins & W65C816_IRQ) && (0 == (c->P & W65C816_IF))) {
+            c->irq_pip |= 0x100;
+        }
+
+        // RDY pin is only checked during read cycles
+        if ((pins & (W65C816_RW|W65C816_RDY)) == (W65C816_RW|W65C816_RDY)) {
+            _STATUS_PINS();
+            c->PINS = pins;
+            c->irq_pip <<= 1;
+            c->abrt_pip <<= 1;
+            return pins;
+        }
+        if (pins & W65C816_SYNC) {
+            // load new instruction into 'instruction register' and restart tick counter
+            c->IR = ((uint16_t)_GD())<<4;
+            _OFF(W65C816_SYNC);
+
+            // check IRQ, NMI, ABORT and RES state
+            if (0 != (c->irq_pip & 0x400)) {
+                c->brk_flags |= W65C816_BRK_IRQ;
+            }
+            if (0 != (c->nmi_pip & 0xFC00)) {
+                c->brk_flags |= W65C816_BRK_NMI;
+            }
+            if (0 != (c->abrt_pip & 0x400)) {
+                c->brk_flags |= W65C816_BRK_ABORT;
+            }
+            if (0 != (pins & W65C816_RES)) {
+                c->brk_flags |= W65C816_BRK_RESET;
+            }
+            c->irq_pip &= 0x3FF;
+            c->nmi_pip &= 0x3FF;
+            c->abrt_pip &= 0x3FF;
+
+            // if interrupt or reset was requested, force a BRK sequence
+            // (the BRK implementation decides what to push and which
+            // vector to fetch depending on brk_flags and mode)
+            if (c->brk_flags) {
+                c->IR = 0;
+            }
+            else {
+                c->PC++;
+            }
+        }
+    }
+    // each microstep explicitly declares its own bus state, so clear
+    // all 'valid bus' pins that may have been set by the previous cycle
+    // (the opcode fetch cycle of the previous instruction)
+    _OFF(W65C816_VPA|W65C816_VDA|W65C816_VPB|W65C816_MLB);
+    // reads are default, writes are special
+    _RD();
+    switch (c->IR++) {
+    /* CLC */
+        case (0x18<<4)|0: c->P &= ~W65C816_CF; _DUMMY(); break;
+        case (0x18<<4)|1: _FETCH(); break;
+    /* TODO: 00 BRK */
+        _W65C816_TODO(0x00)
+    /* ORA (dp,X) */
+        _M_IDX_RD(0x01, _ORA)
+    /* TODO: 02 COP */
+        _W65C816_TODO(0x02)
+    /* ORA sr,S */
+        _M_SR_RD(0x03, _ORA)
+    /* TODO: 04 TSB dp */
+        _W65C816_TODO(0x04)
+    /* ORA dp */
+        _M_DP_RD(0x05, _ORA)
+    /* TODO: 06 ASL dp */
+        _W65C816_TODO(0x06)
+    /* ORA [dp] */
+        _M_IDL_RD(0x07, _ORA)
+    /* TODO: 08 PHP */
+        _W65C816_TODO(0x08)
+    /* ORA # */
+        _M_IMM_RD(0x09, _ORA)
+    /* TODO: 0A ASL A */
+        _W65C816_TODO(0x0A)
+    /* TODO: 0B PHD */
+        _W65C816_TODO(0x0B)
+    /* TODO: 0C TSB abs */
+        _W65C816_TODO(0x0C)
+    /* ORA abs */
+        _M_ABS_RD(0x0D, _ORA)
+    /* TODO: 0E ASL abs */
+        _W65C816_TODO(0x0E)
+    /* ORA al */
+        _M_ABL_RD(0x0F, _ORA)
+    /* TODO: 10 BPL */
+        _W65C816_TODO(0x10)
+    /* ORA (dp),Y */
+        _M_IDY_RD(0x11, _ORA)
+    /* ORA (dp) */
+        _M_DPIND_RD(0x12, _ORA)
+    /* ORA (sr,S),Y */
+        _M_SRIY_RD(0x13, _ORA)
+    /* TODO: 14 TRB dp */
+        _W65C816_TODO(0x14)
+    /* ORA dp,X */
+        _M_DPXY_RD(0x15, _ORA, c->X)
+    /* TODO: 16 ASL dp,X */
+        _W65C816_TODO(0x16)
+    /* ORA [dp],Y */
+        _M_IDLY_RD(0x17, _ORA)
+    /* ORA abs,Y */
+        _M_ABXY_RD(0x19, _ORA, c->Y)
+    /* TODO: 1A INC A */
+        _W65C816_TODO(0x1A)
+    /* TODO: 1B TCS */
+        _W65C816_TODO(0x1B)
+    /* TODO: 1C TRB abs */
+        _W65C816_TODO(0x1C)
+    /* ORA abs,X */
+        _M_ABXY_RD(0x1D, _ORA, c->X)
+    /* TODO: 1E ASL abs,X */
+        _W65C816_TODO(0x1E)
+    /* ORA al,X */
+        _M_ABLX_RD(0x1F, _ORA)
+    /* TODO: 20 JSR abs */
+        _W65C816_TODO(0x20)
+    /* AND (dp,X) */
+        _M_IDX_RD(0x21, _AND)
+    /* TODO: 22 JSL al */
+        _W65C816_TODO(0x22)
+    /* AND sr,S */
+        _M_SR_RD(0x23, _AND)
+    /* TODO: 24 BIT dp */
+        _W65C816_TODO(0x24)
+    /* AND dp */
+        _M_DP_RD(0x25, _AND)
+    /* TODO: 26 ROL dp */
+        _W65C816_TODO(0x26)
+    /* AND [dp] */
+        _M_IDL_RD(0x27, _AND)
+    /* TODO: 28 PLP */
+        _W65C816_TODO(0x28)
+    /* AND # */
+        _M_IMM_RD(0x29, _AND)
+    /* TODO: 2A ROL A */
+        _W65C816_TODO(0x2A)
+    /* TODO: 2B PLD */
+        _W65C816_TODO(0x2B)
+    /* TODO: 2C BIT abs */
+        _W65C816_TODO(0x2C)
+    /* AND abs */
+        _M_ABS_RD(0x2D, _AND)
+    /* TODO: 2E ROL abs */
+        _W65C816_TODO(0x2E)
+    /* AND al */
+        _M_ABL_RD(0x2F, _AND)
+    /* TODO: 30 BMI */
+        _W65C816_TODO(0x30)
+    /* AND (dp),Y */
+        _M_IDY_RD(0x31, _AND)
+    /* AND (dp) */
+        _M_DPIND_RD(0x32, _AND)
+    /* AND (sr,S),Y */
+        _M_SRIY_RD(0x33, _AND)
+    /* TODO: 34 BIT dp,X */
+        _W65C816_TODO(0x34)
+    /* AND dp,X */
+        _M_DPXY_RD(0x35, _AND, c->X)
+    /* TODO: 36 ROL dp,X */
+        _W65C816_TODO(0x36)
+    /* AND [dp],Y */
+        _M_IDLY_RD(0x37, _AND)
+    /* TODO: 38 SEC */
+        _W65C816_TODO(0x38)
+    /* AND abs,Y */
+        _M_ABXY_RD(0x39, _AND, c->Y)
+    /* TODO: 3A DEC A */
+        _W65C816_TODO(0x3A)
+    /* TODO: 3B TSC */
+        _W65C816_TODO(0x3B)
+    /* TODO: 3C BIT abs,X */
+        _W65C816_TODO(0x3C)
+    /* AND abs,X */
+        _M_ABXY_RD(0x3D, _AND, c->X)
+    /* TODO: 3E ROL abs,X */
+        _W65C816_TODO(0x3E)
+    /* AND al,X */
+        _M_ABLX_RD(0x3F, _AND)
+    /* TODO: 40 RTI */
+        _W65C816_TODO(0x40)
+    /* EOR (dp,X) */
+        _M_IDX_RD(0x41, _EOR)
+    /* TODO: 42 WDM */
+        _W65C816_TODO(0x42)
+    /* EOR sr,S */
+        _M_SR_RD(0x43, _EOR)
+    /* TODO: 44 MVP */
+        _W65C816_TODO(0x44)
+    /* EOR dp */
+        _M_DP_RD(0x45, _EOR)
+    /* TODO: 46 LSR dp */
+        _W65C816_TODO(0x46)
+    /* EOR [dp] */
+        _M_IDL_RD(0x47, _EOR)
+    /* TODO: 48 PHA */
+        _W65C816_TODO(0x48)
+    /* EOR # */
+        _M_IMM_RD(0x49, _EOR)
+    /* TODO: 4A LSR A */
+        _W65C816_TODO(0x4A)
+    /* TODO: 4B PHK */
+        _W65C816_TODO(0x4B)
+    /* TODO: 4C JMP abs */
+        _W65C816_TODO(0x4C)
+    /* EOR abs */
+        _M_ABS_RD(0x4D, _EOR)
+    /* TODO: 4E LSR abs */
+        _W65C816_TODO(0x4E)
+    /* EOR al */
+        _M_ABL_RD(0x4F, _EOR)
+    /* TODO: 50 BVC */
+        _W65C816_TODO(0x50)
+    /* EOR (dp),Y */
+        _M_IDY_RD(0x51, _EOR)
+    /* EOR (dp) */
+        _M_DPIND_RD(0x52, _EOR)
+    /* EOR (sr,S),Y */
+        _M_SRIY_RD(0x53, _EOR)
+    /* TODO: 54 MVN */
+        _W65C816_TODO(0x54)
+    /* EOR dp,X */
+        _M_DPXY_RD(0x55, _EOR, c->X)
+    /* TODO: 56 LSR dp,X */
+        _W65C816_TODO(0x56)
+    /* EOR [dp],Y */
+        _M_IDLY_RD(0x57, _EOR)
+    /* TODO: 58 CLI */
+        _W65C816_TODO(0x58)
+    /* EOR abs,Y */
+        _M_ABXY_RD(0x59, _EOR, c->Y)
+    /* TODO: 5A PHY */
+        _W65C816_TODO(0x5A)
+    /* TODO: 5B TCD */
+        _W65C816_TODO(0x5B)
+    /* TODO: 5C JMP al */
+        _W65C816_TODO(0x5C)
+    /* EOR abs,X */
+        _M_ABXY_RD(0x5D, _EOR, c->X)
+    /* TODO: 5E LSR abs,X */
+        _W65C816_TODO(0x5E)
+    /* EOR al,X */
+        _M_ABLX_RD(0x5F, _EOR)
+    /* TODO: 60 RTS */
+        _W65C816_TODO(0x60)
+    /* ADC (dp,X) */
+        _M_IDX_RD(0x61, _ADC)
+    /* TODO: 62 PER */
+        _W65C816_TODO(0x62)
+    /* ADC sr,S */
+        _M_SR_RD(0x63, _ADC)
+    /* TODO: 64 STZ dp */
+        _W65C816_TODO(0x64)
+    /* ADC dp */
+        _M_DP_RD(0x65, _ADC)
+    /* TODO: 66 ROR dp */
+        _W65C816_TODO(0x66)
+    /* ADC [dp] */
+        _M_IDL_RD(0x67, _ADC)
+    /* TODO: 68 PLA */
+        _W65C816_TODO(0x68)
+    /* ADC # */
+        _M_IMM_RD(0x69, _ADC)
+    /* TODO: 6A ROR A */
+        _W65C816_TODO(0x6A)
+    /* TODO: 6B RTL */
+        _W65C816_TODO(0x6B)
+    /* TODO: 6C JMP (abs) */
+        _W65C816_TODO(0x6C)
+    /* ADC abs */
+        _M_ABS_RD(0x6D, _ADC)
+    /* TODO: 6E ROR abs */
+        _W65C816_TODO(0x6E)
+    /* ADC al */
+        _M_ABL_RD(0x6F, _ADC)
+    /* TODO: 70 BVS */
+        _W65C816_TODO(0x70)
+    /* ADC (dp),Y */
+        _M_IDY_RD(0x71, _ADC)
+    /* ADC (dp) */
+        _M_DPIND_RD(0x72, _ADC)
+    /* ADC (sr,S),Y */
+        _M_SRIY_RD(0x73, _ADC)
+    /* TODO: 74 STZ dp,X */
+        _W65C816_TODO(0x74)
+    /* ADC dp,X */
+        _M_DPXY_RD(0x75, _ADC, c->X)
+    /* TODO: 76 ROR dp,X */
+        _W65C816_TODO(0x76)
+    /* ADC [dp],Y */
+        _M_IDLY_RD(0x77, _ADC)
+    /* TODO: 78 SEI */
+        _W65C816_TODO(0x78)
+    /* ADC abs,Y */
+        _M_ABXY_RD(0x79, _ADC, c->Y)
+    /* TODO: 7A PLY */
+        _W65C816_TODO(0x7A)
+    /* TODO: 7B TDC */
+        _W65C816_TODO(0x7B)
+    /* TODO: 7C JMP (abs,X) */
+        _W65C816_TODO(0x7C)
+    /* ADC abs,X */
+        _M_ABXY_RD(0x7D, _ADC, c->X)
+    /* TODO: 7E ROR abs,X */
+        _W65C816_TODO(0x7E)
+    /* ADC al,X */
+        _M_ABLX_RD(0x7F, _ADC)
+    /* TODO: 80 BRA */
+        _W65C816_TODO(0x80)
+    /* TODO: 81 STA (dp,X) */
+        _W65C816_TODO(0x81)
+    /* TODO: 82 BRL */
+        _W65C816_TODO(0x82)
+    /* TODO: 83 STA sr,S */
+        _W65C816_TODO(0x83)
+    /* TODO: 84 STY dp */
+        _W65C816_TODO(0x84)
+    /* TODO: 85 STA dp */
+        _W65C816_TODO(0x85)
+    /* TODO: 86 STX dp */
+        _W65C816_TODO(0x86)
+    /* TODO: 87 STA [dp] */
+        _W65C816_TODO(0x87)
+    /* TODO: 88 DEY */
+        _W65C816_TODO(0x88)
+    /* TODO: 89 BIT # */
+        _W65C816_TODO(0x89)
+    /* TODO: 8A TXA */
+        _W65C816_TODO(0x8A)
+    /* TODO: 8B TXY */
+        _W65C816_TODO(0x8B)
+    /* TODO: 8C STY abs */
+        _W65C816_TODO(0x8C)
+    /* TODO: 8D STA abs */
+        _W65C816_TODO(0x8D)
+    /* TODO: 8E STX abs */
+        _W65C816_TODO(0x8E)
+    /* TODO: 8F STA al */
+        _W65C816_TODO(0x8F)
+    /* TODO: 90 BCC */
+        _W65C816_TODO(0x90)
+    /* TODO: 91 STA (dp),Y */
+        _W65C816_TODO(0x91)
+    /* TODO: 92 STA (dp) */
+        _W65C816_TODO(0x92)
+    /* TODO: 93 STA (sr,S),Y */
+        _W65C816_TODO(0x93)
+    /* TODO: 94 STY dp,X */
+        _W65C816_TODO(0x94)
+    /* TODO: 95 STA dp,X */
+        _W65C816_TODO(0x95)
+    /* TODO: 96 STX dp,Y */
+        _W65C816_TODO(0x96)
+    /* TODO: 97 STA [dp],Y */
+        _W65C816_TODO(0x97)
+    /* TODO: 98 TYA */
+        _W65C816_TODO(0x98)
+    /* TODO: 99 STA abs,Y */
+        _W65C816_TODO(0x99)
+    /* TODO: 9A TXS */
+        _W65C816_TODO(0x9A)
+    /* TODO: 9B TYS */
+        _W65C816_TODO(0x9B)
+    /* TODO: 9C STZ abs */
+        _W65C816_TODO(0x9C)
+    /* TODO: 9D STA abs,X */
+        _W65C816_TODO(0x9D)
+    /* TODO: 9E STZ abs,X */
+        _W65C816_TODO(0x9E)
+    /* TODO: 9F STA al,X */
+        _W65C816_TODO(0x9F)
+    /* TODO: A0 LDY # */
+        _W65C816_TODO(0xA0)
+    /* LDA (dp,X) */
+        _M_IDX_RD(0xA1, _LDA)
+    /* TODO: A2 LDX # */
+        _W65C816_TODO(0xA2)
+    /* LDA sr,S */
+        _M_SR_RD(0xA3, _LDA)
+    /* TODO: A4 LDY dp */
+        _W65C816_TODO(0xA4)
+    /* LDA dp */
+        _M_DP_RD(0xA5, _LDA)
+    /* TODO: A6 LDX dp */
+        _W65C816_TODO(0xA6)
+    /* LDA [dp] */
+        _M_IDL_RD(0xA7, _LDA)
+    /* TODO: A8 TAY */
+        _W65C816_TODO(0xA8)
+    /* LDA # */
+        _M_IMM_RD(0xA9, _LDA)
+    /* TODO: AA TAX */
+        _W65C816_TODO(0xAA)
+    /* TODO: AB PLB */
+        _W65C816_TODO(0xAB)
+    /* TODO: AC LDY abs */
+        _W65C816_TODO(0xAC)
+    /* LDA abs */
+        _M_ABS_RD(0xAD, _LDA)
+    /* TODO: AE LDX abs */
+        _W65C816_TODO(0xAE)
+    /* LDA al */
+        _M_ABL_RD(0xAF, _LDA)
+    /* TODO: B0 BCS */
+        _W65C816_TODO(0xB0)
+    /* LDA (dp),Y */
+        _M_IDY_RD(0xB1, _LDA)
+    /* LDA (dp) */
+        _M_DPIND_RD(0xB2, _LDA)
+    /* LDA (sr,S),Y */
+        _M_SRIY_RD(0xB3, _LDA)
+    /* TODO: B4 LDY dp,X */
+        _W65C816_TODO(0xB4)
+    /* LDA dp,X */
+        _M_DPXY_RD(0xB5, _LDA, c->X)
+    /* TODO: B6 LDX dp,Y */
+        _W65C816_TODO(0xB6)
+    /* LDA [dp],Y */
+        _M_IDLY_RD(0xB7, _LDA)
+    /* TODO: B8 CLV */
+        _W65C816_TODO(0xB8)
+    /* LDA abs,Y */
+        _M_ABXY_RD(0xB9, _LDA, c->Y)
+    /* TODO: BA TSX */
+        _W65C816_TODO(0xBA)
+    /* TODO: BB TYX */
+        _W65C816_TODO(0xBB)
+    /* TODO: BC LDY abs,X */
+        _W65C816_TODO(0xBC)
+    /* LDA abs,X */
+        _M_ABXY_RD(0xBD, _LDA, c->X)
+    /* TODO: BE LDX abs,Y */
+        _W65C816_TODO(0xBE)
+    /* LDA al,X */
+        _M_ABLX_RD(0xBF, _LDA)
+    /* TODO: C0 CPY # */
+        _W65C816_TODO(0xC0)
+    /* CMP (dp,X) */
+        _M_IDX_RD(0xC1, _CMPA)
+    /* TODO: C2 REP # */
+        _W65C816_TODO(0xC2)
+    /* CMP sr,S */
+        _M_SR_RD(0xC3, _CMPA)
+    /* TODO: C4 CPY dp */
+        _W65C816_TODO(0xC4)
+    /* CMP dp */
+        _M_DP_RD(0xC5, _CMPA)
+    /* TODO: C6 DEC dp */
+        _W65C816_TODO(0xC6)
+    /* CMP [dp] */
+        _M_IDL_RD(0xC7, _CMPA)
+    /* TODO: C8 INY */
+        _W65C816_TODO(0xC8)
+    /* CMP # */
+        _M_IMM_RD(0xC9, _CMPA)
+    /* TODO: CA DEX */
+        _W65C816_TODO(0xCA)
+    /* TODO: CB WAI */
+        _W65C816_TODO(0xCB)
+    /* TODO: CC CPY abs */
+        _W65C816_TODO(0xCC)
+    /* CMP abs */
+        _M_ABS_RD(0xCD, _CMPA)
+    /* TODO: CE DEC abs */
+        _W65C816_TODO(0xCE)
+    /* CMP al */
+        _M_ABL_RD(0xCF, _CMPA)
+    /* TODO: D0 BNE */
+        _W65C816_TODO(0xD0)
+    /* CMP (dp),Y */
+        _M_IDY_RD(0xD1, _CMPA)
+    /* CMP (dp) */
+        _M_DPIND_RD(0xD2, _CMPA)
+    /* CMP (sr,S),Y */
+        _M_SRIY_RD(0xD3, _CMPA)
+    /* TODO: D4 PEI */
+        _W65C816_TODO(0xD4)
+    /* CMP dp,X */
+        _M_DPXY_RD(0xD5, _CMPA, c->X)
+    /* TODO: D6 DEC dp,X */
+        _W65C816_TODO(0xD6)
+    /* CMP [dp],Y */
+        _M_IDLY_RD(0xD7, _CMPA)
+    /* TODO: D8 CLD */
+        _W65C816_TODO(0xD8)
+    /* CMP abs,Y */
+        _M_ABXY_RD(0xD9, _CMPA, c->Y)
+    /* TODO: DA PHX */
+        _W65C816_TODO(0xDA)
+    /* TODO: DB STP */
+        _W65C816_TODO(0xDB)
+    /* TODO: DC JML (al) */
+        _W65C816_TODO(0xDC)
+    /* CMP abs,X */
+        _M_ABXY_RD(0xDD, _CMPA, c->X)
+    /* TODO: DE DEC abs,X */
+        _W65C816_TODO(0xDE)
+    /* CMP al,X */
+        _M_ABLX_RD(0xDF, _CMPA)
+    /* TODO: E0 CPX # */
+        _W65C816_TODO(0xE0)
+    /* SBC (dp,X) */
+        _M_IDX_RD(0xE1, _SBC)
+    /* TODO: E2 SEP # */
+        _W65C816_TODO(0xE2)
+    /* SBC sr,S */
+        _M_SR_RD(0xE3, _SBC)
+    /* TODO: E4 CPX dp */
+        _W65C816_TODO(0xE4)
+    /* SBC dp */
+        _M_DP_RD(0xE5, _SBC)
+    /* TODO: E6 INC dp */
+        _W65C816_TODO(0xE6)
+    /* SBC [dp] */
+        _M_IDL_RD(0xE7, _SBC)
+    /* TODO: E8 INX */
+        _W65C816_TODO(0xE8)
+    /* SBC # */
+        _M_IMM_RD(0xE9, _SBC)
+    /* TODO: EA NOP */
+        _W65C816_TODO(0xEA)
+    /* TODO: EB XBA */
+        _W65C816_TODO(0xEB)
+    /* TODO: EC CPX abs */
+        _W65C816_TODO(0xEC)
+    /* SBC abs */
+        _M_ABS_RD(0xED, _SBC)
+    /* TODO: EE INC abs */
+        _W65C816_TODO(0xEE)
+    /* SBC al */
+        _M_ABL_RD(0xEF, _SBC)
+    /* TODO: F0 BEQ */
+        _W65C816_TODO(0xF0)
+    /* SBC (dp),Y */
+        _M_IDY_RD(0xF1, _SBC)
+    /* SBC (dp) */
+        _M_DPIND_RD(0xF2, _SBC)
+    /* SBC (sr,S),Y */
+        _M_SRIY_RD(0xF3, _SBC)
+    /* TODO: F4 PEA */
+        _W65C816_TODO(0xF4)
+    /* SBC dp,X */
+        _M_DPXY_RD(0xF5, _SBC, c->X)
+    /* TODO: F6 INC dp,X */
+        _W65C816_TODO(0xF6)
+    /* SBC [dp],Y */
+        _M_IDLY_RD(0xF7, _SBC)
+    /* TODO: F8 SED */
+        _W65C816_TODO(0xF8)
+    /* SBC abs,Y */
+        _M_ABXY_RD(0xF9, _SBC, c->Y)
+    /* TODO: FA PLX */
+        _W65C816_TODO(0xFA)
+    /* TODO: FB XCE */
+        _W65C816_TODO(0xFB)
+    /* TODO: FC JSR (abs,X) */
+        _W65C816_TODO(0xFC)
+    /* SBC abs,X */
+        _M_ABXY_RD(0xFD, _SBC, c->X)
+    /* TODO: FE INC abs,X */
+        _W65C816_TODO(0xFE)
+    /* SBC al,X */
+        _M_ABLX_RD(0xFF, _SBC)
+
+    default:
+        CHIPS_ASSERT(false);
+        break;
+    }
+    _STATUS_PINS();
+    c->PINS = pins;
+    c->irq_pip <<= 1;
+    c->nmi_pip <<= 1;
+    c->abrt_pip <<= 1;
+    return pins;
+}
+
+#undef _SA
+#undef _SAD
+#undef _SD
+#undef _GD
+#undef _PB_PC
+#undef _ON
+#undef _OFF
+#undef _RD
+#undef _WR
+#undef _VPA
+#undef _VDA
+#undef _VPB
+#undef _MLB
+#undef _FETCH
+#undef _DUMMY
+#undef _NZ8
+#undef _NZ16
+#undef _W8
+#undef _X8
+#undef _SH
+#undef _STATUS_PINS
+#undef _W65C816_TODO
+#endif /* CHIPS_IMPL */
