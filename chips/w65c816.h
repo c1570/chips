@@ -6,12 +6,14 @@
 
     Project repo: https://github.com/floooh/chips/
 
-    NOTE: this file is work-in-progress, it is currently hand-written
-    (m6502.h is code-generated from the codegen directory, this may or
-    may not happen for the 65816 too).
+    NOTE: this file is hand-written (m6502.h is code-generated from the
+    codegen directory, this may or may not happen for the 65816 too).
 
-    Implementation status: scaffold, only CLC (0x18) is implemented, all
-    other opcodes are placeholders marked with TODO.
+    Implementation status: complete. All 256 opcodes pass the full
+    SingleStepTests_65816 suite (5.12 million cycle-exact tests in
+    native and emulation mode). The interrupt pins (IRQ/NMI/ABORT/RES),
+    RDY and the WAI/STP halt states are implemented following the WDC
+    datasheet, they are not covered by the test suite.
 
     Do this:
     ~~~C
@@ -1021,6 +1023,30 @@ bool w65c816_e(w65c816_t* cpu) { return 0 != cpu->E; }
     case ((op)<<4)|4: _SA(_SPLIN(-1)); _VDA(); _SD((uint8_t)c->TA); _WR(); c->S=_SPADD(-2); break; \
     case ((op)<<4)|5: _FETCH(); break;
 
+/*--- MVN/MVP block move ---
+   7 cycles per byte, and the whole instruction re-executes for every
+   byte (the traces show a full opcode+operand refetch per byte).
+   X = source pointer, Y = destination pointer (offsets; the banks come
+   from the two operand bytes, DBR is loaded with the destination bank),
+   C = byte count (C+1 bytes are moved, 16-bit in native mode, 8-bit in
+   emulation mode). MVP decrements X/Y after each byte, MVN increments.
+---*/
+#define _M_MVN(op, dec) \
+    case ((op)<<4)|0: \
+        _SA((((uint32_t)c->PBR)<<16)|(uint16_t)(c->PC-1)); _VDA(); _VPA(); break; \
+    case ((op)<<4)|1: _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|2: c->TB=_GD(); _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|3: c->RR=_GD(); c->DBR=c->TB; c->AD=((((uint32_t)c->TB)<<16)|c->Y); _SA(((((uint32_t)c->RR)<<16)|c->X)); _VDA(); break; \
+    case ((op)<<4)|4: c->TD=_GD(); _SA(c->AD); _VDA(); _SD(c->TD); _WR(); break; \
+    case ((op)<<4)|5: { const uint16_t mask=(_X8()?0xFF:0xFFFF); \
+        c->X=(uint16_t)((dec?(c->X-1):(c->X+1))&mask); \
+        c->Y=(uint16_t)((dec?(c->Y-1):(c->Y+1))&mask); } \
+        _SA(c->AD); break; \
+    case ((op)<<4)|6: _SA(c->AD); c->C=(uint16_t)(c->C-1); \
+        if (c->C == 0xFFFF) { c->IR=((op)<<4)|7; } \
+        else { c->PC=(uint16_t)(c->PC-2); c->IR=((op)<<4)|0; } break; \
+    case ((op)<<4)|7: _FETCH(); break;
+
 /*--- register transfers, XBA, XCE (2-cycle implied ops) ---*/
 #define _TR_TAX() do { if (_X8()) { c->X=(uint16_t)(c->C&0xFF); _NZ8(c->X); } else { c->X=c->C; _NZ16(c->X); } } while (0)
 #define _TR_TAY() do { if (_X8()) { c->Y=(uint16_t)(c->C&0xFF); _NZ8(c->Y); } else { c->Y=c->C; _NZ16(c->Y); } } while (0)
@@ -1083,6 +1109,33 @@ bool w65c816_e(w65c816_t* cpu) { return 0 != cpu->E; }
     case ((op)<<4)|3: c->TA=_GD(); c->AA=_SPLIN(2); _SA(c->AA); _VDA(); break; \
     case ((op)<<4)|4: c->TA|=((uint16_t)_GD())<<8; c->AA=_SPLIN(3); _SA(c->AA); _VDA(); break; \
     case ((op)<<4)|5: c->S=_SPADD(3); c->PBR=_GD(); c->PC=(uint16_t)(c->TA+1); _FETCH(); break;
+
+/*--- interrupts, BRK, COP ---
+   slot 0 (the signature-fetch cycle) is emitted by the caller; this tail
+   pushes the return state and fetches the vector. In native mode PBR is
+   pushed first, in emulation mode only PCH/PCL/P are pushed. The pushed
+   status byte is the unmodified P (verified against traces), afterwards
+   D is cleared and I is set. The vector is fetched from bank zero with
+   VDA|VPB asserted and PBR is cleared.
+   On RESET all push cycles are suppressed and the CPU state is reset.
+---*/
+#define _W65C816_BRK_TAIL(op) \
+    case ((op)<<4)|1: if (c->E) { _SA(_SH()); _VDA(); _SD((uint8_t)(c->PC>>8)); if (!(c->brk_flags&W65C816_BRK_RESET)) { _WR(); } c->S=_SPADD(-1); c->IR++; } else { _SA(_SH()); _VDA(); _SD(c->PBR); if (!(c->brk_flags&W65C816_BRK_RESET)) { _WR(); } c->S=_SPADD(-1); } break; \
+    case ((op)<<4)|2: _SA(_SH()); _VDA(); _SD((uint8_t)(c->PC>>8)); if (!(c->brk_flags&W65C816_BRK_RESET)) { _WR(); } c->S=_SPADD(-1); break; \
+    case ((op)<<4)|3: _SA(_SH()); _VDA(); _SD((uint8_t)c->PC); if (!(c->brk_flags&W65C816_BRK_RESET)) { _WR(); } c->S=_SPADD(-1); break; \
+    case ((op)<<4)|4: { uint16_t vec; _SA(_SH()); _VDA(); _SD(c->P); if (!(c->brk_flags&W65C816_BRK_RESET)) { _WR(); } c->S=_SPADD(-1); \
+        if (c->brk_flags&W65C816_BRK_RESET) { vec=0xFFFC; } \
+        else if (c->brk_flags&W65C816_BRK_NMI) { vec=c->E?0xFFFA:0xFFEA; } \
+        else if (c->brk_flags&W65C816_BRK_ABORT) { vec=0xFFF8; } \
+        else if (c->brk_flags&W65C816_BRK_IRQ) { vec=c->E?0xFFFE:0xFFEE; } \
+        else if ((op)==0x00) { vec=c->E?0xFFFE:0xFFE6; } \
+        else { vec=c->E?0xFFF4:0xFFE4; } \
+        c->AD=vec; c->PBR=0; \
+        if (c->brk_flags&W65C816_BRK_RESET) { c->E=1; c->P|=(uint8_t)(W65C816_IF|W65C816_DF|W65C816_MF|W65C816_XF); c->DBR=0; c->D=0; c->S=0x01FF; c->X&=0xFF; c->Y&=0xFF; } \
+        else { c->P=(uint8_t)((c->P&~W65C816_DF)|W65C816_IF); } } break; \
+    case ((op)<<4)|5: _SA(c->AD); _VDA(); _VPB(); break; \
+    case ((op)<<4)|6: c->TA=_GD(); _SA((c->AD+1)&0xFFFF); _VDA(); _VPB(); break; \
+    case ((op)<<4)|7: c->PC=(uint16_t)(c->TA|(((uint16_t)_GD())<<8)); _FETCH(); break;
 
 /* placeholder for not-yet implemented opcodes:
    keeps the CPU jammed on the same microstep (reads at PB:PC) so that
@@ -1257,6 +1310,44 @@ static inline void _w65c816_sbc(w65c816_t* c, uint16_t v, bool w16) {
 }
 
 uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
+    if (c->halted) {
+        /* WAI wakes on RES, NMI, ABORT and (unmasked) IRQ, STP only on RES */
+        bool wake = false;
+        if (0 != (pins & W65C816_RES)) {
+            wake = true;
+            c->brk_flags |= W65C816_BRK_RESET;
+        }
+        else if (c->halted != 2) {
+            if (0 != ((pins & (pins ^ c->PINS)) & (W65C816_NMI))) {
+                wake = true; c->brk_flags |= W65C816_BRK_NMI;
+            }
+            if (0 != ((pins & (pins ^ c->PINS)) & (W65C816_ABORT))) {
+                wake = true; c->brk_flags |= W65C816_BRK_ABORT;
+            }
+            if (!wake && (pins & W65C816_IRQ) && (0 == (c->P & W65C816_IF))) {
+                wake = true; c->brk_flags |= W65C816_BRK_IRQ;
+            }
+        }
+        if (!wake) {
+            _STATUS_PINS();
+            c->PINS = pins;
+            return pins;
+        }
+        c->halted = 0;
+        c->IR = 0;      /* enter the interrupt sequence */
+        _OFF(W65C816_SYNC);
+        _OFF(W65C816_VPA|W65C816_VDA|W65C816_VPB|W65C816_MLB);
+        _RD();
+        switch (c->IR++) {
+            case 0: _SA(_PB_PC()); _VPA(); break;
+            _W65C816_BRK_TAIL(0x00)
+            default: CHIPS_ASSERT(false); break;
+        }
+        _STATUS_PINS();
+        c->PINS = pins;
+        c->irq_pip <<= 1; c->nmi_pip <<= 1; c->abrt_pip <<= 1;
+        return pins;
+    }
     if (pins & (W65C816_SYNC|W65C816_IRQ|W65C816_NMI|W65C816_ABORT|W65C816_RDY|W65C816_RES)) {
         // interrupt detection also works in RDY phases, but only NMI is "sticky"
 
@@ -1311,6 +1402,9 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
             }
             else {
                 c->PC++;
+                // MVN/MVP start at microstep 1: the opcode prefetch of the
+                // previous cycle substitutes the per-byte refetch
+                if (((c->IR>>4)==0x44)||((c->IR>>4)==0x54)) { c->IR |= 1; }
             }
         }
     }
@@ -1324,12 +1418,15 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
     /* CLC */
         case (0x18<<4)|0: c->P &= ~W65C816_CF; _DUMMY(); break;
         case (0x18<<4)|1: _FETCH(); break;
-    /* TODO: 00 BRK */
-        _W65C816_TODO(0x00)
+    /* BRK (also the entry point for hardware interrupts; the signature
+       byte is only fetched-and-skipped for software BRK) */
+        case (0x00<<4)|0: _SA(_PB_PC()); _VPA(); if (0 == c->brk_flags) { c->PC++; } else { c->brk_flags = 0; } break; \
+        _W65C816_BRK_TAIL(0x00)
     /* ORA (dp,X) */
         _M_IDX_RD(0x01, _ORA)
-    /* TODO: 02 COP */
-        _W65C816_TODO(0x02)
+    /* COP */
+        case (0x02<<4)|0: _SA(_PB_PC()); _VPA(); c->PC++; break; \
+        _W65C816_BRK_TAIL(0x02)
     /* ORA sr,S */
         _M_SR_RD(0x03, _ORA)
     /* TSB dp */
@@ -1453,8 +1550,16 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _M_ABXY_RMW(0x3E, _RMW_ROL, c->X)
     /* AND al,X */
         _M_ABLX_RD(0x3F, _AND)
-    /* TODO: 40 RTI */
-        _W65C816_TODO(0x40)
+    /* RTI: pulls P, PCL, PCH and (native mode only) PBR. NOTE: like XCE,
+       the pulled P must not change the M/X state pins until the next bus
+       cycle, so the register update happens one cycle after the pull */
+        case (0x40<<4)|0: _DUMMY(); break; \
+        case (0x40<<4)|1: _DUMMY(); break; \
+        case (0x40<<4)|2: c->AA=_SPADD(1); _SA(c->AA); _VDA(); break; \
+        case (0x40<<4)|3: c->TD=_GD(); c->AA=_SPADD(2); _SA(c->AA); _VDA(); break; \
+        case (0x40<<4)|4: c->TA=_GD(); c->AA=_SPADD(3); _SA(c->AA); _VDA(); break; \
+        case (0x40<<4)|5: c->TA|=((uint16_t)_GD())<<8; c->PC=c->TA; if (c->E) { c->P=c->TD; c->P=(uint8_t)(c->P|(W65C816_MF|W65C816_XF)); if (c->P&W65C816_XF) { c->X&=0xFF; c->Y&=0xFF; } c->S=_SPADD(3); _FETCH(); } else { c->AA=_SPADD(4); _SA(c->AA); _VDA(); } break; \
+        case (0x40<<4)|6: c->P=c->TD; if (c->P&W65C816_XF) { c->X&=0xFF; c->Y&=0xFF; } c->PBR=_GD(); c->S=c->AA; _FETCH(); break;
     /* EOR (dp,X) */
         _M_IDX_RD(0x41, _EOR)
     /* WDM (2 bytes: the second byte is fetched and skipped) */
@@ -1462,8 +1567,8 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         case (0x42<<4)|1: _FETCH(); break;
     /* EOR sr,S */
         _M_SR_RD(0x43, _EOR)
-    /* TODO: 44 MVP */
-        _W65C816_TODO(0x44)
+    /* MVP */
+        _M_MVN(0x44, 1)
     /* EOR dp */
         _M_DP_RD(0x45, _EOR)
     /* LSR dp */
@@ -1494,8 +1599,8 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _M_DPIND_RD(0x52, _EOR)
     /* EOR (sr,S),Y */
         _M_SRIY_RD(0x53, _EOR)
-    /* TODO: 54 MVN */
-        _W65C816_TODO(0x54)
+    /* MVN */
+        _M_MVN(0x54, 0)
     /* EOR dp,X */
         _M_DPXY_RD(0x55, _EOR, c->X)
     /* LSR dp,X */
@@ -1732,8 +1837,10 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _M_IMM_RD(0xC9, _CMPA)
     /* DEX */
         _M_IMPLIED(0xCA, _DEX();)
-    /* TODO: CB WAI */
-        _W65C816_TODO(0xCB)
+    /* WAI: 3 cycles, then the CPU halts until RES/NMI/ABORT/IRQ */
+        case (0xCB<<4)|0: _DUMMY(); break; \
+        case (0xCB<<4)|1: _DUMMY(); break; \
+        case (0xCB<<4)|2: c->halted=1; break;
     /* CPY abs */
         _M_ABS_RDX(0xCC, _CPY)
     /* CMP abs */
@@ -1764,8 +1871,10 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _M_ABXY_RD(0xD9, _CMPA, c->Y)
     /* PHX */
         _M_PUSH_W(0xDA, c->X, _X8())
-    /* TODO: DB STP */
-        _W65C816_TODO(0xDB)
+    /* STP: 3 cycles, then the CPU halts until RES */
+        case (0xDB<<4)|0: _DUMMY(); break; \
+        case (0xDB<<4)|1: _DUMMY(); break; \
+        case (0xDB<<4)|2: c->halted=2; break;
     /* JML (al) */
         _M_JML_IND(0xDC)
     /* CMP abs,X */

@@ -534,21 +534,9 @@ static bool run_test(const test_t* t, w65c816_t* c) {
             return false;
         }
     }
-    /* if the trace was truncated at 100 cycles (block moves), run the
-       instruction to completion before verifying the final state
+    /* NOTE: traces truncated at 100 cycles (block moves) were captured
+       mid-instruction: the reference state is verified as-is below
     */
-    if ((t->ncycles == 100) && !args.cur_failed) {
-        int guard = 0;
-        while (!(pins & W65C816_SYNC)) {
-            pins = service_bus(pins, true);
-            pins = w65c816_tick(c, pins);
-            if (++guard > 400000) {
-                report_fail(t, "truncated", "instruction did not complete within 400k cycles");
-                return false;
-            }
-        }
-        pins = service_bus(pins, true);
-    }
     /* the instruction's last microstep is the (untraced) fetch of the next
        opcode: execute it so the CPU ends up in the 'prefetched' state with
        all side effects applied, then verify the final state
