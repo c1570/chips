@@ -443,7 +443,7 @@ bool w65c816_e(w65c816_t* cpu) { return 0 != cpu->E; }
     case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); break; \
     case ((op)<<4)|1: c->TA=_GD(); _SA(_PB_PC()); c->PC++; _VPA(); break; \
     case ((op)<<4)|2: c->AD=((((uint32_t)c->DBR)<<16)|(((uint16_t)_GD())<<8)|c->TA); _SA(c->AD); _VDA(); break; \
-    _TAIL_RD(op, 3, exec, (((c->AD&0xFF0000u)|((c->AD+1)&0xFFFF))))
+    _TAIL_RD(op, 3, exec, ((c->AD+1)&0xFFFFFF))
 
 /* absolute indexed (X or Y): 4 cycles + 1 fixup + 1 if 16-bit data.
    - 8-bit index (X flag set or emulation mode): fixup cycle only on page cross
@@ -563,6 +563,47 @@ bool w65c816_e(w65c816_t* cpu) { return 0 != cpu->E; }
     case ((op)<<4)|3: c->AD=(((((uint32_t)_GD())<<16)|c->TB)+c->X)&0xFFFFFF; _SA(c->AD); _VDA(); break; \
     _TAIL_RD(op, 4, exec, ((c->AD+1)&0xFFFFFF))
 
+/* X-flag-width read tail for the index register ops (LDX/LDY/CPX/CPY):
+   the data width follows the X flag, not M */
+#define _TAIL_RDX(op, s, exec, nextaddr) \
+    case ((op)<<4)|(s): c->TD=_GD(); if (_X8()) { exec(c->TD); _FETCH(); } else { _SA(nextaddr); _VDA(); } break; \
+    case ((op)<<4)|((s)+1): c->TD|=((uint16_t)_GD())<<8; exec(c->TD); _FETCH(); break;
+
+#define _M_DP_RDX(op, exec) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); if (!(c->D&0xFF)) { c->IR++; } break; \
+    case ((op)<<4)|1: c->TA=_GD(); _DUMMY_PP(); break; \
+    case ((op)<<4)|2: c->AD=(uint16_t)((((c->D&0xFF)?c->TA:_GD())+c->D)&0xFFFF); _SA(c->AD); _VDA(); break; \
+    _TAIL_RDX(op, 3, exec, ((c->AD+1)&0xFFFF))
+
+#define _M_ABS_RDX(op, exec) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|1: c->TA=_GD(); _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|2: c->AD=((((uint32_t)c->DBR)<<16)|(((uint16_t)_GD())<<8)|c->TA); _SA(c->AD); _VDA(); break; \
+    _TAIL_RDX(op, 3, exec, ((c->AD+1)&0xFFFFFF))
+
+#define _M_DPXY_RDX(op, exec, idx) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); if (!(c->D&0xFF)) { c->IR++; } break; \
+    case ((op)<<4)|1: c->TA=_GD(); _DUMMY_PP(); break; \
+    case ((op)<<4)|2: { uint8_t dpb=(uint8_t)((c->D&0xFF)?c->TA:_GD()); \
+        if (c->E && !(c->D&0xFF)) { c->TA=(uint16_t)(c->D+(uint8_t)(dpb+(idx))); } \
+        else { c->TA=(uint16_t)(dpb+c->D+(idx)); } } \
+        _DUMMY_PP(); break; \
+    case ((op)<<4)|3: _SA(c->TA); _VDA(); break; \
+    _TAIL_RDX(op, 4, exec, ((c->TA+1)&0xFFFF))
+
+#define _M_ABXY_RDX(op, exec, idx) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|1: c->TA=_GD(); _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|2: { uint16_t base=(uint16_t)(c->TA|(((uint16_t)_GD())<<8)); \
+        uint32_t sum32=(uint32_t)base+(uint16_t)(idx); \
+        c->CRS=((base^sum32)&0xFF00)?1:0; c->AA=(uint16_t)sum32; \
+        c->TB=(uint16_t)((c->DBR+(sum32>>16))&0xFF); \
+        c->AD=((((uint32_t)c->TB)<<16)|(sum32&0xFFFF)); \
+        _SA(((((uint32_t)c->DBR)<<16)|(base&0xFF00)|(sum32&0xFF))); \
+        if (_X8() && !c->CRS) { _VDA(); c->IR++; } } break; \
+    case ((op)<<4)|3: _SA((((uint32_t)c->TB)<<16)|c->AA); _VDA(); break; \
+    _TAIL_RDX(op, 4, exec, ((c->AD+1)&0xFFFFFF))
+
 /*--- addressing mode microcode macros (write flavour) ---
    write cycles never merge with the effective-address fixup, and writes
    never get a page-cross penalty; 16-bit writes go out low byte first
@@ -593,7 +634,7 @@ bool w65c816_e(w65c816_t* cpu) { return 0 != cpu->E; }
     case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); break; \
     case ((op)<<4)|1: c->TA=_GD(); _SA(_PB_PC()); c->PC++; _VPA(); break; \
     case ((op)<<4)|2: c->AD=((((uint32_t)c->DBR)<<16)|(((uint16_t)_GD())<<8)|c->TA); _SA(c->AD); _VDA(); _SD((reg)&0xFF); _WR(); if (w8) { c->IR++; } break; \
-    case ((op)<<4)|3: _SA(((c->AD&0xFF0000u)|((c->AD+1)&0xFFFF))); _VDA(); _SD((((reg)>>8)&0xFF)); _WR(); break; \
+    case ((op)<<4)|3: _SA((c->AD+1)&0xFFFFFF); _VDA(); _SD((((reg)>>8)&0xFF)); _WR(); break; \
     case ((op)<<4)|4: _FETCH(); break;
 
 /* absolute indexed write (X or Y): 5 cycles + 1 if 16-bit (fixup cycle is
@@ -761,9 +802,9 @@ bool w65c816_e(w65c816_t* cpu) { return 0 != cpu->E; }
     case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); break; \
     case ((op)<<4)|1: c->TA=_GD(); _SA(_PB_PC()); c->PC++; _VPA(); break; \
     case ((op)<<4)|2: c->AD=((((uint32_t)c->DBR)<<16)|(((uint16_t)_GD())<<8)|c->TA); _SA(c->AD); _VDA(); _MLB(); break; \
-    case ((op)<<4)|3: c->TD=_GD(); if (c->E) { _SAD(c->AD,(c->TD&0xFF)); _MLB(); _WR(); } else if (_W8()) { _SA(c->AD); _MLB(); } else { _SA(((c->AD&0xFF0000u)|((c->AD+1)&0xFFFF))); _VDA(); _MLB(); } break; \
-    case ((op)<<4)|4: if (_W8()) { opr(c->TD); _SAD(c->AD,(c->RR&0xFF)); _VDA(); _MLB(); _WR(); } else { c->TD|=((uint16_t)_GD())<<8; opr(c->TD); _SA(((c->AD&0xFF0000u)|((c->AD+1)&0xFFFF))); _MLB(); } break; \
-    case ((op)<<4)|5: if (_W8()) { _FETCH(); } else { _SAD(((c->AD&0xFF0000u)|((c->AD+1)&0xFFFF)),((c->RR>>8)&0xFF)); _VDA(); _MLB(); _WR(); } break; \
+    case ((op)<<4)|3: c->TD=_GD(); if (c->E) { _SAD(c->AD,(c->TD&0xFF)); _MLB(); _WR(); } else if (_W8()) { _SA(c->AD); _MLB(); } else { _SA((c->AD+1)&0xFFFFFF); _VDA(); _MLB(); } break; \
+    case ((op)<<4)|4: if (_W8()) { opr(c->TD); _SAD(c->AD,(c->RR&0xFF)); _VDA(); _MLB(); _WR(); } else { c->TD|=((uint16_t)_GD())<<8; opr(c->TD); _SA((c->AD+1)&0xFFFFFF); _MLB(); } break; \
+    case ((op)<<4)|5: if (_W8()) { _FETCH(); } else { _SAD((c->AD+1)&0xFFFFFF,((c->RR>>8)&0xFF)); _VDA(); _MLB(); _WR(); } break; \
     case ((op)<<4)|6: _SAD(c->AD,(c->RR&0xFF)); _VDA(); _MLB(); _WR(); break; \
     case ((op)<<4)|7: _FETCH(); break;
 
@@ -900,6 +941,136 @@ bool w65c816_e(w65c816_t* cpu) { return 0 != cpu->E; }
     case ((op)<<4)|3: c->TA=_GD(); c->AA=_SPADD(2); _SA(c->AA); _VDA(); break; \
     case ((op)<<4)|4: c->TA|=((uint16_t)_GD())<<8; c->S=c->AA; c->PC=(uint16_t)(c->TA+1); _SA(_SH()); break; \
     case ((op)<<4)|5: _FETCH(); break;
+
+/*--- stack push/pull, PEA/PEI/PER ---*/
+
+/* 8-bit push: 3 cycles */
+#define _M_PUSH8(op, val) \
+    case ((op)<<4)|0: _DUMMY(); break; \
+    case ((op)<<4)|1: _SA(_SH()); _VDA(); _SD((uint8_t)(val)); _WR(); c->S=_SPADD(-1); break; \
+    case ((op)<<4)|2: _FETCH(); break;
+
+/* 16-bit push: 4 cycles (linear addresses, can cross the page-1 boundary) */
+#define _M_PUSH16_LIN(op, val) \
+    case ((op)<<4)|0: _DUMMY(); break; \
+    case ((op)<<4)|1: _SA(_SPLIN(0)); _VDA(); _SD((((uint8_t)(((val)>>8)&0xFF)))); _WR(); break; \
+    case ((op)<<4)|2: _SA(_SPLIN(-1)); _VDA(); _SD(((uint8_t)(val))); _WR(); c->S=_SPADD(-2); break; \
+    case ((op)<<4)|3: _FETCH(); break;
+
+/* width-aware push (8 or 16-bit) */
+#define _M_PUSH_W(op, val, w8) \
+    case ((op)<<4)|0: _DUMMY(); break; \
+    case ((op)<<4)|1: if (w8) { _SA(_SH()); _VDA(); _SD((uint8_t)(val)); _WR(); c->S=_SPADD(-1); c->IR++; } else { _SA(_SPLIN(0)); _VDA(); _SD((uint8_t)(((val)>>8)&0xFF)); _WR(); } break; \
+    case ((op)<<4)|2: if (w8) { CHIPS_ASSERT(false); } else { _SA(_SPLIN(-1)); _VDA(); _SD(((uint8_t)(val))); _WR(); c->S=_SPADD(-2); } break; \
+    case ((op)<<4)|3: _FETCH(); break;
+
+/* 8-bit pull (4 cycles), width-aware 16-bit variant (5 cycles) */
+#define _PLA8(v) do { c->C=(uint16_t)((c->C&0xFF00)|((v)&0xFF)); _NZ8(c->C); } while (0)
+#define _PLA16(v) do { c->C=(v); _NZ16(c->C); } while (0)
+#define _PLP8(v) do { c->P=(uint8_t)(v); if (c->E) { c->P=(uint8_t)(c->P|(W65C816_MF|W65C816_XF)); } } while (0)
+#define _PLX8(v) do { c->X=(uint16_t)((v)&0xFF); _NZ8(c->X); } while (0)
+#define _PLX16(v) do { c->X=(v); _NZ16(c->X); } while (0)
+#define _PLY8(v) do { c->Y=(uint16_t)((v)&0xFF); _NZ8(c->Y); } while (0)
+#define _PLY16(v) do { c->Y=(v); _NZ16(c->Y); } while (0)
+#define _M_PULL_W(op, load8, load16, w8) \
+    case ((op)<<4)|0: _DUMMY(); break; \
+    case ((op)<<4)|1: _DUMMY(); break; \
+    case ((op)<<4)|2: c->AA=_SPADD(1); _SA(c->AA); _VDA(); break; \
+    case ((op)<<4)|3: c->TD=_GD(); if (w8) { load8(c->TD); c->S=_SPADD(1); _FETCH(); } else { _SA(_SPADD(2)); _VDA(); } break; \
+    case ((op)<<4)|4: c->TD|=((uint16_t)_GD())<<8; load16(c->TD); c->S=_SPADD(2); _FETCH(); break;
+
+/* PLB: DBR pull, linear addresses in emulation mode */
+#define _M_PLB(op) \
+    case ((op)<<4)|0: _DUMMY(); break; \
+    case ((op)<<4)|1: _DUMMY(); break; \
+    case ((op)<<4)|2: c->AA=_SPLIN(1); _SA(c->AA); _VDA(); break; \
+    case ((op)<<4)|3: c->DBR=_GD(); _NZ8(c->DBR); c->S=_SPADD(1); _FETCH(); break;
+
+/* PLD: 16-bit D pull with linear addresses */
+#define _M_PLD(op) \
+    case ((op)<<4)|0: _DUMMY(); break; \
+    case ((op)<<4)|1: _DUMMY(); break; \
+    case ((op)<<4)|2: c->AA=_SPLIN(1); _SA(c->AA); _VDA(); break; \
+    case ((op)<<4)|3: c->TD=_GD(); c->AA=_SPLIN(2); _SA(c->AA); _VDA(); break; \
+    case ((op)<<4)|4: c->TD|=((uint16_t)_GD())<<8; c->D=c->TD; _NZ16(c->D); c->S=_SPADD(2); _FETCH(); break;
+
+/* PEA: push 16-bit immediate operand: 5 cycles */
+#define _M_PEA(op) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|1: c->TA=_GD(); _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|2: c->TA=(uint16_t)(c->TA|(((uint16_t)_GD())<<8)); _SA(_SPLIN(0)); _VDA(); _SD((uint8_t)(c->TA>>8)); _WR(); break; \
+    case ((op)<<4)|3: _SA(_SPLIN(-1)); _VDA(); _SD((uint8_t)c->TA); _WR(); c->S=_SPADD(-2); break; \
+    case ((op)<<4)|4: _FETCH(); break;
+
+/* PEI: push the 16-bit word at (dp): 6 cycles + 1 if D low byte != 0 */
+#define _M_PEI(op) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); if (!(c->D&0xFF)) { c->IR++; } break; \
+    case ((op)<<4)|1: c->TA=_GD(); _DUMMY_PP(); break; \
+    case ((op)<<4)|2: c->AA=(uint16_t)((((c->D&0xFF)?c->TA:_GD())+c->D)&0xFFFF); _SA(c->AA); _VDA(); break; \
+    case ((op)<<4)|3: c->TA=_GD(); _SA((c->AA+1)&0xFFFF); _VDA(); break; \
+    case ((op)<<4)|4: c->TA=(uint16_t)(c->TA|(((uint16_t)_GD())<<8)); _SA(_SPLIN(0)); _VDA(); _SD((uint8_t)(c->TA>>8)); _WR(); break; \
+    case ((op)<<4)|5: _SA(_SPLIN(-1)); _VDA(); _SD((uint8_t)c->TA); _WR(); c->S=_SPADD(-2); break; \
+    case ((op)<<4)|6: _FETCH(); break;
+
+/* PER: push the 16-bit effective PC-relative address: 6 cycles */
+#define _M_PER(op) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|1: c->TA=_GD(); _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|2: { uint16_t tgt=(uint16_t)(c->PC+(int16_t)(c->TA|(((uint16_t)_GD())<<8))); _DUMMY_PP(); c->TA=tgt; } break; \
+    case ((op)<<4)|3: _SA(_SPLIN(0)); _VDA(); _SD((uint8_t)(c->TA>>8)); _WR(); break; \
+    case ((op)<<4)|4: _SA(_SPLIN(-1)); _VDA(); _SD((uint8_t)c->TA); _WR(); c->S=_SPADD(-2); break; \
+    case ((op)<<4)|5: _FETCH(); break;
+
+/*--- register transfers, XBA, XCE (2-cycle implied ops) ---*/
+#define _TR_TAX() do { if (_X8()) { c->X=(uint16_t)(c->C&0xFF); _NZ8(c->X); } else { c->X=c->C; _NZ16(c->X); } } while (0)
+#define _TR_TAY() do { if (_X8()) { c->Y=(uint16_t)(c->C&0xFF); _NZ8(c->Y); } else { c->Y=c->C; _NZ16(c->Y); } } while (0)
+#define _TR_TXA() do { if (_W8()) { c->C=(uint16_t)((c->C&0xFF00)|(c->X&0xFF)); _NZ8(c->C); } else { c->C=c->X; _NZ16(c->C); } } while (0)
+#define _TR_TYA() do { if (_W8()) { c->C=(uint16_t)((c->C&0xFF00)|(c->Y&0xFF)); _NZ8(c->C); } else { c->C=c->Y; _NZ16(c->C); } } while (0)
+#define _TR_TSX() do { if (_X8()) { c->X=(uint16_t)(_SH()&0xFF); _NZ8(c->X); } else { c->X=_SH(); _NZ16(c->X); } } while (0)
+#define _TR_TXS() do { c->S=c->E?(uint16_t)(0x0100|(c->X&0xFF)):c->X; } while (0)
+#define _TR_TXY() do { if (_X8()) { c->Y=(uint16_t)(c->X&0xFF); _NZ8(c->Y); } else { c->Y=c->X; _NZ16(c->Y); } } while (0)
+#define _TR_TYX() do { if (_X8()) { c->X=(uint16_t)(c->Y&0xFF); _NZ8(c->X); } else { c->X=c->Y; _NZ16(c->X); } } while (0)
+#define _TR_TCS() do { c->S=c->E?(uint16_t)(0x0100|(c->C&0xFF)):c->C; } while (0)
+#define _TR_TSC() do { c->C=_SH(); _NZ16(c->C); } while (0)
+#define _TR_TCD() do { c->D=c->C; _NZ16(c->D); } while (0)
+#define _TR_TDC() do { c->C=c->D; _NZ16(c->C); } while (0)
+#define _TR_XBA() do { c->C=(uint16_t)((c->C>>8)|((c->C&0xFF)<<8)); _NZ8(c->C); } while (0)
+#define _TR_XCE_PREP() do { c->E=(c->P&W65C816_CF)?1:0; if (c->E) { c->P|=(uint8_t)(W65C816_MF|W65C816_XF); c->S=(uint16_t)(0x0100|(c->S&0xFF)); c->X&=0xFF; c->Y&=0xFF; } } while (0)
+
+/* SEP/REP: 3 cycles, M/X bits can not be modified in emulation mode */
+/* NOTE: like XCE, the M/X flag state pins show the OLD flags during the
+   internal cycle, the update becomes visible with the next fetch */
+#define _M_IMM_FLAGS(op, set) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|1: { c->TA=_GD(); } _DUMMY_PP(); break; \
+    case ((op)<<4)|2: { uint8_t m=(uint8_t)c->TA; \
+        if (c->E) { m&=(uint8_t)~(W65C816_MF|W65C816_XF); } \
+        if (set) { c->P=(uint8_t)(c->P|m); } else { c->P=(uint8_t)(c->P&~m); } \
+        if (c->P&W65C816_XF) { c->X&=0xFF; c->Y&=0xFF; } } \
+        _FETCH(); break;
+
+/* immediate ops with X-flag width (LDX/LDY/CPX/CPY #) */
+#define _LDX(v) do { if (_X8()) { c->X=(uint16_t)((v)&0xFF); _NZ8(c->X); } else { c->X=(v); _NZ16(c->X); } } while (0)
+#define _LDY(v) do { if (_X8()) { c->Y=(uint16_t)((v)&0xFF); _NZ8(c->Y); } else { c->Y=(v); _NZ16(c->Y); } } while (0)
+#define _CPX(v) do { if (_X8()) { uint32_t t=(uint32_t)(c->X&0xFF)-((v)&0xFF); _NZ8((uint16_t)t); if (0==(t&0x100)) { c->P|=W65C816_CF; } else { c->P&=(uint8_t)~W65C816_CF; } } else { uint32_t t=(uint32_t)c->X-((v)&0xFFFF); _NZ16((uint16_t)t); if (0==(t&0x10000)) { c->P|=W65C816_CF; } else { c->P&=(uint8_t)~W65C816_CF; } } } while (0)
+#define _CPY(v) do { if (_X8()) { uint32_t t=(uint32_t)(c->Y&0xFF)-((v)&0xFF); _NZ8((uint16_t)t); if (0==(t&0x100)) { c->P|=W65C816_CF; } else { c->P&=(uint8_t)~W65C816_CF; } } else { uint32_t t=(uint32_t)c->Y-((v)&0xFFFF); _NZ16((uint16_t)t); if (0==(t&0x10000)) { c->P|=W65C816_CF; } else { c->P&=(uint8_t)~W65C816_CF; } } } while (0)
+#define _M_IMM_X(op, exec) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); if (_X8()) { c->IR++; } break; \
+    case ((op)<<4)|1: c->TA=_GD(); _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|2: if (_X8()) { exec(_GD()); } else { exec((uint16_t)(c->TA|(((uint16_t)_GD())<<8))); } _FETCH(); break;
+
+/* BIT memory: N/V from the operand, Z from A AND operand */
+#define _BITM(v) do { if (_W8()) { uint8_t m=(uint8_t)(v); c->P=(uint8_t)((c->P&~(W65C816_NF|W65C816_VF|W65C816_ZF))|((m&0x80)?W65C816_NF:0)|((m&0x40)?W65C816_VF:0)|((((c->C&m)&0xFF)==0)?W65C816_ZF:0)); } else { uint16_t m=(uint16_t)(v); c->P=(uint8_t)((c->P&~(W65C816_NF|W65C816_VF|W65C816_ZF))|((m&0x8000)?W65C816_NF:0)|((m&0x4000)?W65C816_VF:0)|((((c->C&m)&0xFFFF)==0)?W65C816_ZF:0)); } } while (0)
+/* INY/DEX/INX (index register width) */
+#define _INY() do { if (_X8()) { c->Y=(uint16_t)((c->Y+1)&0xFF); _NZ8(c->Y); } else { c->Y=(uint16_t)((c->Y+1)&0xFFFF); _NZ16(c->Y); } } while (0)
+#define _DEX() do { if (_X8()) { c->X=(uint16_t)((c->X-1)&0xFF); _NZ8(c->X); } else { c->X=(uint16_t)((c->X-1)&0xFFFF); _NZ16(c->X); } } while (0)
+#define _INX() do { if (_X8()) { c->X=(uint16_t)((c->X+1)&0xFF); _NZ8(c->X); } else { c->X=(uint16_t)((c->X+1)&0xFFFF); _NZ16(c->X); } } while (0)
+
+/* BIT immediate: only the Z flag is affected */
+#define _M_BIT_IMM(op) \
+    case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); if (_W8()) { c->IR++; } break; \
+    case ((op)<<4)|1: c->TA=_GD(); _SA(_PB_PC()); c->PC++; _VPA(); break; \
+    case ((op)<<4)|2: if (_W8()) { c->P=(uint8_t)((c->P&~W65C816_ZF)|((((c->C&_GD())&0xFF)==0)?W65C816_ZF:0)); } else { c->P=(uint8_t)((c->P&~W65C816_ZF)|(((c->C&(uint16_t)(c->TA|(((uint16_t)_GD())<<8)))==0)?W65C816_ZF:0)); } _FETCH(); break;
 
 /* RTL: 6 cycles, pulls PBR too, pulled PC is incremented */
 /* NOTE: unlike RTS/RTI, RTL's pull addresses are computed linearly from the
@@ -1169,14 +1340,14 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _M_DP_RMW(0x06, _RMW_ASL)
     /* ORA [dp] */
         _M_IDL_RD(0x07, _ORA)
-    /* TODO: 08 PHP */
-        _W65C816_TODO(0x08)
+    /* PHP */
+        _M_PUSH8(0x08, c->P)
     /* ORA # */
         _M_IMM_RD(0x09, _ORA)
     /* ASL A */
         _M_IMPLIED(0x0A, _ACC_RMW(ASL);)
-    /* TODO: 0B PHD */
-        _W65C816_TODO(0x0B)
+    /* PHD */
+        _M_PUSH16_LIN(0x0B, c->D)
     /* TSB abs */
         _M_ABS_RMW(0x0C, _RMW_TSB)
     /* ORA abs */
@@ -1205,8 +1376,8 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _M_ABXY_RD(0x19, _ORA, c->Y)
     /* INC A */
         _M_IMPLIED(0x1A, _ACC_RMW(INC);)
-    /* TODO: 1B TCS */
-        _W65C816_TODO(0x1B)
+    /* TCS */
+        _M_IMPLIED(0x1B, _TR_TCS();)
     /* TRB abs */
         _M_ABS_RMW(0x1C, _RMW_TRB)
     /* ORA abs,X */
@@ -1223,24 +1394,27 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _M_JSL(0x22)
     /* AND sr,S */
         _M_SR_RD(0x23, _AND)
-    /* TODO: 24 BIT dp */
-        _W65C816_TODO(0x24)
+    /* BIT dp */
+        _M_DP_RD(0x24, _BITM)
     /* AND dp */
         _M_DP_RD(0x25, _AND)
     /* ROL dp */
         _M_DP_RMW(0x26, _RMW_ROL)
     /* AND [dp] */
         _M_IDL_RD(0x27, _AND)
-    /* TODO: 28 PLP */
-        _W65C816_TODO(0x28)
+    /* PLP (always 8 bits; M/X flags can not be cleared in emulation mode) */
+        case (0x28<<4)|0: _DUMMY(); break; \
+        case (0x28<<4)|1: _DUMMY(); break; \
+        case (0x28<<4)|2: c->AA=_SPADD(1); _SA(c->AA); _VDA(); break; \
+        case (0x28<<4)|3: c->P=_GD(); if (c->E) { c->P=(uint8_t)(c->P|(W65C816_MF|W65C816_XF)); } if (c->P&W65C816_XF) { c->X&=0xFF; c->Y&=0xFF; } c->S=_SPADD(1); _FETCH(); break;
     /* AND # */
         _M_IMM_RD(0x29, _AND)
     /* ROL A */
         _M_IMPLIED(0x2A, _ACC_RMW(ROL);)
-    /* TODO: 2B PLD */
-        _W65C816_TODO(0x2B)
-    /* TODO: 2C BIT abs */
-        _W65C816_TODO(0x2C)
+    /* PLD */
+        _M_PLD(0x2B)
+    /* BIT abs */
+        _M_ABS_RD(0x2C, _BITM)
     /* AND abs */
         _M_ABS_RD(0x2D, _AND)
     /* ROL abs */
@@ -1255,24 +1429,24 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _M_DPIND_RD(0x32, _AND)
     /* AND (sr,S),Y */
         _M_SRIY_RD(0x33, _AND)
-    /* TODO: 34 BIT dp,X */
-        _W65C816_TODO(0x34)
+    /* BIT dp,X */
+        _M_DPXY_RD(0x34, _BITM, c->X)
     /* AND dp,X */
         _M_DPXY_RD(0x35, _AND, c->X)
     /* ROL dp,X */
         _M_DPXY_RMW(0x36, _RMW_ROL, c->X)
     /* AND [dp],Y */
         _M_IDLY_RD(0x37, _AND)
-    /* TODO: 38 SEC */
-        _W65C816_TODO(0x38)
+    /* SEC */
+        _M_IMPLIED(0x38, c->P|=(uint8_t)W65C816_CF;)
     /* AND abs,Y */
         _M_ABXY_RD(0x39, _AND, c->Y)
     /* DEC A */
         _M_IMPLIED(0x3A, _ACC_RMW(DEC);)
-    /* TODO: 3B TSC */
-        _W65C816_TODO(0x3B)
-    /* TODO: 3C BIT abs,X */
-        _W65C816_TODO(0x3C)
+    /* TSC */
+        _M_IMPLIED(0x3B, _TR_TSC();)
+    /* BIT abs,X */
+        _M_ABXY_RD(0x3C, _BITM, c->X)
     /* AND abs,X */
         _M_ABXY_RD(0x3D, _AND, c->X)
     /* ROL abs,X */
@@ -1296,14 +1470,14 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _M_DP_RMW(0x46, _RMW_LSR)
     /* EOR [dp] */
         _M_IDL_RD(0x47, _EOR)
-    /* TODO: 48 PHA */
-        _W65C816_TODO(0x48)
+    /* PHA */
+        _M_PUSH_W(0x48, c->C, _W8())
     /* EOR # */
         _M_IMM_RD(0x49, _EOR)
     /* LSR A */
         _M_IMPLIED(0x4A, _ACC_RMW(LSR);)
-    /* TODO: 4B PHK */
-        _W65C816_TODO(0x4B)
+    /* PHK */
+        _M_PUSH8(0x4B, c->PBR)
     /* JMP abs */
         _M_JMP_ABS(0x4C)
     /* EOR abs */
@@ -1328,14 +1502,14 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _M_DPXY_RMW(0x56, _RMW_LSR, c->X)
     /* EOR [dp],Y */
         _M_IDLY_RD(0x57, _EOR)
-    /* TODO: 58 CLI */
-        _W65C816_TODO(0x58)
+    /* CLI */
+        _M_IMPLIED(0x58, c->P&=(uint8_t)~W65C816_IF;)
     /* EOR abs,Y */
         _M_ABXY_RD(0x59, _EOR, c->Y)
-    /* TODO: 5A PHY */
-        _W65C816_TODO(0x5A)
-    /* TODO: 5B TCD */
-        _W65C816_TODO(0x5B)
+    /* PHY */
+        _M_PUSH_W(0x5A, c->Y, _X8())
+    /* TCD */
+        _M_IMPLIED(0x5B, _TR_TCD();)
     /* JMP al */
         _M_JMP_AL(0x5C)
     /* EOR abs,X */
@@ -1348,8 +1522,8 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _M_RTS(0x60)
     /* ADC (dp,X) */
         _M_IDX_RD(0x61, _ADC)
-    /* TODO: 62 PER */
-        _W65C816_TODO(0x62)
+    /* PER */
+        _M_PER(0x62)
     /* ADC sr,S */
         _M_SR_RD(0x63, _ADC)
     /* STZ dp */
@@ -1360,8 +1534,8 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _M_DP_RMW(0x66, _RMW_ROR)
     /* ADC [dp] */
         _M_IDL_RD(0x67, _ADC)
-    /* TODO: 68 PLA */
-        _W65C816_TODO(0x68)
+    /* PLA */
+        _M_PULL_W(0x68, _PLA8, _PLA16, _W8())
     /* ADC # */
         _M_IMM_RD(0x69, _ADC)
     /* ROR A */
@@ -1392,14 +1566,14 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _M_DPXY_RMW(0x76, _RMW_ROR, c->X)
     /* ADC [dp],Y */
         _M_IDLY_RD(0x77, _ADC)
-    /* TODO: 78 SEI */
-        _W65C816_TODO(0x78)
+    /* SEI */
+        _M_IMPLIED(0x78, c->P|=(uint8_t)W65C816_IF;)
     /* ADC abs,Y */
         _M_ABXY_RD(0x79, _ADC, c->Y)
-    /* TODO: 7A PLY */
-        _W65C816_TODO(0x7A)
-    /* TODO: 7B TDC */
-        _W65C816_TODO(0x7B)
+    /* PLY */
+        _M_PULL_W(0x7A, _PLY8, _PLY16, _X8())
+    /* TDC */
+        _M_IMPLIED(0x7B, _TR_TDC();)
     /* JMP (abs,X) */
         _M_JMP_INDX(0x7C)
     /* ADC abs,X */
@@ -1424,14 +1598,14 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _M_DP_WR(0x86, c->X, _X8())
     /* STA [dp] */
         _M_IDL_WR(0x87, c->C, _W8())
-    /* TODO: 88 DEY */
-        _W65C816_TODO(0x88)
-    /* TODO: 89 BIT # */
-        _W65C816_TODO(0x89)
-    /* TODO: 8A TXA */
-        _W65C816_TODO(0x8A)
-    /* TODO: 8B TXY */
-        _W65C816_TODO(0x8B)
+    /* DEY */
+        _M_IMPLIED(0x88, do { if (_X8()) { c->Y=(uint16_t)((c->Y-1)&0xFF); _NZ8(c->Y); } else { c->Y=(uint16_t)((c->Y-1)&0xFFFF); _NZ16(c->Y); } } while (0);)
+    /* BIT # */
+        _M_BIT_IMM(0x89)
+    /* TXA */
+        _M_IMPLIED(0x8A, _TR_TXA();)
+    /* PHB */
+        _M_PUSH8(0x8B, c->DBR)
     /* STY abs */
         _M_ABS_WR(0x8C, c->Y, _X8())
     /* STA abs */
@@ -1456,14 +1630,14 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _M_DPXY_WR(0x96, c->X, _X8(), c->Y)
     /* STA [dp],Y */
         _M_IDLY_WR(0x97, c->C, _W8())
-    /* TODO: 98 TYA */
-        _W65C816_TODO(0x98)
+    /* TYA */
+        _M_IMPLIED(0x98, _TR_TYA();)
     /* STA abs,Y */
         _M_ABXY_WR(0x99, c->C, _W8(), c->Y)
-    /* TODO: 9A TXS */
-        _W65C816_TODO(0x9A)
-    /* TODO: 9B TYS */
-        _W65C816_TODO(0x9B)
+    /* TXS */
+        _M_IMPLIED(0x9A, _TR_TXS();)
+    /* TXY */
+        _M_IMPLIED(0x9B, _TR_TXY();)
     /* STZ abs */
         _M_ABS_WR(0x9C, 0, _W8())
     /* STA abs,X */
@@ -1472,36 +1646,36 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _M_ABXY_WR(0x9E, 0, _W8(), c->X)
     /* STA al,X */
         _M_ABLX_WR(0x9F, c->C, _W8())
-    /* TODO: A0 LDY # */
-        _W65C816_TODO(0xA0)
+    /* LDY # */
+        _M_IMM_X(0xA0, _LDY)
     /* LDA (dp,X) */
         _M_IDX_RD(0xA1, _LDA)
-    /* TODO: A2 LDX # */
-        _W65C816_TODO(0xA2)
+    /* LDX # */
+        _M_IMM_X(0xA2, _LDX)
     /* LDA sr,S */
         _M_SR_RD(0xA3, _LDA)
-    /* TODO: A4 LDY dp */
-        _W65C816_TODO(0xA4)
+    /* LDY dp */
+        _M_DP_RDX(0xA4, _LDY)
     /* LDA dp */
         _M_DP_RD(0xA5, _LDA)
-    /* TODO: A6 LDX dp */
-        _W65C816_TODO(0xA6)
+    /* LDX dp */
+        _M_DP_RDX(0xA6, _LDX)
     /* LDA [dp] */
         _M_IDL_RD(0xA7, _LDA)
-    /* TODO: A8 TAY */
-        _W65C816_TODO(0xA8)
+    /* TAY */
+        _M_IMPLIED(0xA8, _TR_TAY();)
     /* LDA # */
         _M_IMM_RD(0xA9, _LDA)
-    /* TODO: AA TAX */
-        _W65C816_TODO(0xAA)
-    /* TODO: AB PLB */
-        _W65C816_TODO(0xAB)
-    /* TODO: AC LDY abs */
-        _W65C816_TODO(0xAC)
+    /* TAX */
+        _M_IMPLIED(0xAA, _TR_TAX();)
+    /* PLB */
+        _M_PLB(0xAB)
+    /* LDY abs */
+        _M_ABS_RDX(0xAC, _LDY)
     /* LDA abs */
         _M_ABS_RD(0xAD, _LDA)
-    /* TODO: AE LDX abs */
-        _W65C816_TODO(0xAE)
+    /* LDX abs */
+        _M_ABS_RDX(0xAE, _LDX)
     /* LDA al */
         _M_ABL_RD(0xAF, _LDA)
     /* BCS */
@@ -1512,56 +1686,56 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _M_DPIND_RD(0xB2, _LDA)
     /* LDA (sr,S),Y */
         _M_SRIY_RD(0xB3, _LDA)
-    /* TODO: B4 LDY dp,X */
-        _W65C816_TODO(0xB4)
+    /* LDY dp,X */
+        _M_DPXY_RDX(0xB4, _LDY, c->X)
     /* LDA dp,X */
         _M_DPXY_RD(0xB5, _LDA, c->X)
-    /* TODO: B6 LDX dp,Y */
-        _W65C816_TODO(0xB6)
+    /* LDX dp,Y */
+        _M_DPXY_RDX(0xB6, _LDX, c->Y)
     /* LDA [dp],Y */
         _M_IDLY_RD(0xB7, _LDA)
-    /* TODO: B8 CLV */
-        _W65C816_TODO(0xB8)
+    /* CLV */
+        _M_IMPLIED(0xB8, c->P&=(uint8_t)~W65C816_VF;)
     /* LDA abs,Y */
         _M_ABXY_RD(0xB9, _LDA, c->Y)
-    /* TODO: BA TSX */
-        _W65C816_TODO(0xBA)
-    /* TODO: BB TYX */
-        _W65C816_TODO(0xBB)
-    /* TODO: BC LDY abs,X */
-        _W65C816_TODO(0xBC)
+    /* TSX */
+        _M_IMPLIED(0xBA, _TR_TSX();)
+    /* TYX */
+        _M_IMPLIED(0xBB, _TR_TYX();)
+    /* LDY abs,X */
+        _M_ABXY_RDX(0xBC, _LDY, c->X)
     /* LDA abs,X */
         _M_ABXY_RD(0xBD, _LDA, c->X)
-    /* TODO: BE LDX abs,Y */
-        _W65C816_TODO(0xBE)
+    /* LDX abs,Y */
+        _M_ABXY_RDX(0xBE, _LDX, c->Y)
     /* LDA al,X */
         _M_ABLX_RD(0xBF, _LDA)
-    /* TODO: C0 CPY # */
-        _W65C816_TODO(0xC0)
+    /* CPY # */
+        _M_IMM_X(0xC0, _CPY)
     /* CMP (dp,X) */
         _M_IDX_RD(0xC1, _CMPA)
-    /* TODO: C2 REP # */
-        _W65C816_TODO(0xC2)
+    /* REP # */
+        _M_IMM_FLAGS(0xC2, 0)
     /* CMP sr,S */
         _M_SR_RD(0xC3, _CMPA)
-    /* TODO: C4 CPY dp */
-        _W65C816_TODO(0xC4)
+    /* CPY dp */
+        _M_DP_RDX(0xC4, _CPY)
     /* CMP dp */
         _M_DP_RD(0xC5, _CMPA)
     /* DEC dp */
         _M_DP_RMW(0xC6, _RMW_DEC)
     /* CMP [dp] */
         _M_IDL_RD(0xC7, _CMPA)
-    /* TODO: C8 INY */
-        _W65C816_TODO(0xC8)
+    /* INY */
+        _M_IMPLIED(0xC8, _INY();)
     /* CMP # */
         _M_IMM_RD(0xC9, _CMPA)
-    /* TODO: CA DEX */
-        _W65C816_TODO(0xCA)
+    /* DEX */
+        _M_IMPLIED(0xCA, _DEX();)
     /* TODO: CB WAI */
         _W65C816_TODO(0xCB)
-    /* TODO: CC CPY abs */
-        _W65C816_TODO(0xCC)
+    /* CPY abs */
+        _M_ABS_RDX(0xCC, _CPY)
     /* CMP abs */
         _M_ABS_RD(0xCD, _CMPA)
     /* DEC abs */
@@ -1576,20 +1750,20 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _M_DPIND_RD(0xD2, _CMPA)
     /* CMP (sr,S),Y */
         _M_SRIY_RD(0xD3, _CMPA)
-    /* TODO: D4 PEI */
-        _W65C816_TODO(0xD4)
+    /* PEI */
+        _M_PEI(0xD4)
     /* CMP dp,X */
         _M_DPXY_RD(0xD5, _CMPA, c->X)
     /* DEC dp,X */
         _M_DPXY_RMW(0xD6, _RMW_DEC, c->X)
     /* CMP [dp],Y */
         _M_IDLY_RD(0xD7, _CMPA)
-    /* TODO: D8 CLD */
-        _W65C816_TODO(0xD8)
+    /* CLD */
+        _M_IMPLIED(0xD8, c->P&=(uint8_t)~W65C816_DF;)
     /* CMP abs,Y */
         _M_ABXY_RD(0xD9, _CMPA, c->Y)
-    /* TODO: DA PHX */
-        _W65C816_TODO(0xDA)
+    /* PHX */
+        _M_PUSH_W(0xDA, c->X, _X8())
     /* TODO: DB STP */
         _W65C816_TODO(0xDB)
     /* JML (al) */
@@ -1600,32 +1774,34 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _M_ABXY_RMW(0xDE, _RMW_DEC, c->X)
     /* CMP al,X */
         _M_ABLX_RD(0xDF, _CMPA)
-    /* TODO: E0 CPX # */
-        _W65C816_TODO(0xE0)
+    /* CPX # */
+        _M_IMM_X(0xE0, _CPX)
     /* SBC (dp,X) */
         _M_IDX_RD(0xE1, _SBC)
-    /* TODO: E2 SEP # */
-        _W65C816_TODO(0xE2)
+    /* SEP # */
+        _M_IMM_FLAGS(0xE2, 1)
     /* SBC sr,S */
         _M_SR_RD(0xE3, _SBC)
-    /* TODO: E4 CPX dp */
-        _W65C816_TODO(0xE4)
+    /* CPX dp */
+        _M_DP_RDX(0xE4, _CPX)
     /* SBC dp */
         _M_DP_RD(0xE5, _SBC)
     /* INC dp */
         _M_DP_RMW(0xE6, _RMW_INC)
     /* SBC [dp] */
         _M_IDL_RD(0xE7, _SBC)
-    /* TODO: E8 INX */
-        _W65C816_TODO(0xE8)
+    /* INX */
+        _M_IMPLIED(0xE8, _INX();)
     /* SBC # */
         _M_IMM_RD(0xE9, _SBC)
     /* NOP */
         _M_IMPLIED(0xEA, ;)
-    /* TODO: EB XBA */
-        _W65C816_TODO(0xEB)
-    /* TODO: EC CPX abs */
-        _W65C816_TODO(0xEC)
+    /* XBA (3 cycles) */
+        case (0xEB<<4)|0: _DUMMY(); break; \
+        case (0xEB<<4)|1: _TR_XBA(); _DUMMY(); break; \
+        case (0xEB<<4)|2: _FETCH(); break;
+    /* CPX abs */
+        _M_ABS_RDX(0xEC, _CPX)
     /* SBC abs */
         _M_ABS_RD(0xED, _SBC)
     /* INC abs */
@@ -1640,22 +1816,24 @@ uint64_t w65c816_tick(w65c816_t* c, uint64_t pins) {
         _M_DPIND_RD(0xF2, _SBC)
     /* SBC (sr,S),Y */
         _M_SRIY_RD(0xF3, _SBC)
-    /* TODO: F4 PEA */
-        _W65C816_TODO(0xF4)
+    /* PEA */
+        _M_PEA(0xF4)
     /* SBC dp,X */
         _M_DPXY_RD(0xF5, _SBC, c->X)
     /* INC dp,X */
         _M_DPXY_RMW(0xF6, _RMW_INC, c->X)
     /* SBC [dp],Y */
         _M_IDLY_RD(0xF7, _SBC)
-    /* TODO: F8 SED */
-        _W65C816_TODO(0xF8)
+    /* SED */
+        _M_IMPLIED(0xF8, c->P|=(uint8_t)W65C816_DF;)
     /* SBC abs,Y */
         _M_ABXY_RD(0xF9, _SBC, c->Y)
-    /* TODO: FA PLX */
-        _W65C816_TODO(0xFA)
-    /* TODO: FB XCE */
-        _W65C816_TODO(0xFB)
+    /* PLX */
+        _M_PULL_W(0xFA, _PLX8, _PLX16, _X8())
+    /* XCE (the C<->E swap becomes visible on the E pin with the next bus
+       cycle, so the internal cycle still shows the old E state) */
+        case (0xFB<<4)|0: _DUMMY(); break; \
+        case (0xFB<<4)|1: { uint8_t oe=c->E; _TR_XCE_PREP(); if (oe) { c->P|=(uint8_t)W65C816_CF; } else { c->P&=(uint8_t)~W65C816_CF; } _FETCH(); } break;
     /* JSR (abs,X) */
         _M_JSR_INDX(0xFC)
     /* SBC abs,X */
