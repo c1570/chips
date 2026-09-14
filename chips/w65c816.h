@@ -4,13 +4,10 @@
 
     WDC W65C816 CPU emulator.
 
-    Project repo: https://github.com/floooh/chips/
-
-    NOTE: this file is hand-written (m6502.h is code-generated from the
-    codegen directory, this may or may not happen for the 65816 too).
+    Project repo: https://github.com/c1570/chips/
 
     Implementation status: complete. All 256 opcodes pass the full
-    SingleStepTests_65816 suite (5.12 million cycle-exact tests in
+    SingleStepTests 65816 suite (5.12 million cycle-exact tests in
     native and emulation mode). The interrupt pins (IRQ/NMI/ABORT/RES),
     RDY and the WAI/STP halt states are implemented following the WDC
     datasheet, they are not covered by the test suite.
@@ -103,7 +100,7 @@
 
     ## zlib/libpng license
 
-    Copyright (c) 2026 Andre Weissflog
+    Copyright (c) 2026
     This software is provided 'as-is', without any express or implied warranty.
     In no event will the authors be held liable for any damages arising from the
     use of this software.
