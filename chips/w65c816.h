@@ -463,7 +463,8 @@ bool w65c816_e(w65c816_t* cpu) { return 0 != cpu->E; }
     _TAIL_RD(op, 4, exec, ((c->AD+1)&0xFFFFFF))
 
 /* (dp,X): 6 cycles + 1 if D low byte != 0 + 1 if 16-bit
-   (same 8-bit-index wrap quirk on page-aligned D as dp,X)
+   (same 8-bit-index wrap quirk on page-aligned D as dp,X;
+   the pointer fetch itself also wraps inside the dp page)
 */
 #define _M_IDX_RD(op, exec) \
     case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); if (!(c->D&0xFF)) { c->IR++; } break; \
@@ -473,7 +474,7 @@ bool w65c816_e(w65c816_t* cpu) { return 0 != cpu->E; }
         else { c->AA=(uint16_t)(dpb+c->D+c->X); } } \
         _DUMMY_PP(); break; \
     case ((op)<<4)|3: _SA(c->AA); _VDA(); break; \
-    case ((op)<<4)|4: c->TA=_GD(); _SA((c->AA+1)&0xFFFF); _VDA(); break; \
+    case ((op)<<4)|4: c->TA=_GD(); if (c->E && !(c->D&0xFF)) { _SA((c->D&0xFF00)|((c->AA+1)&0xFF)); } else { _SA((c->AA+1)&0xFFFF); } _VDA(); break; \
     case ((op)<<4)|5: c->TA|=((uint16_t)_GD())<<8; c->AD=((((uint32_t)c->DBR)<<16)|c->TA); _SA(c->AD); _VDA(); break; \
     _TAIL_RD(op, 6, exec, (((c->AD&0xFF0000u)|((c->AD+1)&0xFFFF))))
 
@@ -671,7 +672,7 @@ bool w65c816_e(w65c816_t* cpu) { return 0 != cpu->E; }
         else { c->AA=(uint16_t)(dpb+c->D+c->X); } } \
         _DUMMY_PP(); break; \
     case ((op)<<4)|3: _SA(c->AA); _VDA(); break; \
-    case ((op)<<4)|4: c->TA=_GD(); _SA((c->AA+1)&0xFFFF); _VDA(); break; \
+    case ((op)<<4)|4: c->TA=_GD(); if (c->E && !(c->D&0xFF)) { _SA((c->D&0xFF00)|((c->AA+1)&0xFF)); } else { _SA((c->AA+1)&0xFFFF); } _VDA(); break; \
     case ((op)<<4)|5: c->TA|=((uint16_t)_GD())<<8; c->AD=((((uint32_t)c->DBR)<<16)|c->TA); _SA(c->AD); _VDA(); _SD((reg)&0xFF); _WR(); if (w8) { c->IR++; } break; \
     case ((op)<<4)|6: _SA(((c->AD&0xFF0000u)|((c->AD+1)&0xFFFF))); _VDA(); _SD((((reg)>>8)&0xFF)); _WR(); break; \
     case ((op)<<4)|7: _FETCH(); break;
@@ -924,8 +925,8 @@ bool w65c816_e(w65c816_t* cpu) { return 0 != cpu->E; }
    pointer (which lives in the program bank) */
 #define _M_JSR_INDX(op) \
     case ((op)<<4)|0: _SA(_PB_PC()); c->PC++; _VPA(); break; \
-    case ((op)<<4)|1: c->TA=_GD(); _SA(_SH()); _VDA(); _SD((uint8_t)(c->PC>>8)); _WR(); c->S=_SPADD(-1); break; \
-    case ((op)<<4)|2: _SA(_SH()); _VDA(); _SD((uint8_t)c->PC); _WR(); c->S=_SPADD(-1); break; \
+    case ((op)<<4)|1: c->TA=_GD(); _SA(_SH()); _VDA(); _SD((uint8_t)(c->PC>>8)); _WR(); c->S=(uint16_t)(c->S-1); break; \
+    case ((op)<<4)|2: _SA(c->S); _VDA(); _SD((uint8_t)c->PC); _WR(); c->S=_SPADD(-1); break; \
     case ((op)<<4)|3: _SA(_PB_PC()); _VPA(); c->PC++; break; \
     case ((op)<<4)|4: c->TB=_GD(); c->TA=(uint16_t)(c->TA|(((uint16_t)c->TB)<<8)); c->AA=(uint16_t)(c->TA+c->X); _DUMMY_PP(); break; \
     case ((op)<<4)|5: _SA((((uint32_t)c->PBR)<<16)|c->AA); _VDA(); break; \
