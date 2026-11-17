@@ -56,6 +56,15 @@ static char* readFileSync(const char* path, ...) {
   return buf;
 }
 
+// `fs.existsSync` — guards optional side files (e.g. tryLoadDisassembly's
+// adjacent .dis); readFileSync aborts on missing files and catch has no C form.
+static bool existsSync(const char* path) {
+  FILE* f = fopen(path, "rb");
+  if (!f) return false;
+  fclose(f);
+  return true;
+}
+
 // Real UF2 (github.com/microsoft/uf2) block decoder, hand-written because cts2c
 // has no way to transpile the third-party `uf2` npm package's decodeBlock() —
 // load-firmware.ts's loadFirmwareFromUF2 is recognized by name (see
@@ -292,6 +301,7 @@ typedef struct IRPChipVTable {
   bool (*gpioRawOutputEnable)(void* self, int32_t);
   void (*gpioInputValueHasBeenSet)(void* self, int32_t);
   void (*updatePioActiveLists)(void* self);
+  void (*invalidateFlashDecode)(void* self, int32_t, int32_t);
   int32_t (*readUint32)(void* self, int32_t);
   int32_t (*readUint16)(void* self, int32_t);
   int32_t (*readUint8)(void* self, int32_t);
@@ -337,6 +347,9 @@ static inline void IRPChip_gpioInputValueHasBeenSet(IRPChip p, int32_t index) {
 }
 static inline void IRPChip_updatePioActiveLists(IRPChip p) {
   return p.vtable->updatePioActiveLists(p.obj);
+}
+static inline void IRPChip_invalidateFlashDecode(IRPChip p, int32_t address, int32_t len) {
+  return p.vtable->invalidateFlashDecode(p.obj, address, len);
 }
 static inline int32_t IRPChip_readUint32(IRPChip p, int32_t address) {
   return p.vtable->readUint32(p.obj, address);
@@ -637,6 +650,15 @@ typedef enum {
 } PWMDivMode;
 
 typedef enum {
+  SpiPhase_Idle = 0,
+  SpiPhase_Addr = 1,
+  SpiPhase_Dummy = 2,
+  SpiPhase_Data = 3,
+  SpiPhase_Status = 4,
+  SpiPhase_Jedec = 5,
+} SpiPhase;
+
+typedef enum {
   SIELineState_SE0 = 0,
   SIELineState_J = 1,
   SIELineState_K = 2,
@@ -647,44 +669,6 @@ typedef enum {
   ExecutionModeRiscv_Mode_Machine = 0,
   ExecutionModeRiscv_Mode_User = 1,
 } ExecutionModeRiscv;
-
-typedef enum {
-  C_C_RD = 3968,
-  C_C_RS1 = 3968,
-  C_C_RS2 = 124,
-  C_C_RD_S = 28,
-  C_C_RS1_S = 896,
-  C_C_RS2_S = 28,
-  C_CR_FUNCT4 = 61440,
-  C_CI_MASK_12 = 4096,
-  C_CI_MASK_6_4 = 112,
-  C_CI_MASK_3_2 = 12,
-  C_CSS_IMM_5_2 = 7680,
-  C_CSS_IMM_7_6 = 384,
-  C_CIW_IMM_5_4 = 6144,
-  C_CIW_IMM_9_6 = 1920,
-  C_CIW_IMM_2 = 64,
-  C_CIW_IMM_3 = 32,
-  C_CLWSW_IMM_5_3 = 7168,
-  C_CLWSW_IMM_2 = 64,
-  C_CLWSW_IMM_6 = 32,
-  C_CS_FUNCT6 = 64512,
-  C_CS_FUNCT2 = 96,
-  C_CB_FUNCT2 = 3072,
-  C_CB_OFFSET_8 = 4096,
-  C_CB_OFFSET_4_3 = 3072,
-  C_CB_OFFSET_7_6 = 96,
-  C_CB_OFFSET_2_1 = 24,
-  C_CB_OFFSET_5 = 4,
-  C_CJ_OFFSET_11 = 4096,
-  C_CJ_OFFSET_4 = 2048,
-  C_CJ_OFFSET_9_8 = 1536,
-  C_CJ_OFFSET_10 = 256,
-  C_CJ_OFFSET_6 = 128,
-  C_CJ_OFFSET_7 = 64,
-  C_CJ_OFFSET_3_1 = 56,
-  C_CJ_OFFSET_5 = 4,
-} C;
 
 typedef enum {
   DataDirection_HostToDevice = 0,
@@ -822,6 +806,118 @@ enum { SCB_MVFR0 = (61248) };
 enum { SCB_MVFR1 = (61252) };
 enum { SCB_MVFR2 = (61256) };
 enum { RISCV_RESET_VECTOR = (32252) };
+enum { T_INVALID = (0) };
+enum { T_LB = (1) };
+enum { T_LH = (2) };
+enum { T_LW = (3) };
+enum { T_LBU = (4) };
+enum { T_LHU = (5) };
+enum { T_FENCE = (6) };
+enum { T_ADDI = (7) };
+enum { T_SLLI = (8) };
+enum { T_BSETI = (9) };
+enum { T_BCLRI = (10) };
+enum { T_BINVI = (11) };
+enum { T_CTZ = (12) };
+enum { T_CPOP = (13) };
+enum { T_SEXT_H = (14) };
+enum { T_SEXT_B = (15) };
+enum { T_CLZ = (16) };
+enum { T_ZIP = (17) };
+enum { T_UNZIP = (18) };
+enum { T_SLTI = (19) };
+enum { T_SLTIU = (20) };
+enum { T_XORI = (21) };
+enum { T_ORI = (22) };
+enum { T_ANDI = (23) };
+enum { T_SRLI = (24) };
+enum { T_SRAI = (25) };
+enum { T_BEXTI = (26) };
+enum { T_RORI = (27) };
+enum { T_REV8 = (28) };
+enum { T_BREV8 = (29) };
+enum { T_ORC_B = (30) };
+enum { T_ZEXT_H = (31) };
+enum { T_SB = (32) };
+enum { T_SH = (33) };
+enum { T_SW = (34) };
+enum { T_LR_W = (35) };
+enum { T_SC_W = (36) };
+enum { T_AMOADD_W = (37) };
+enum { T_AMOSWAP_W = (38) };
+enum { T_AMOXOR_W = (39) };
+enum { T_AMOOR_W = (40) };
+enum { T_AMOAND_W = (41) };
+enum { T_AMOMIN_W = (42) };
+enum { T_AMOMAX_W = (43) };
+enum { T_AMOMINU_W = (44) };
+enum { T_AMOMAXU_W = (45) };
+enum { T_ADD = (46) };
+enum { T_SUB = (47) };
+enum { T_MUL = (48) };
+enum { T_SLL = (49) };
+enum { T_MULH = (50) };
+enum { T_BSET = (51) };
+enum { T_BCLR = (52) };
+enum { T_ROL = (53) };
+enum { T_BINV = (54) };
+enum { T_SLT = (55) };
+enum { T_MULHSU = (56) };
+enum { T_SH1ADD = (57) };
+enum { T_SLTU = (58) };
+enum { T_MULHU = (59) };
+enum { T_XOR = (60) };
+enum { T_DIV = (61) };
+enum { T_SH2ADD = (62) };
+enum { T_PACK = (63) };
+enum { T_MIN = (64) };
+enum { T_XNOR = (65) };
+enum { T_SRL = (66) };
+enum { T_MINU = (67) };
+enum { T_SRA = (68) };
+enum { T_BEXT = (69) };
+enum { T_ROR = (70) };
+enum { T_DIVU = (71) };
+enum { T_OR = (72) };
+enum { T_REM = (73) };
+enum { T_MAX = (74) };
+enum { T_ORN = (75) };
+enum { T_SH3ADD = (76) };
+enum { T_AND = (77) };
+enum { T_ANDN = (78) };
+enum { T_PACKH = (79) };
+enum { T_MAXU = (80) };
+enum { T_REMU = (81) };
+enum { T_H3_BLOCK = (82) };
+enum { T_H3_UNBLOCK = (83) };
+enum { T_LUI = (84) };
+enum { T_AUIPC = (85) };
+enum { T_BEQ = (86) };
+enum { T_BNE = (87) };
+enum { T_BLT = (88) };
+enum { T_BGE = (89) };
+enum { T_BLTU = (90) };
+enum { T_BGEU = (91) };
+enum { T_JALR = (92) };
+enum { T_JAL = (93) };
+enum { T_MRET = (94) };
+enum { T_ECALL = (95) };
+enum { T_EBREAK = (96) };
+enum { T_WFI = (97) };
+enum { T_CSRRW = (98) };
+enum { T_CSRRS = (99) };
+enum { T_CSRRC = (100) };
+enum { T_CSRWI = (101) };
+enum { T_CSRRSI = (102) };
+enum { T_CSRRCI = (103) };
+enum { T_H3_BEXTM = (104) };
+enum { T_H3_BEXTMI = (105) };
+enum { T_CM_PUSH = (106) };
+enum { T_CM_POP = (107) };
+enum { T_CM_POPRETZ = (108) };
+enum { T_CM_POPRET = (109) };
+enum { T_CM_MVSA01 = (110) };
+enum { T_CM_MVA01S = (111) };
 enum { FLASH_START_ADDRESS = (268435456) };
 enum { FLASH_END_ADDRESS = (335544320) };
 enum { RAM_START_ADDRESS = (536870912) };
@@ -879,26 +975,41 @@ typedef struct GDBServer GDBServer;
 typedef struct GDBTCPServer GDBTCPServer;
 typedef struct RISCVGDBServer RISCVGDBServer;
 typedef struct GPIOPin GPIOPin;
+typedef struct GPIOPin__RP2040 GPIOPin__RP2040;
 typedef struct InterpolatorConfig InterpolatorConfig;
 typedef struct Interpolator Interpolator;
 typedef struct RP2350McpServer RP2350McpServer;
 typedef struct ADCSampleAlarm ADCSampleAlarm;
 typedef struct ADCMultiShotAlarm ADCMultiShotAlarm;
 typedef struct RPADC RPADC;
+typedef struct ADCSampleAlarm__RP2040 ADCSampleAlarm__RP2040;
+typedef struct ADCMultiShotAlarm__RP2040 ADCMultiShotAlarm__RP2040;
+typedef struct RPADC__RP2040 RPADC__RP2040;
 typedef struct RPBootRAM RPBootRAM;
 typedef struct RPBUSCTRL RPBUSCTRL;
+typedef struct RPBUSCTRL__RP2040 RPBUSCTRL__RP2040;
 typedef struct RPClocks RPClocks;
+typedef struct RPClocks__RP2040 RPClocks__RP2040;
 typedef struct RPDMAChannel RPDMAChannel;
 typedef struct RPDMA RPDMA;
+typedef struct RP2350DMAChannel RP2350DMAChannel;
+typedef struct RP2350DMA RP2350DMA;
 typedef struct RPI2C RPI2C;
+typedef struct RPI2C__RP2040 RPI2C__RP2040;
 typedef struct RPIO RPIO;
+typedef struct RPIOQSPI RPIOQSPI;
+typedef struct RP2350IO RP2350IO;
 typedef struct RP2350OTP RP2350OTP;
 typedef struct RP2350OTPData RP2350OTPData;
 typedef struct RPPADS RPPADS;
+typedef struct RP2350PADS RP2350PADS;
 typedef struct BasePeripheral BasePeripheral;
 typedef struct UnimplementedPeripheral UnimplementedPeripheral;
+typedef struct BasePeripheral__RP2040 BasePeripheral__RP2040;
 typedef struct StateMachine StateMachine;
 typedef struct RPPIO RPPIO;
+typedef struct StateMachine__RP2040 StateMachine__RP2040;
+typedef struct RPPIO__RP2040 RPPIO__RP2040;
 typedef struct RP2350PLL RP2350PLL;
 typedef struct RPPOWMAN RPPOWMAN;
 typedef struct RP2350POWMAN RP2350POWMAN;
@@ -911,23 +1022,38 @@ typedef struct PWMChannelBAlarmCallback PWMChannelBAlarmCallback;
 typedef struct PWMChannelBottomAlarmCallback PWMChannelBottomAlarmCallback;
 typedef struct PWMChannel PWMChannel;
 typedef struct RPPWM RPPWM;
+typedef struct PWMChannelAAlarmCallback__RP2040 PWMChannelAAlarmCallback__RP2040;
+typedef struct PWMChannelBAlarmCallback__RP2040 PWMChannelBAlarmCallback__RP2040;
+typedef struct PWMChannelBottomAlarmCallback__RP2040 PWMChannelBottomAlarmCallback__RP2040;
+typedef struct PWMChannel__RP2040 PWMChannel__RP2040;
+typedef struct RPPWM__RP2040 RPPWM__RP2040;
 typedef struct RPReset RPReset;
+typedef struct RPReset__RP2040 RPReset__RP2040;
 typedef struct RP2040RTC RP2040RTC;
 typedef struct RP2350SHA256 RP2350SHA256;
 typedef struct RPSPI RPSPI;
+typedef struct RPSPI__RP2040 RPSPI__RP2040;
 typedef struct RPSSI RPSSI;
 typedef struct RP2040SysCfg RP2040SysCfg;
 typedef struct RP2350SysCfg RP2350SysCfg;
 typedef struct RP2040SysInfo RP2040SysInfo;
 typedef struct RP2350SysInfo RP2350SysInfo;
 typedef struct RPTBMAN RPTBMAN;
+typedef struct RPTBMAN__RP2040 RPTBMAN__RP2040;
 typedef struct RPTimerAlarm RPTimerAlarm;
 typedef struct RPTimer RPTimer;
+typedef struct RPTimerAlarm__RP2040 RPTimerAlarm__RP2040;
+typedef struct RPTimer__RP2040 RPTimer__RP2040;
 typedef struct RP2350TRNG RP2350TRNG;
 typedef struct RPUART RPUART;
+typedef struct RPUART__RP2040 RPUART__RP2040;
 typedef struct USBEndpointAlarm USBEndpointAlarm;
 typedef struct RPUSBController RPUSBController;
+typedef struct USBEndpointAlarm__RP2040 USBEndpointAlarm__RP2040;
+typedef struct RPUSBController__RP2040 RPUSBController__RP2040;
+typedef struct RP2040VregAndChipReset RP2040VregAndChipReset;
 typedef struct RPWatchdog RPWatchdog;
+typedef struct RPWatchdog__RP2040 RPWatchdog__RP2040;
 typedef struct RPXIPQMI RPXIPQMI;
 typedef struct RPXIP RPXIP;
 typedef struct CPU CPU;
@@ -935,9 +1061,12 @@ typedef struct RP2040 RP2040;
 typedef struct RP2350 RP2350;
 typedef struct Simulator Simulator;
 typedef struct RPSIOCore RPSIOCore;
+typedef struct RPSIOCore__RP2040 RPSIOCore__RP2040;
 typedef struct RPSIO RPSIO;
 typedef struct MtimecmpAlarmCallback MtimecmpAlarmCallback;
+typedef struct RP2350SIO RP2350SIO;
 typedef struct USBCDC USBCDC;
+typedef struct USBCDC__RP2040 USBCDC__RP2040;
 typedef struct EmulatorController EmulatorController;
 typedef struct FIFO FIFO;
 typedef struct ConsoleLogger ConsoleLogger;
@@ -948,6 +1077,7 @@ typedef struct ImmCarry ImmCarry;
 typedef struct Mul64Result Mul64Result;
 typedef struct FpResult FpResult;
 typedef struct IrqTarget IrqTarget;
+typedef struct IrqTarget__RP2040 IrqTarget__RP2040;
 typedef struct RegionPair RegionPair;
 typedef struct M33CoreState M33CoreState;
 typedef struct ISPIDMAChannels ISPIDMAChannels;
@@ -962,7 +1092,6 @@ typedef struct ParsedArgs ParsedArgs;
 typedef struct ToolDef ToolDef;
 typedef struct RP2040Options RP2040Options;
 typedef struct RP2350Options RP2350Options;
-typedef struct EndpointNumbers EndpointNumbers;
 typedef struct ISetupPacketParams ISetupPacketParams;
 typedef struct LoadFirmwareOptions LoadFirmwareOptions;
 typedef struct LoadFirmwareResult LoadFirmwareResult;
@@ -977,24 +1106,39 @@ typedef void (*CortexM33Core_blTaken_Fn)(void*, CortexM33Core*, bool);
 typedef void (*GDBServer_stopTarget_Fn)(void*);
 typedef void (*GDBServer_onInterrupt_Fn)(void*);
 typedef void (*RPADC_onADCRead_Fn)(void*, int32_t);
+typedef void (*RPADC__RP2040_onADCRead_Fn)(void*, int32_t);
 typedef void (*RPI2C_onStart_Fn)(void*, bool);
 typedef void (*RPI2C_onConnect_Fn)(void*, int32_t, I2CMode);
 typedef void (*RPI2C_onWriteByte_Fn)(void*, int32_t);
 typedef void (*RPI2C_onReadByte_Fn)(void*, bool);
 typedef void (*RPI2C_onStop_Fn)(void*);
+typedef void (*RPI2C__RP2040_onStart_Fn)(void*, bool);
+typedef void (*RPI2C__RP2040_onConnect_Fn)(void*, int32_t, I2CMode);
+typedef void (*RPI2C__RP2040_onWriteByte_Fn)(void*, int32_t);
+typedef void (*RPI2C__RP2040_onReadByte_Fn)(void*, bool);
+typedef void (*RPI2C__RP2040_onStop_Fn)(void*);
 typedef void (*RPSPI_onTransmit_Fn)(void*, int32_t);
+typedef void (*RPSPI__RP2040_onTransmit_Fn)(void*, int32_t);
 typedef void (*RPUART_onByte_Fn)(void*, int32_t);
 typedef void (*RPUART_onBaudRateChange_Fn)(void*, int32_t);
+typedef void (*RPUART__RP2040_onByte_Fn)(void*, int32_t);
+typedef void (*RPUART__RP2040_onBaudRateChange_Fn)(void*, int32_t);
 typedef void (*RPUSBController_onUSBEnabled_Fn)(void*);
 typedef void (*RPUSBController_onResetReceived_Fn)(void*);
-typedef void (*RPUSBController_onEndpointWrite_Fn)(void*, int32_t, uint8_t*);
+typedef void (*RPUSBController_onEndpointWrite_Fn)(void*, int32_t, uint8_t*, int32_t);
 typedef void (*RPUSBController_onEndpointRead_Fn)(void*, int32_t, int32_t);
+typedef void (*RPUSBController__RP2040_onUSBEnabled_Fn)(void*);
+typedef void (*RPUSBController__RP2040_onResetReceived_Fn)(void*);
+typedef void (*RPUSBController__RP2040_onEndpointWrite_Fn)(void*, int32_t, uint8_t*, int32_t);
+typedef void (*RPUSBController__RP2040_onEndpointRead_Fn)(void*, int32_t, int32_t);
 typedef void (*RPWatchdog_onWatchdogTrigger_Fn)(void*);
-typedef void (*RP2040_onBreak_Fn)(void*, int32_t);
+typedef void (*RPWatchdog__RP2040_onWatchdogTrigger_Fn)(void*);
 typedef void (*RP2040_onTrace_Fn)(void*, int32_t, int32_t, const char*);
 typedef void (*RP2350_onTrace_Fn)(void*, int32_t, int32_t, const char*);
-typedef void (*USBCDC_onSerialData_Fn)(void*, uint8_t*);
+typedef void (*USBCDC_onSerialData_Fn)(void*, uint8_t*, int32_t);
 typedef void (*USBCDC_onDeviceConnected_Fn)(void*);
+typedef void (*USBCDC__RP2040_onSerialData_Fn)(void*, uint8_t*, int32_t);
+typedef void (*USBCDC__RP2040_onDeviceConnected_Fn)(void*);
 
 // ─── Struct definitions ───
 struct ClockAlarm {
@@ -1046,7 +1190,7 @@ struct CortexM0Core {
   CortexM0Core* otherCore;
   CortexM0Core_blTaken_Fn blTaken_fn;
   void* blTaken_ctx;
-  RP2040* rp2040;
+  RP2040* rpchip;
   const char* coreLabel;
   int32_t coreNumber;
   const ICpuCoreVTable* __vtable_ICpuCore;
@@ -1150,7 +1294,22 @@ struct GPIOPin {
   int32_t irqStatus;
   GPIOPinListener* listeners;
   int32_t listeners_count;
-  RP2350* rp2040;
+  RP2350* rpchip;
+  int32_t index;
+  const char* name;
+};
+
+struct GPIOPin__RP2040 {
+  bool rawInputValue;
+  GPIOPinState lastValue;
+  int32_t ctrl;
+  int32_t padValue;
+  int32_t irqEnableMask;
+  int32_t irqForceMask;
+  int32_t irqStatus;
+  GPIOPinListener* listeners;
+  int32_t listeners_count;
+  RP2040* rpchip;
   int32_t index;
   const char* name;
 };
@@ -1222,7 +1381,7 @@ struct ADCMultiShotAlarm {
 
 struct BasePeripheral {
   int32_t rawWriteValue;
-  RP2350* rp2040;
+  RP2350* rpchip;
   const char* name;
   const PeripheralVTable* __vtable_Peripheral;
 };
@@ -1234,6 +1393,47 @@ struct RPADC {
   int32_t sampleTime;
   int32_t* channelValues;
   RPADC_onADCRead_Fn onADCRead_fn;
+  void* onADCRead_ctx;
+  FIFO* fifo;
+  int32_t cs;
+  int32_t fcs;
+  int32_t clockDiv;
+  int32_t intEnable;
+  int32_t intForce;
+  int32_t result;
+  bool busy;
+  bool err;
+  int32_t currentChannel;
+  IAlarm sampleAlarm;
+  IAlarm multiShotAlarm;
+  int32_t adc_interrupt;
+  int32_t adc_dreq;
+};
+
+struct ADCSampleAlarm__RP2040 {
+  RPADC__RP2040* adc;
+  const AlarmCallbackVTable* __vtable_AlarmCallback;
+};
+
+struct ADCMultiShotAlarm__RP2040 {
+  RPADC__RP2040* adc;
+  const AlarmCallbackVTable* __vtable_AlarmCallback;
+};
+
+struct BasePeripheral__RP2040 {
+  int32_t rawWriteValue;
+  RP2040* rpchip;
+  const char* name;
+  const PeripheralVTable* __vtable_Peripheral;
+};
+
+struct RPADC__RP2040 {
+  BasePeripheral__RP2040 base; // parent class (must be first member)
+  int32_t numChannels;
+  int32_t resolution;
+  int32_t sampleTime;
+  int32_t* channelValues;
+  RPADC__RP2040_onADCRead_Fn onADCRead_fn;
   void* onADCRead_ctx;
   FIFO* fifo;
   int32_t cs;
@@ -1265,8 +1465,22 @@ struct RPBUSCTRL {
   int32_t* perfSel;
 };
 
+struct RPBUSCTRL__RP2040 {
+  BasePeripheral__RP2040 base; // parent class (must be first member)
+  int32_t voltageSelect;
+  int32_t* perfCtr;
+  int32_t* perfSel;
+};
+
 struct RPClocks {
   BasePeripheral base; // parent class (must be first member)
+  int32_t refCtrl;
+  int32_t sysCtrl;
+  int32_t clkFc0StatusOffset;
+};
+
+struct RPClocks__RP2040 {
+  BasePeripheral__RP2040 base; // parent class (must be first member)
   int32_t refCtrl;
   int32_t sysCtrl;
   int32_t clkFc0StatusOffset;
@@ -1286,15 +1500,14 @@ struct RPDMAChannel {
   int32_t ringMask;
   IAlarm transferAlarm;
   RPDMA* dma;
-  RP2350* rp2040;
+  RP2040* rpchip;
   int32_t index;
-  int32_t transMode;
   const AlarmCallbackVTable* __vtable_AlarmCallback;
 };
 
 struct RPDMA {
-  BasePeripheral base; // parent class (must be first member)
-  RPDMAChannel** channels;
+  BasePeripheral__RP2040 base; // parent class (must be first member)
+  RPDMAChannel* channels[12];
   int32_t intRaw;
   int32_t intEnable0;
   int32_t intForce0;
@@ -1305,10 +1518,43 @@ struct RPDMA {
   int32_t timer2;
   int32_t timer3;
   bool* dreq;
-  RP2350* rp2040;
+  RP2040* rpchip;
   int32_t dma_irq_base;
+};
+
+struct RP2350DMAChannel {
+  int32_t ctrl;
+  int32_t readAddr;
+  int32_t writeAddr;
+  int32_t transCount;
+  int32_t dreqCounter;
+  int32_t transCountReload;
+  int32_t transMode;
+  int32_t treqValue;
+  int32_t dataSize;
+  TransferKind transferKind;
+  int32_t chainTo;
+  int32_t ringMask;
+  IAlarm transferAlarm;
+  RP2350DMA* dma;
+  RP2350* rpchip;
+  int32_t index;
+  const AlarmCallbackVTable* __vtable_AlarmCallback;
+};
+
+struct RP2350DMA {
+  BasePeripheral base; // parent class (must be first member)
+  RP2350DMAChannel** channels;
+  int32_t intRaw;
   int32_t* intEnable;
   int32_t* intForce;
+  int32_t timer0;
+  int32_t timer1;
+  int32_t timer2;
+  int32_t timer3;
+  bool* dreq;
+  RP2350* rpchip;
+  int32_t dma_irq_base;
 };
 
 struct RPI2C {
@@ -1346,7 +1592,51 @@ struct RPI2C {
   int32_t irq;
 };
 
+struct RPI2C__RP2040 {
+  BasePeripheral__RP2040 base; // parent class (must be first member)
+  I2CState state;
+  bool busy;
+  bool stop;
+  bool pendingRestart;
+  bool firstByte;
+  FIFO* rxFIFO;
+  FIFO* txFIFO;
+  RPI2C__RP2040_onStart_Fn onStart_fn;
+  void* onStart_ctx;
+  RPI2C__RP2040_onConnect_Fn onConnect_fn;
+  void* onConnect_ctx;
+  RPI2C__RP2040_onWriteByte_Fn onWriteByte_fn;
+  void* onWriteByte_ctx;
+  RPI2C__RP2040_onReadByte_Fn onReadByte_fn;
+  void* onReadByte_ctx;
+  RPI2C__RP2040_onStop_Fn onStop_fn;
+  void* onStop_ctx;
+  int32_t enable;
+  int32_t rxThreshold;
+  int32_t txThreshold;
+  int32_t control;
+  int32_t ssClockHighPeriod;
+  int32_t ssClockLowPeriod;
+  int32_t fsClockHighPeriod;
+  int32_t fsClockLowPeriod;
+  int32_t targetAddress;
+  int32_t slaveAddress;
+  int32_t abortSource;
+  int32_t intRaw;
+  int32_t intEnable;
+  int32_t irq;
+};
+
 struct RPIO {
+  BasePeripheral__RP2040 base; // parent class (must be first member)
+};
+
+struct RPIOQSPI {
+  BasePeripheral base; // parent class (must be first member)
+  uint32_t* regs;
+};
+
+struct RP2350IO {
   BasePeripheral base; // parent class (must be first member)
 };
 
@@ -1362,6 +1652,14 @@ struct RP2350OTPData {
 };
 
 struct RPPADS {
+  BasePeripheral__RP2040 base; // parent class (must be first member)
+  int32_t voltageSelect;
+  int32_t firstPadRegister;
+  int32_t lastPadRegister;
+  const char* bank;
+};
+
+struct RP2350PADS {
   BasePeripheral base; // parent class (must be first member)
   int32_t voltageSelect;
   int32_t firstPadRegister;
@@ -1405,7 +1703,7 @@ struct StateMachine {
   int32_t dreqRx;
   int32_t dreqTx;
   IrqTarget* irqTargetScratch;
-  RP2350* rp2040;
+  RP2350* rpchip;
   RPPIO* pio;
   int32_t index;
   int32_t fifoStat;
@@ -1415,6 +1713,70 @@ struct RPPIO {
   BasePeripheral base; // parent class (must be first member)
   __attribute__((aligned(8))) uint32_t instructions[32];
   StateMachine* machines[4];
+  int32_t machinesRunning;
+  int32_t fdebug;
+  int32_t inputSyncBypass;
+  int32_t irq;
+  int32_t isRp2040;
+  int32_t gpiobase;
+  int32_t pinValues;
+  int32_t pinDirections;
+  int32_t oldPinValues;
+  int32_t oldPinDirections;
+  void* runTimer;
+  int32_t irq_reg_offset;
+  int32_t irq0IntEnable;
+  int32_t irq0IntForce;
+  int32_t irq1IntEnable;
+  int32_t irq1IntForce;
+  int32_t firstIrq;
+  int32_t index;
+  int32_t dreqRx_base;
+  int32_t dreqTx_base;
+};
+
+struct StateMachine__RP2040 {
+  bool _enabled;
+  int32_t x;
+  int32_t y;
+  int32_t pc;
+  int32_t inputShiftReg;
+  int32_t inputShiftCount;
+  int32_t outputShiftReg;
+  int32_t outputShiftCount;
+  int32_t cycles;
+  int32_t execOpcode;
+  bool execValid;
+  int32_t nextPC;
+  int32_t clockDiv;
+  int32_t curClockPhase;
+  int32_t remainingDelay;
+  int32_t execCtrl;
+  int32_t shiftCtrl;
+  int32_t pinCtrl;
+  FIFO* rxFIFO;
+  FIFO* txFIFO;
+  int32_t outPinValues;
+  int32_t outPinDirection;
+  bool waiting;
+  WaitType waitType;
+  int32_t waitIndex;
+  bool waitPolarity;
+  int32_t waitDelay;
+  RPPIO__RP2040* waitTargetPio;
+  int32_t dreqRx;
+  int32_t dreqTx;
+  IrqTarget__RP2040* irqTargetScratch;
+  RP2040* rpchip;
+  RPPIO__RP2040* pio;
+  int32_t index;
+  int32_t fifoStat;
+};
+
+struct RPPIO__RP2040 {
+  BasePeripheral__RP2040 base; // parent class (must be first member)
+  __attribute__((aligned(8))) uint32_t instructions[32];
+  StateMachine__RP2040* machines[4];
   int32_t machinesRunning;
   int32_t fdebug;
   int32_t inputSyncBypass;
@@ -1458,7 +1820,7 @@ struct RP2350POWMAN {
 };
 
 struct RPPPB {
-  BasePeripheral base; // parent class (must be first member)
+  BasePeripheral__RP2040 base; // parent class (must be first member)
   bool systickCountFlag;
   bool systickClkSource;
   bool systickIntEnable;
@@ -1470,7 +1832,7 @@ struct RPPPB {
 
 struct SystickAlarmCallback {
   RPPPB2350* ppb;
-  RP2350* rp2040;
+  RP2350* rpchip;
   Timer32* systickTimer;
   int32_t coreIndex;
   const AlarmCallbackVTable* __vtable_AlarmCallback;
@@ -1536,7 +1898,60 @@ struct RPPWM {
   int32_t intForce;
   int32_t gpioValue;
   uint32_t gpioDirection;
-  RP2350* rp2040;
+  RP2350* rpchip;
+  int32_t pwm_wrap_irq;
+  int32_t pwm_dreq_base;
+};
+
+struct PWMChannelAAlarmCallback__RP2040 {
+  PWMChannel__RP2040* channel;
+  const AlarmCallbackVTable* __vtable_AlarmCallback;
+};
+
+struct PWMChannelBAlarmCallback__RP2040 {
+  PWMChannel__RP2040* channel;
+  const AlarmCallbackVTable* __vtable_AlarmCallback;
+};
+
+struct PWMChannelBottomAlarmCallback__RP2040 {
+  PWMChannel__RP2040* channel;
+  const AlarmCallbackVTable* __vtable_AlarmCallback;
+};
+
+struct PWMChannel__RP2040 {
+  Timer32* timer;
+  Timer32PeriodicAlarm* alarmA;
+  Timer32PeriodicAlarm* alarmB;
+  Timer32PeriodicAlarm* alarmBottom;
+  int32_t csr;
+  int32_t div;
+  int32_t cc;
+  int32_t top;
+  bool lastBValue;
+  bool countingUp;
+  bool ccUpdated;
+  bool topUpdated;
+  int32_t tickCounter;
+  PWMDivMode divMode;
+  int32_t pinA1;
+  int32_t pinB1;
+  int32_t pinA2;
+  int32_t pinB2;
+  RPPWM__RP2040* pwm;
+  SimulationClock* clock;
+  int32_t index;
+  int32_t en;
+};
+
+struct RPPWM__RP2040 {
+  BasePeripheral__RP2040 base; // parent class (must be first member)
+  PWMChannel__RP2040* channels[8];
+  int32_t intRaw;
+  int32_t intEnable;
+  int32_t intForce;
+  int32_t gpioValue;
+  uint32_t gpioDirection;
+  RP2040* rpchip;
   int32_t pwm_wrap_irq;
   int32_t pwm_dreq_base;
 };
@@ -1547,12 +1962,22 @@ struct RPReset {
   int32_t wdsel;
   int32_t reset_done;
   int32_t reset_mask;
-  RP2350* rp2040;
+  RP2350* rpchip;
+  const char* name;
+};
+
+struct RPReset__RP2040 {
+  BasePeripheral__RP2040 base; // parent class (must be first member)
+  int32_t reset;
+  int32_t wdsel;
+  int32_t reset_done;
+  int32_t reset_mask;
+  RP2040* rpchip;
   const char* name;
 };
 
 struct RP2040RTC {
-  BasePeripheral base; // parent class (must be first member)
+  BasePeripheral__RP2040 base; // parent class (must be first member)
   int32_t setup0;
   int32_t setup1;
   int32_t rtc1;
@@ -1588,13 +2013,38 @@ struct RPSPI {
   ISPIDMAChannels* dreq;
 };
 
+struct RPSPI__RP2040 {
+  BasePeripheral__RP2040 base; // parent class (must be first member)
+  FIFO* rxFIFO;
+  FIFO* txFIFO;
+  RPSPI__RP2040_onTransmit_Fn onTransmit_fn;
+  void* onTransmit_ctx;
+  bool busy;
+  int32_t control0;
+  int32_t control1;
+  int32_t dmaControl;
+  int32_t clockDivisor;
+  int32_t intRaw;
+  int32_t intEnable;
+  int32_t irq;
+  ISPIDMAChannels* dreq;
+};
+
 struct RPSSI {
-  BasePeripheral base; // parent class (must be first member)
-  int32_t dr0;
+  BasePeripheral__RP2040 base; // parent class (must be first member)
+  uint32_t* regs;
+  SpiPhase phase;
+  int32_t flashCmd;
+  int32_t flashAddr;
+  int32_t addrBytesRemaining;
+  __attribute__((aligned(8))) uint8_t rxFifo[16];
+  int32_t rxFifoHead;
+  int32_t rxFifoTail;
+  int32_t rxFifoCount;
 };
 
 struct RP2040SysCfg {
-  BasePeripheral base; // parent class (must be first member)
+  BasePeripheral__RP2040 base; // parent class (must be first member)
 };
 
 struct RP2350SysCfg {
@@ -1602,7 +2052,7 @@ struct RP2350SysCfg {
 };
 
 struct RP2040SysInfo {
-  BasePeripheral base; // parent class (must be first member)
+  BasePeripheral__RP2040 base; // parent class (must be first member)
 };
 
 struct RP2350SysInfo {
@@ -1611,6 +2061,10 @@ struct RP2350SysInfo {
 
 struct RPTBMAN {
   BasePeripheral base; // parent class (must be first member)
+};
+
+struct RPTBMAN__RP2040 {
+  BasePeripheral__RP2040 base; // parent class (must be first member)
 };
 
 struct RPTimerAlarm {
@@ -1628,6 +2082,29 @@ struct RPTimer {
   IClock clock;
   int32_t latchedTimeHigh;
   RPTimerAlarm* alarms[4];
+  int32_t intRaw;
+  int32_t intEnable;
+  int32_t intForce;
+  bool paused;
+  int32_t intRegBase;
+  int32_t timer_irq_base;
+};
+
+struct RPTimerAlarm__RP2040 {
+  bool armed;
+  int32_t targetMicros;
+  IAlarm clockAlarm;
+  RPTimer__RP2040* timer;
+  int32_t bitValue;
+  int32_t index;
+  const AlarmCallbackVTable* __vtable_AlarmCallback;
+};
+
+struct RPTimer__RP2040 {
+  BasePeripheral__RP2040 base; // parent class (must be first member)
+  IClock clock;
+  int32_t latchedTimeHigh;
+  RPTimerAlarm__RP2040* alarms[4];
   int32_t intRaw;
   int32_t intEnable;
   int32_t intForce;
@@ -1662,8 +2139,26 @@ struct RPUART {
   IUARTDMAChannels* dreq;
 };
 
+struct RPUART__RP2040 {
+  BasePeripheral__RP2040 base; // parent class (must be first member)
+  int32_t ctrlRegister;
+  int32_t lineCtrlRegister;
+  FIFO* rxFIFO;
+  int32_t interruptMask;
+  int32_t interruptStatus;
+  int32_t intDivisor;
+  int32_t fracDivisor;
+  RPUART__RP2040_onByte_Fn onByte_fn;
+  void* onByte_ctx;
+  RPUART__RP2040_onBaudRateChange_Fn onBaudRateChange_fn;
+  void* onBaudRateChange_ctx;
+  int32_t irq;
+  IUARTDMAChannels* dreq;
+};
+
 struct USBEndpointAlarm {
   uint8_t** buffers;
+  int32_t* lengths;
   int32_t bufferCount;
   IAlarm clockAlarm;
   RPUSBController* usb;
@@ -1693,9 +2188,51 @@ struct RPUSBController {
   void* onEndpointRead_ctx;
   int32_t readDelayMicroseconds;
   int32_t writeDelayMicroseconds;
-  RP2350* rp2040;
+  RP2350* rpchip;
   int32_t usbctrl_irq;
   const AlarmCallbackVTable* __vtable_AlarmCallback;
+};
+
+struct USBEndpointAlarm__RP2040 {
+  uint8_t** buffers;
+  int32_t* lengths;
+  int32_t bufferCount;
+  IAlarm clockAlarm;
+  RPUSBController__RP2040* usb;
+  int32_t endpoint;
+  bool isWrite;
+  const AlarmCallbackVTable* __vtable_AlarmCallback;
+};
+
+struct RPUSBController__RP2040 {
+  BasePeripheral__RP2040 base; // parent class (must be first member)
+  int32_t mainCtrl;
+  int32_t intRaw;
+  int32_t intEnable;
+  int32_t intForce;
+  int32_t sieStatus;
+  int32_t buffStatus;
+  USBEndpointAlarm__RP2040** endpointReadAlarms;
+  USBEndpointAlarm__RP2040** endpointWriteAlarms;
+  IAlarm resetAlarm;
+  RPUSBController__RP2040_onUSBEnabled_Fn onUSBEnabled_fn;
+  void* onUSBEnabled_ctx;
+  RPUSBController__RP2040_onResetReceived_Fn onResetReceived_fn;
+  void* onResetReceived_ctx;
+  RPUSBController__RP2040_onEndpointWrite_Fn onEndpointWrite_fn;
+  void* onEndpointWrite_ctx;
+  RPUSBController__RP2040_onEndpointRead_Fn onEndpointRead_fn;
+  void* onEndpointRead_ctx;
+  int32_t readDelayMicroseconds;
+  int32_t writeDelayMicroseconds;
+  RP2040* rpchip;
+  int32_t usbctrl_irq;
+  const AlarmCallbackVTable* __vtable_AlarmCallback;
+};
+
+struct RP2040VregAndChipReset {
+  BasePeripheral base; // parent class (must be first member)
+  int32_t chipReset;
 };
 
 struct RPWatchdog {
@@ -1714,10 +2251,42 @@ struct RPWatchdog {
   const AlarmCallbackVTable* __vtable_AlarmCallback;
 };
 
+struct RPWatchdog__RP2040 {
+  BasePeripheral__RP2040 base; // parent class (must be first member)
+  Timer32* timer;
+  Timer32PeriodicAlarm* alarm;
+  __attribute__((aligned(8))) uint32_t scratchData[8];
+  bool enable;
+  bool tickEnable;
+  int32_t reason;
+  bool pauseDbg0;
+  bool pauseDbg1;
+  bool pauseJtag;
+  RPWatchdog__RP2040_onWatchdogTrigger_Fn onWatchdogTrigger_fn;
+  void* onWatchdogTrigger_ctx;
+  const AlarmCallbackVTable* __vtable_AlarmCallback;
+};
+
 struct RPXIPQMI {
   BasePeripheral base; // parent class (must be first member)
   int32_t directCsr;
   bool directCsrEn;
+  bool csActive;
+  RPIOQSPI* ioQspi;
+  int32_t cmd;
+  uint8_t* addrBytes;
+  int32_t addrBytesCount;
+  int32_t addr;
+  uint8_t* progBytes;
+  int32_t progBytesCount;
+  const char* readKind;
+  int32_t rdidIdx;
+  int32_t readAddr;
+  int32_t dummySkip;
+  bool wel;
+  uint8_t* rxFifo;
+  int32_t rxFifoHead;
+  int32_t rxFifoCount;
 };
 
 struct RPXIP {
@@ -1750,6 +2319,7 @@ struct CPU {
   const char* coreLabel;
   int32_t mhartid;
   int32_t inst_length;
+  int64_t curPacked;
   int32_t btb;
   const ICpuCoreVTable* __vtable_ICpuCore;
 };
@@ -1770,27 +2340,25 @@ struct RP2040 {
   int32_t clkPeri;
   RPPPB* ppb;
   RPSIO* sio;
-  RPUART* uart[2];
-  RPI2C* i2c[2];
-  RPPWM* pwm;
-  RPADC* adc;
-  GPIOPin* gpio[30];
-  GPIOPin* qspi[6];
+  RPUART__RP2040* uart[2];
+  RPI2C__RP2040* i2c[2];
+  RPPWM__RP2040* pwm;
+  RPADC__RP2040* adc;
+  GPIOPin__RP2040* gpio[30];
+  GPIOPin__RP2040* qspi[6];
   RPDMA* dma;
-  RPPIO* pio[2];
-  RPUSBController* usbCtrl;
-  RPSPI* spi[2];
+  RPPIO__RP2040* pio[2];
+  RPUSBController__RP2040* usbCtrl;
+  RPSPI__RP2040* spi[2];
   void* logger;
   Peripheral* peripherals;
-  RP2040_onBreak_Fn onBreak_fn;
-  void* onBreak_ctx;
   RP2040_onTrace_Fn onTrace_fn;
   void* onTrace_ctx;
   int32_t currentCore;
   const char* disassembly;
-  StateMachine* pioActiveSms[8];
+  StateMachine__RP2040* pioActiveSms[8];
   int32_t pioActiveSmCount;
-  RPPIO* pioActivePios[2];
+  RPPIO__RP2040* pioActivePios[2];
   int32_t pioActivePioCount;
   const IRPChipVTable* __vtable_IRPChip;
 };
@@ -1806,6 +2374,8 @@ struct RP2350 {
   uint32_t* flash32;
   uint8_t* usbDPRAM;
   uint8_t* usbDPRAMView;
+  uint64_t* sramDecode;
+  uint64_t* flashDecode;
   const char* identifier;
   const char* coreArch;
   bool isArmCore;
@@ -1814,7 +2384,7 @@ struct RP2350 {
   SimulationClock* clock;
   int32_t clkSys;
   int32_t clkPeri;
-  RPSIO* sio;
+  RP2350SIO* sio;
   RP2350OTP* otp;
   RPWatchdog* watchdog;
   RPUART* uart[2];
@@ -1823,11 +2393,13 @@ struct RP2350 {
   RPADC* adc;
   GPIOPin* gpio[48];
   GPIOPin* qspi[6];
-  RPDMA* dma;
+  RP2350DMA* dma;
   RPPIO* pio[3];
   RPUSBController* usbCtrl;
   RPSPI* spi[2];
   void* logger;
+  RPIOQSPI* ioQspi;
+  RPXIPQMI* xipQmi;
   Peripheral* peripherals;
   RP2350_onTrace_Fn onTrace_fn;
   void* onTrace_ctx;
@@ -1842,7 +2414,7 @@ struct RP2350 {
 
 struct Simulator {
   void* executeTimer;
-  RP2040* rp2040;
+  RP2350* rpchip;
   bool stopped;
   const IGDBTargetVTable* __vtable_IGDBTarget;
 };
@@ -1857,7 +2429,26 @@ struct RPSIOCore {
   Interpolator* interp1;
   bool ROE;
   bool WOF;
-  RP2350* rp2040;
+  RP2350* rpchip;
+  FIFO* rxFIFO;
+  FIFO* txFIFO;
+  int32_t sio_interrupt;
+  int32_t sio_interrupt_other_core;
+  int32_t cpuCore;
+  int32_t cpuCoreOther;
+};
+
+struct RPSIOCore__RP2040 {
+  int32_t divDividend;
+  int32_t divDivisor;
+  int32_t divQuotient;
+  int32_t divRemainder;
+  int32_t divCSR;
+  Interpolator* interp0;
+  Interpolator* interp1;
+  bool ROE;
+  bool WOF;
+  RP2040* rpchip;
   FIFO* rxFIFO;
   FIFO* txFIFO;
   int32_t sio_interrupt;
@@ -1872,24 +2463,34 @@ struct RPSIO {
   int32_t qspiGpioValue;
   int32_t qspiGpioOutputEnable;
   int32_t spinLock;
-  RPSIOCore* sioCore[2];
-  RP2350* rp2040;
+  RPSIOCore__RP2040* sioCore[2];
+  RP2040* rpchip;
   int32_t sio_proc0_irq;
   int32_t sio_proc1_irq;
+};
+
+struct MtimecmpAlarmCallback {
+  RP2350* rpchip;
+  int32_t sio_mtimecmp_irq;
+  int32_t core;
+  const AlarmCallbackVTable* __vtable_AlarmCallback;
+};
+
+struct RP2350SIO {
+  int32_t gpioValue;
+  int32_t gpioOutputEnable;
   int32_t gpioHiValue;
   int32_t gpioHiOutputEnable;
+  int32_t spinLock;
+  RPSIOCore* sioCore[2];
   Timer32* mtimeTimer;
   int32_t mtimeCtrl;
   Timer32PeriodicAlarm* mtimecmpAlarm[2];
   int32_t mtimecmpHigh[2];
+  RP2350* rpchip;
+  int32_t sio_proc0_irq;
+  int32_t sio_proc1_irq;
   int32_t sio_mtimecmp_irq;
-};
-
-struct MtimecmpAlarmCallback {
-  RP2350* rp2040;
-  int32_t sio_mtimecmp_irq;
-  int32_t core;
-  const AlarmCallbackVTable* __vtable_AlarmCallback;
 };
 
 struct USBCDC {
@@ -1900,12 +2501,30 @@ struct USBCDC {
   void* onDeviceConnected_ctx;
   bool initialized;
   int32_t descriptorsSize;
-  int32_t* descriptors;
-  int32_t descriptors_count;
+  uint8_t* descriptors;
+  int32_t descriptorsCount;
   int32_t outEndpoint;
   int32_t inEndpoint;
   int32_t pendingOutReadSize;
+  uint8_t* outScratch;
   RPUSBController* usb;
+};
+
+struct USBCDC__RP2040 {
+  FIFO* txFIFO;
+  USBCDC__RP2040_onSerialData_Fn onSerialData_fn;
+  void* onSerialData_ctx;
+  USBCDC__RP2040_onDeviceConnected_Fn onDeviceConnected_fn;
+  void* onDeviceConnected_ctx;
+  bool initialized;
+  int32_t descriptorsSize;
+  uint8_t* descriptors;
+  int32_t descriptorsCount;
+  int32_t outEndpoint;
+  int32_t inEndpoint;
+  int32_t pendingOutReadSize;
+  uint8_t* outScratch;
+  RPUSBController__RP2040* usb;
 };
 
 struct FIFO {
@@ -1968,6 +2587,11 @@ struct FpResult {
 
 struct IrqTarget {
   RPPIO* targetPio;
+  int32_t irqBit;
+};
+
+struct IrqTarget__RP2040 {
+  RPPIO__RP2040* targetPio;
   int32_t irqBit;
 };
 
@@ -2103,11 +2727,6 @@ struct RP2350Options {
   const char* loadFirmware;
 };
 
-struct EndpointNumbers {
-  int32_t in;
-  int32_t out;
-};
-
 struct ISetupPacketParams {
   DataDirection dataDirection;
   SetupType type;
@@ -2156,7 +2775,7 @@ static double SimulationClock_nanosToNextAlarm_get(SimulationClock* self);
 static int64_t CortexM0Core_getCycles(CortexM0Core* self);
 static void CortexM0Core_addCycles(CortexM0Core* self, int32_t delta);
 static void CortexM0Core_setOtherCore(CortexM0Core* self, ICpuCore other);
-static CortexM0Core* CortexM0Core_new(RP2040* rp2040, const char* coreLabel, int32_t coreNumber);
+static CortexM0Core* CortexM0Core_new(RP2040* rpchip, const char* coreLabel, int32_t coreNumber);
 static void CortexM0Core_fireSEV(CortexM0Core* self);
 static void CortexM0Core_reset(CortexM0Core* self);
 static int32_t CortexM0Core_checkCondition(CortexM0Core* self, int32_t cond);
@@ -2175,7 +2794,7 @@ static int32_t CortexM0Core_checkForInterrupts(CortexM0Core* self);
 static int32_t CortexM0Core_readSpecialRegister(CortexM0Core* self, int32_t sysm);
 static int32_t CortexM0Core_writeSpecialRegister(CortexM0Core* self, int32_t sysm, int32_t value);
 static void CortexM0Core_BXWritePC(CortexM0Core* self, int32_t address);
-static int32_t CortexM0Core_substractUpdateFlags(CortexM0Core* self, int32_t minuend, int32_t subtrahend);
+static int32_t CortexM0Core_substractUpdateFlags(CortexM0Core* self, uint32_t minuend, uint32_t subtrahend);
 static int32_t CortexM0Core_addUpdateFlags(CortexM0Core* self, int32_t addend1, int32_t addend2);
 static int32_t CortexM0Core_cyclesIO(CortexM0Core* self, int32_t addr, bool write);
 static void CortexM0Core_executeInstructionsUpTo(CortexM0Core* self, int64_t cycle);
@@ -2262,7 +2881,7 @@ static void ArmGDBServer_addConnection(ArmGDBServer* self, GDBConnection* connec
 static const char* ArmGDBServer_handleMonitor(ArmGDBServer* self, const char* hexCmd);
 static const char* ArmGDBServer_dumpPio(ArmGDBServer* self, int32_t instance);
 static const char* ArmGDBServer_dumpGpio(ArmGDBServer* self);
-static int32_t ArmGDBServer_rp2040_get(ArmGDBServer* self);
+static int32_t ArmGDBServer_rpchip_get(ArmGDBServer* self);
 static CortexM0Core* ArmGDBServer_core_get(ArmGDBServer* self);
 static GDBConnection* GDBConnection_new(GDBServer* server, void* onResponse);
 static void GDBConnection_feedData(GDBConnection* self, const char* data);
@@ -2291,7 +2910,7 @@ static const char* RISCVGDBServer_handleMonitor(RISCVGDBServer* self, const char
 static const char* RISCVGDBServer_dumpPio(RISCVGDBServer* self, int32_t instance);
 static const char* RISCVGDBServer_dumpGpio(RISCVGDBServer* self);
 static CPU* RISCVGDBServer_cpu_get(RISCVGDBServer* self);
-static GPIOPin* GPIOPin_new(RP2350* rp2040, int32_t index, const char* name);
+static GPIOPin* GPIOPin_new(RP2350* rpchip, int32_t index, const char* name);
 static void GPIOPin_setInputValue(GPIOPin* self, bool value);
 static void GPIOPin_checkForUpdates(GPIOPin* self);
 static void GPIOPin_refreshInput(GPIOPin* self);
@@ -2316,6 +2935,31 @@ static int32_t GPIOPin_outputEnable_get(GPIOPin* self);
 static int32_t GPIOPin_outputValue_get(GPIOPin* self);
 static int32_t GPIOPin_status_get(GPIOPin* self);
 static int32_t GPIOPin_value_get(GPIOPin* self);
+static GPIOPin__RP2040* GPIOPin__RP2040_new(RP2040* rpchip, int32_t index, const char* name);
+static void GPIOPin__RP2040_setInputValue(GPIOPin__RP2040* self, bool value);
+static void GPIOPin__RP2040_checkForUpdates(GPIOPin__RP2040* self);
+static void GPIOPin__RP2040_refreshInput(GPIOPin__RP2040* self);
+static void GPIOPin__RP2040_updateIRQValue(GPIOPin__RP2040* self, int32_t value);
+static void GPIOPin__RP2040_addListener(GPIOPin__RP2040* self, GPIOPinListener callback);
+static int32_t GPIOPin__RP2040_rawInterrupt_get(GPIOPin__RP2040* self);
+static int32_t GPIOPin__RP2040_isSlewFast_get(GPIOPin__RP2040* self);
+static int32_t GPIOPin__RP2040_schmittEnabled_get(GPIOPin__RP2040* self);
+static int32_t GPIOPin__RP2040_pulldownEnabled_get(GPIOPin__RP2040* self);
+static int32_t GPIOPin__RP2040_pullupEnabled_get(GPIOPin__RP2040* self);
+static int32_t GPIOPin__RP2040_driveStrength_get(GPIOPin__RP2040* self);
+static int32_t GPIOPin__RP2040_inputEnable_get(GPIOPin__RP2040* self);
+static int32_t GPIOPin__RP2040_outputDisable_get(GPIOPin__RP2040* self);
+static int32_t GPIOPin__RP2040_functionSelect_get(GPIOPin__RP2040* self);
+static int32_t GPIOPin__RP2040_outputOverride_get(GPIOPin__RP2040* self);
+static int32_t GPIOPin__RP2040_outputEnableOverride_get(GPIOPin__RP2040* self);
+static int32_t GPIOPin__RP2040_inputOverride_get(GPIOPin__RP2040* self);
+static int32_t GPIOPin__RP2040_irqOverride_get(GPIOPin__RP2040* self);
+static int32_t GPIOPin__RP2040_inputValue_get(GPIOPin__RP2040* self);
+static int32_t GPIOPin__RP2040_irqValue_get(GPIOPin__RP2040* self);
+static int32_t GPIOPin__RP2040_outputEnable_get(GPIOPin__RP2040* self);
+static int32_t GPIOPin__RP2040_outputValue_get(GPIOPin__RP2040* self);
+static int32_t GPIOPin__RP2040_status_get(GPIOPin__RP2040* self);
+static int32_t GPIOPin__RP2040_value_get(GPIOPin__RP2040* self);
 static InterpolatorConfig* InterpolatorConfig_new();
 static void InterpolatorConfig_decode(InterpolatorConfig* self, int32_t value);
 static int32_t InterpolatorConfig_toUint32(InterpolatorConfig* self);
@@ -2329,7 +2973,7 @@ static ADCSampleAlarm* ADCSampleAlarm_new(RPADC* adc);
 static void ADCSampleAlarm_fire(ADCSampleAlarm* self);
 static ADCMultiShotAlarm* ADCMultiShotAlarm_new(RPADC* adc);
 static void ADCMultiShotAlarm_fire(ADCMultiShotAlarm* self);
-static RPADC* RPADC_new(RP2350* rp2040, const char* name, int32_t adc_interrupt, int32_t adc_dreq);
+static RPADC* RPADC_new(RP2350* rpchip, const char* name, int32_t adc_interrupt, int32_t adc_dreq);
 static void RPADC_checkInterrupts(RPADC* self);
 static void RPADC_startADCRead(RPADC* self);
 static void RPADC_updateDMA(RPADC* self);
@@ -2343,17 +2987,41 @@ static int32_t RPADC_intRaw_get(RPADC* self);
 static int32_t RPADC_intStatus_get(RPADC* self);
 static int32_t RPADC_activeChannel_get(RPADC* self);
 static void RPADC_activeChannel_set(RPADC* self, int32_t value);
+static ADCSampleAlarm__RP2040* ADCSampleAlarm__RP2040_new(RPADC__RP2040* adc);
+static void ADCSampleAlarm__RP2040_fire(ADCSampleAlarm__RP2040* self);
+static ADCMultiShotAlarm__RP2040* ADCMultiShotAlarm__RP2040_new(RPADC__RP2040* adc);
+static void ADCMultiShotAlarm__RP2040_fire(ADCMultiShotAlarm__RP2040* self);
+static RPADC__RP2040* RPADC__RP2040_new(RP2040* rpchip, const char* name, int32_t adc_interrupt, int32_t adc_dreq);
+static void RPADC__RP2040_checkInterrupts(RPADC__RP2040* self);
+static void RPADC__RP2040_startADCRead(RPADC__RP2040* self);
+static void RPADC__RP2040_updateDMA(RPADC__RP2040* self);
+static void RPADC__RP2040_completeADCRead(RPADC__RP2040* self, int32_t value, bool error);
+static int32_t RPADC__RP2040_readUint32(RPADC__RP2040* self, int32_t offset);
+static void RPADC__RP2040_writeUint32(RPADC__RP2040* self, int32_t offset, int32_t value);
+static int32_t RPADC__RP2040_temperatueEnable_get(RPADC__RP2040* self);
+static int32_t RPADC__RP2040_enabled_get(RPADC__RP2040* self);
+static int32_t RPADC__RP2040_divider_get(RPADC__RP2040* self);
+static int32_t RPADC__RP2040_intRaw_get(RPADC__RP2040* self);
+static int32_t RPADC__RP2040_intStatus_get(RPADC__RP2040* self);
+static int32_t RPADC__RP2040_activeChannel_get(RPADC__RP2040* self);
+static void RPADC__RP2040_activeChannel_set(RPADC__RP2040* self, int32_t value);
 static int32_t RPBootRAM_byteAddressable(RPBootRAM* self);
 static int32_t RPBootRAM_readUint32(RPBootRAM* self, int32_t offset);
 static void RPBootRAM_writeUint32(RPBootRAM* self, int32_t offset, int32_t value);
-static RPBootRAM* RPBootRAM_new(RP2350* rp2040, const char* name);
-static RPBUSCTRL* RPBUSCTRL_new(RP2350* rp2040, const char* name);
+static RPBootRAM* RPBootRAM_new(RP2350* rpchip, const char* name);
+static RPBUSCTRL* RPBUSCTRL_new(RP2350* rpchip, const char* name);
 static int32_t RPBUSCTRL_readUint32(RPBUSCTRL* self, int32_t offset);
 static void RPBUSCTRL_writeUint32(RPBUSCTRL* self, int32_t offset, int32_t value);
-static RPClocks* RPClocks_new(RP2350* rp2040, const char* name);
+static RPBUSCTRL__RP2040* RPBUSCTRL__RP2040_new(RP2040* rpchip, const char* name);
+static int32_t RPBUSCTRL__RP2040_readUint32(RPBUSCTRL__RP2040* self, int32_t offset);
+static void RPBUSCTRL__RP2040_writeUint32(RPBUSCTRL__RP2040* self, int32_t offset, int32_t value);
+static RPClocks* RPClocks_new(RP2350* rpchip, const char* name);
 static int32_t RPClocks_readUint32(RPClocks* self, int32_t offset);
 static void RPClocks_writeUint32(RPClocks* self, int32_t offset, int32_t value);
-static RPDMAChannel* RPDMAChannel_new(RPDMA* dma, RP2350* rp2040, int32_t index);
+static RPClocks__RP2040* RPClocks__RP2040_new(RP2040* rpchip, const char* name);
+static int32_t RPClocks__RP2040_readUint32(RPClocks__RP2040* self, int32_t offset);
+static void RPClocks__RP2040_writeUint32(RPClocks__RP2040* self, int32_t offset, int32_t value);
+static RPDMAChannel* RPDMAChannel_new(RPDMA* dma, RP2040* rpchip, int32_t index);
 static void RPDMAChannel_start(RPDMAChannel* self);
 static void RPDMAChannel_transfer8(RPDMAChannel* self);
 static void RPDMAChannel_transfer16(RPDMAChannel* self);
@@ -2368,18 +3036,40 @@ static void RPDMAChannel_writeUint32(RPDMAChannel* self, int32_t offset, int32_t
 static void RPDMAChannel_reset(RPDMAChannel* self);
 static int32_t RPDMAChannel_treq_get(RPDMAChannel* self);
 static int32_t RPDMAChannel_active_get(RPDMAChannel* self);
-static RPDMA* RPDMA_new(RP2350* rp2040, const char* name, int32_t dma_irq_base);
+static RPDMA* RPDMA_new(RP2040* rpchip, const char* name, int32_t dma_irq_base);
 static int32_t RPDMA_readUint32(RPDMA* self, int32_t offset);
 static void RPDMA_writeUint32(RPDMA* self, int32_t offset, int32_t value);
 static void RPDMA_setDREQ(RPDMA* self, DREQChannel dreqChannel);
 static void RPDMA_clearDREQ(RPDMA* self, DREQChannel dreqChannel);
 static int32_t RPDMA_getTimer(RPDMA* self, TREQ treq);
 static void RPDMA_checkInterrupts(RPDMA* self);
-static int32_t RPDMA_intStatus(RPDMA* self, int32_t intNum);
-static int32_t RPDMA_intNumFromOffset(RPDMA* self, int32_t offset);
 static int32_t RPDMA_intStatus0_get(RPDMA* self);
 static int32_t RPDMA_intStatus1_get(RPDMA* self);
-static RPI2C* RPI2C_new(RP2350* rp2040, const char* name, int32_t irq);
+static RP2350DMAChannel* RP2350DMAChannel_new(RP2350DMA* dma, RP2350* rpchip, int32_t index);
+static void RP2350DMAChannel_start(RP2350DMAChannel* self);
+static void RP2350DMAChannel_transfer8(RP2350DMAChannel* self);
+static void RP2350DMAChannel_transfer16(RP2350DMAChannel* self);
+static void RP2350DMAChannel_transferSwap16(RP2350DMAChannel* self);
+static void RP2350DMAChannel_transfer32(RP2350DMAChannel* self);
+static void RP2350DMAChannel_transferSwap32(RP2350DMAChannel* self);
+static void RP2350DMAChannel_fire(RP2350DMAChannel* self);
+static void RP2350DMAChannel_scheduleTransfer(RP2350DMAChannel* self);
+static void RP2350DMAChannel_abort(RP2350DMAChannel* self);
+static int32_t RP2350DMAChannel_readUint32(RP2350DMAChannel* self, int32_t offset);
+static void RP2350DMAChannel_writeUint32(RP2350DMAChannel* self, int32_t offset, int32_t value);
+static void RP2350DMAChannel_reset(RP2350DMAChannel* self);
+static int32_t RP2350DMAChannel_treq_get(RP2350DMAChannel* self);
+static int32_t RP2350DMAChannel_active_get(RP2350DMAChannel* self);
+static RP2350DMA* RP2350DMA_new(RP2350* rpchip, const char* name, int32_t dma_irq_base);
+static int32_t RP2350DMA_intStatus(RP2350DMA* self, int32_t intNum);
+static int32_t RP2350DMA_intNumFromOffset(RP2350DMA* self, int32_t offset);
+static int32_t RP2350DMA_readUint32(RP2350DMA* self, int32_t offset);
+static void RP2350DMA_writeUint32(RP2350DMA* self, int32_t offset, int32_t value);
+static void RP2350DMA_setDREQ(RP2350DMA* self, DREQChannel dreqChannel);
+static void RP2350DMA_clearDREQ(RP2350DMA* self, DREQChannel dreqChannel);
+static int32_t RP2350DMA_getTimer(RP2350DMA* self, TREQ treq);
+static void RP2350DMA_checkInterrupts(RP2350DMA* self);
+static RPI2C* RPI2C_new(RP2350* rpchip, const char* name, int32_t irq);
 static void RPI2C_checkInterrupts(RPI2C* self);
 static int32_t RPI2C_clearInterrupts(RPI2C* self, int32_t mask);
 static void RPI2C_setInterrupts(RPI2C* self, int32_t mask);
@@ -2399,20 +3089,51 @@ static int32_t RPI2C_speed_get(RPI2C* self);
 static int32_t RPI2C_sclLowPeriod_get(RPI2C* self);
 static int32_t RPI2C_sclHighPeriod_get(RPI2C* self);
 static int32_t RPI2C_masterBits_get(RPI2C* self);
-static RPIO* RPIO_new(RP2350* rp2040, const char* name);
+static RPI2C__RP2040* RPI2C__RP2040_new(RP2040* rpchip, const char* name, int32_t irq);
+static void RPI2C__RP2040_checkInterrupts(RPI2C__RP2040* self);
+static int32_t RPI2C__RP2040_clearInterrupts(RPI2C__RP2040* self, int32_t mask);
+static void RPI2C__RP2040_setInterrupts(RPI2C__RP2040* self, int32_t mask);
+static void RPI2C__RP2040_abort(RPI2C__RP2040* self, int32_t reason);
+static void RPI2C__RP2040_nextCommand(RPI2C__RP2040* self);
+static void RPI2C__RP2040_pushRX(RPI2C__RP2040* self, int32_t value);
+static void RPI2C__RP2040_completeStart(RPI2C__RP2040* self);
+static void RPI2C__RP2040_completeConnect(RPI2C__RP2040* self, bool ack, int32_t nackByte);
+static void RPI2C__RP2040_completeWrite(RPI2C__RP2040* self, bool ack);
+static void RPI2C__RP2040_completeRead(RPI2C__RP2040* self, int32_t value);
+static void RPI2C__RP2040_completeStop(RPI2C__RP2040* self);
+static void RPI2C__RP2040_arbitrationLost(RPI2C__RP2040* self);
+static int32_t RPI2C__RP2040_readUint32(RPI2C__RP2040* self, int32_t offset);
+static void RPI2C__RP2040_writeUint32(RPI2C__RP2040* self, int32_t offset, int32_t value);
+static int32_t RPI2C__RP2040_intStatus_get(RPI2C__RP2040* self);
+static int32_t RPI2C__RP2040_speed_get(RPI2C__RP2040* self);
+static int32_t RPI2C__RP2040_sclLowPeriod_get(RPI2C__RP2040* self);
+static int32_t RPI2C__RP2040_sclHighPeriod_get(RPI2C__RP2040* self);
+static int32_t RPI2C__RP2040_masterBits_get(RPI2C__RP2040* self);
+static RPIO* RPIO_new(RP2040* rpchip, const char* name);
 static int32_t RPIO_readUint32(RPIO* self, int32_t offset);
 static void RPIO_writeUint32(RPIO* self, int32_t offset, int32_t value);
-static RP2350OTP* RP2350OTP_new(RP2350* rp2040, const char* name);
+static RPIOQSPI* RPIOQSPI_new(RP2350* rpchip, const char* name);
+static int32_t RPIOQSPI_readReg(RPIOQSPI* self, int32_t offset);
+static int32_t RPIOQSPI_readUint32(RPIOQSPI* self, int32_t offset);
+static void RPIOQSPI_writeUint32(RPIOQSPI* self, int32_t offset, int32_t value);
+static RP2350IO* RP2350IO_new(RP2350* rpchip, const char* name);
+static int32_t RP2350IO_readUint32(RP2350IO* self, int32_t offset);
+static void RP2350IO_writeUint32(RP2350IO* self, int32_t offset, int32_t value);
+static RP2350OTP* RP2350OTP_new(RP2350* rpchip, const char* name);
 static int32_t RP2350OTP_readUint32(RP2350OTP* self, int32_t offset);
 static void RP2350OTP_writeUint32(RP2350OTP* self, int32_t offset, int32_t value);
-static RP2350OTPData* RP2350OTPData_new(RP2350* rp2040, const char* name, RP2350OTP* otp);
+static RP2350OTPData* RP2350OTPData_new(RP2350* rpchip, const char* name, RP2350OTP* otp);
 static int32_t RP2350OTPData_readUint32(RP2350OTPData* self, int32_t offset);
 static void RP2350OTPData_writeUint32(RP2350OTPData* self);
-static RPPADS* RPPADS_new(RP2350* rp2040, const char* name, const char* bank);
-static GPIOPin* RPPADS_getPinFromOffset(RPPADS* self, int32_t offset);
+static RPPADS* RPPADS_new(RP2040* rpchip, const char* name, const char* bank);
+static GPIOPin__RP2040* RPPADS_getPinFromOffset(RPPADS* self, int32_t offset);
 static int32_t RPPADS_readUint32(RPPADS* self, int32_t offset);
 static void RPPADS_writeUint32(RPPADS* self, int32_t offset, int32_t value);
-static BasePeripheral* BasePeripheral_new(RP2350* rp2040, const char* name);
+static RP2350PADS* RP2350PADS_new(RP2350* rpchip, const char* name, const char* bank);
+static GPIOPin* RP2350PADS_getPinFromOffset(RP2350PADS* self, int32_t offset);
+static int32_t RP2350PADS_readUint32(RP2350PADS* self, int32_t offset);
+static void RP2350PADS_writeUint32(RP2350PADS* self, int32_t offset, int32_t value);
+static BasePeripheral* BasePeripheral_new(RP2350* rpchip, const char* name);
 static int32_t BasePeripheral_byteAddressable(BasePeripheral* self);
 static int32_t BasePeripheral_readUint32(BasePeripheral* self, int32_t offset);
 static int32_t BasePeripheral_readUint32ViaCore(BasePeripheral* self, int32_t offset, int32_t core);
@@ -2423,8 +3144,19 @@ static void BasePeripheral_debug(BasePeripheral* self, const char* msg);
 static void BasePeripheral_info(BasePeripheral* self, const char* msg);
 static void BasePeripheral_warn(BasePeripheral* self, const char* msg);
 static void BasePeripheral_error(BasePeripheral* self, const char* msg);
-static UnimplementedPeripheral* UnimplementedPeripheral_new(RP2350* rp2040, const char* name);
-static StateMachine* StateMachine_new(RP2350* rp2040, RPPIO* pio, int32_t index);
+static UnimplementedPeripheral* UnimplementedPeripheral_new(RP2350* rpchip, const char* name);
+static BasePeripheral__RP2040* BasePeripheral__RP2040_new(RP2040* rpchip, const char* name);
+static int32_t BasePeripheral__RP2040_byteAddressable(BasePeripheral__RP2040* self);
+static int32_t BasePeripheral__RP2040_readUint32(BasePeripheral__RP2040* self, int32_t offset);
+static int32_t BasePeripheral__RP2040_readUint32ViaCore(BasePeripheral__RP2040* self, int32_t offset, int32_t core);
+static void BasePeripheral__RP2040_writeUint32(BasePeripheral__RP2040* self, int32_t offset, int32_t value);
+static void BasePeripheral__RP2040_writeUint32ViaCore(BasePeripheral__RP2040* self, int32_t offset, int32_t value, int32_t core);
+static void BasePeripheral__RP2040_writeUint32Atomic(BasePeripheral__RP2040* self, int32_t offset, int32_t value, int32_t atomicType);
+static void BasePeripheral__RP2040_debug(BasePeripheral__RP2040* self, const char* msg);
+static void BasePeripheral__RP2040_info(BasePeripheral__RP2040* self, const char* msg);
+static void BasePeripheral__RP2040_warn(BasePeripheral__RP2040* self, const char* msg);
+static void BasePeripheral__RP2040_error(BasePeripheral__RP2040* self, const char* msg);
+static StateMachine* StateMachine_new(RP2350* rpchip, RPPIO* pio, int32_t index);
 static void StateMachine_updateDMATx(StateMachine* self);
 static void StateMachine_updateDMARx(StateMachine* self);
 static void StateMachine_writeFIFO(StateMachine* self, int32_t value);
@@ -2468,7 +3200,7 @@ static int32_t StateMachine_jmpPin_get(StateMachine* self);
 static int32_t StateMachine_wrapTop_get(StateMachine* self);
 static int32_t StateMachine_wrapBottom_get(StateMachine* self);
 static void StateMachine_enabled_set(StateMachine* self, bool value);
-static RPPIO* RPPIO_new(RP2350* rp2040, const char* name, int32_t firstIrq, int32_t index, int32_t dreqRx_base, int32_t dreqTx_base);
+static RPPIO* RPPIO_new(RP2350* rpchip, const char* name, int32_t firstIrq, int32_t index, int32_t dreqRx_base, int32_t dreqTx_base);
 static int32_t RPPIO_readUint32(RPPIO* self, int32_t offset);
 static void RPPIO_writeUint32(RPPIO* self, int32_t offset, int32_t value);
 static int32_t RPPIO_getPinValue(RPPIO* self, int32_t chip_gpio_index);
@@ -2484,23 +3216,83 @@ static int32_t RPPIO_stopped_get(RPPIO* self);
 static int32_t RPPIO_intRaw_get(RPPIO* self);
 static int32_t RPPIO_irq0IntStatus_get(RPPIO* self);
 static int32_t RPPIO_irq1IntStatus_get(RPPIO* self);
+static StateMachine__RP2040* StateMachine__RP2040_new(RP2040* rpchip, RPPIO__RP2040* pio, int32_t index);
+static void StateMachine__RP2040_updateDMATx(StateMachine__RP2040* self);
+static void StateMachine__RP2040_updateDMARx(StateMachine__RP2040* self);
+static void StateMachine__RP2040_writeFIFO(StateMachine__RP2040* self, int32_t value);
+static int32_t StateMachine__RP2040_readFIFO(StateMachine__RP2040* self);
+static int32_t StateMachine__RP2040_jmpCondition(StateMachine__RP2040* self, int32_t condition);
+static int32_t StateMachine__RP2040_inSourceValue(StateMachine__RP2040* self, int32_t source);
+static void StateMachine__RP2040_writeOutValue(StateMachine__RP2040* self, int32_t destination, int32_t value, int32_t bitCount);
+static void StateMachine__RP2040_setOutPinDirs(StateMachine__RP2040* self, int32_t value);
+static void StateMachine__RP2040_setOutPins(StateMachine__RP2040* self, int32_t value);
+static void StateMachine__RP2040_outInstruction(StateMachine__RP2040* self, int32_t arg);
+static void StateMachine__RP2040_executeInstruction(StateMachine__RP2040* self, int32_t opcode);
+static void StateMachine__RP2040_resolveIrqTarget(StateMachine__RP2040* self, int32_t irqField, IrqTarget__RP2040* out);
+static void StateMachine__RP2040_wait(StateMachine__RP2040* self, WaitType type, bool polarity, int32_t index, RPPIO__RP2040* targetPio);
+static void StateMachine__RP2040_step(StateMachine__RP2040* self);
+static void StateMachine__RP2040_stepUnchecked(StateMachine__RP2040* self);
+static void StateMachine__RP2040_setSetPinDirs(StateMachine__RP2040* self, int32_t value);
+static void StateMachine__RP2040_setSetPins(StateMachine__RP2040* self, int32_t value);
+static void StateMachine__RP2040_setSideset(StateMachine__RP2040* self, int32_t value, int32_t count);
+static int32_t StateMachine__RP2040_transformMovValue(StateMachine__RP2040* self, int32_t value, int32_t op);
+static void StateMachine__RP2040_setMovDestination(StateMachine__RP2040* self, int32_t destination, int32_t value);
+static int32_t StateMachine__RP2040_readUint32(StateMachine__RP2040* self, int32_t offset);
+static void StateMachine__RP2040_writeUint32(StateMachine__RP2040* self, int32_t offset, int32_t value);
+static void StateMachine__RP2040_updateFifoStat(StateMachine__RP2040* self);
+static void StateMachine__RP2040_restart(StateMachine__RP2040* self);
+static void StateMachine__RP2040_clkDivRestart(StateMachine__RP2040* self);
+static void StateMachine__RP2040_checkWait(StateMachine__RP2040* self);
+static int32_t StateMachine__RP2040_status_get(StateMachine__RP2040* self);
+static int32_t StateMachine__RP2040_enabled_get(StateMachine__RP2040* self);
+static int32_t StateMachine__RP2040_inCountMask_get(StateMachine__RP2040* self);
+static int32_t StateMachine__RP2040_inPins_get(StateMachine__RP2040* self);
+static int32_t StateMachine__RP2040_pushThreshold_get(StateMachine__RP2040* self);
+static int32_t StateMachine__RP2040_pullThreshold_get(StateMachine__RP2040* self);
+static int32_t StateMachine__RP2040_sidesetCount_get(StateMachine__RP2040* self);
+static int32_t StateMachine__RP2040_setCount_get(StateMachine__RP2040* self);
+static int32_t StateMachine__RP2040_outCount_get(StateMachine__RP2040* self);
+static int32_t StateMachine__RP2040_inBase_get(StateMachine__RP2040* self);
+static int32_t StateMachine__RP2040_sidesetBase_get(StateMachine__RP2040* self);
+static int32_t StateMachine__RP2040_setBase_get(StateMachine__RP2040* self);
+static int32_t StateMachine__RP2040_outBase_get(StateMachine__RP2040* self);
+static int32_t StateMachine__RP2040_jmpPin_get(StateMachine__RP2040* self);
+static int32_t StateMachine__RP2040_wrapTop_get(StateMachine__RP2040* self);
+static int32_t StateMachine__RP2040_wrapBottom_get(StateMachine__RP2040* self);
+static void StateMachine__RP2040_enabled_set(StateMachine__RP2040* self, bool value);
+static RPPIO__RP2040* RPPIO__RP2040_new(RP2040* rpchip, const char* name, int32_t firstIrq, int32_t index, int32_t dreqRx_base, int32_t dreqTx_base);
+static int32_t RPPIO__RP2040_readUint32(RPPIO__RP2040* self, int32_t offset);
+static void RPPIO__RP2040_writeUint32(RPPIO__RP2040* self, int32_t offset, int32_t value);
+static int32_t RPPIO__RP2040_getPinValue(RPPIO__RP2040* self, int32_t chip_gpio_index);
+static int32_t RPPIO__RP2040_getPinOutputEnabled(RPPIO__RP2040* self, int32_t chip_gpio_index);
+static void RPPIO__RP2040_pinValuesChanged(RPPIO__RP2040* self, int32_t value, int32_t firstPin, int32_t count);
+static void RPPIO__RP2040_pinDirectionsChanged(RPPIO__RP2040* self, int32_t value, int32_t firstPin, int32_t count);
+static void RPPIO__RP2040_checkInterrupts(RPPIO__RP2040* self);
+static void RPPIO__RP2040_irqUpdated(RPPIO__RP2040* self);
+static void RPPIO__RP2040_checkChangedPins(RPPIO__RP2040* self);
+static void RPPIO__RP2040_step(RPPIO__RP2040* self);
+static void RPPIO__RP2040_stop(RPPIO__RP2040* self);
+static int32_t RPPIO__RP2040_stopped_get(RPPIO__RP2040* self);
+static int32_t RPPIO__RP2040_intRaw_get(RPPIO__RP2040* self);
+static int32_t RPPIO__RP2040_irq0IntStatus_get(RPPIO__RP2040* self);
+static int32_t RPPIO__RP2040_irq1IntStatus_get(RPPIO__RP2040* self);
 static int32_t RP2350PLL_readUint32(RP2350PLL* self, int32_t offset);
 static void RP2350PLL_writeUint32(RP2350PLL* self, int32_t offset, int32_t value);
-static RP2350PLL* RP2350PLL_new(RP2350* rp2040, const char* name);
+static RP2350PLL* RP2350PLL_new(RP2350* rpchip, const char* name);
 static int32_t RPPOWMAN_readUint32(RPPOWMAN* self, int32_t offset);
 static void RPPOWMAN_writeUint32(RPPOWMAN* self, int32_t offset, int32_t value);
-static RPPOWMAN* RPPOWMAN_new(RP2350* rp2040, const char* name);
+static RPPOWMAN* RPPOWMAN_new(RP2350* rpchip, const char* name);
 static int32_t RP2350POWMAN_nowMs(RP2350POWMAN* self);
 static int32_t RP2350POWMAN_readUint32(RP2350POWMAN* self, int32_t offset);
 static void RP2350POWMAN_writeUint32(RP2350POWMAN* self, int32_t offset, int32_t value);
 static void RP2350POWMAN_applySet(RP2350POWMAN* self, int32_t index, int32_t data);
-static RP2350POWMAN* RP2350POWMAN_new(RP2350* rp2040, const char* name);
-static RPPPB* RPPPB_new(RP2350* rp2040, const char* name);
+static RP2350POWMAN* RP2350POWMAN_new(RP2350* rpchip, const char* name);
+static RPPPB* RPPPB_new(RP2040* rpchip, const char* name);
 static void RPPPB_fire(RPPPB* self);
 static void RPPPB_reset(RPPPB* self);
 static int32_t RPPPB_readUint32ViaCore(RPPPB* self, int32_t offset, int32_t _core);
 static void RPPPB_writeUint32ViaCore(RPPPB* self, int32_t offset, int32_t value, int32_t _core);
-static SystickAlarmCallback* SystickAlarmCallback_new(RPPPB2350* ppb, RP2350* rp2040, Timer32* systickTimer, int32_t coreIndex);
+static SystickAlarmCallback* SystickAlarmCallback_new(RPPPB2350* ppb, RP2350* rpchip, Timer32* systickTimer, int32_t coreIndex);
 static void SystickAlarmCallback_fire(SystickAlarmCallback* self);
 static RPPPB2350* RPPPB2350_new(RP2350* rp2350, const char* name);
 static M33CoreState* RPPPB2350_makeCoreState(RPPPB2350* self, int32_t coreIndex);
@@ -2511,7 +3303,7 @@ static void RPPPB2350_markInterruptsUpdated(RPPPB2350* self, int32_t core);
 static int32_t RPPPB2350_lowestPendingVector(RPPPB2350* self, M33CoreState* st);
 static int32_t RP2350PSM_readUint32(RP2350PSM* self, int32_t offset);
 static void RP2350PSM_writeUint32(RP2350PSM* self, int32_t offset, int32_t value);
-static RP2350PSM* RP2350PSM_new(RP2350* rp2040, const char* name);
+static RP2350PSM* RP2350PSM_new(RP2350* rpchip, const char* name);
 static PWMChannelAAlarmCallback* PWMChannelAAlarmCallback_new(PWMChannel* channel);
 static void PWMChannelAAlarmCallback_fire(PWMChannelAAlarmCallback* self);
 static PWMChannelBAlarmCallback* PWMChannelBAlarmCallback_new(PWMChannel* channel);
@@ -2531,7 +3323,7 @@ static void PWMChannel_gpioBChanged(PWMChannel* self);
 static void PWMChannel_updateEnable(PWMChannel* self);
 static int32_t PWMChannel_gpioBValue_get(PWMChannel* self);
 static void PWMChannel_en_set(PWMChannel* self, int32_t value);
-static RPPWM* RPPWM_new(RP2350* rp2040, const char* name, int32_t pwm_wrap_irq, int32_t pwm_dreq_base);
+static RPPWM* RPPWM_new(RP2350* rpchip, const char* name, int32_t pwm_wrap_irq, int32_t pwm_dreq_base);
 static int32_t RPPWM_readUint32(RPPWM* self, int32_t offset);
 static int32_t RPPWM_writeUint32(RPPWM* self, int32_t offset, int32_t value);
 static void RPPWM_channelInterrupt(RPPWM* self, int32_t index);
@@ -2543,18 +3335,52 @@ static void RPPWM_gpioOnInput(RPPWM* self, int32_t index);
 static void RPPWM_reset(RPPWM* self);
 static int32_t RPPWM_intStatus_get(RPPWM* self);
 static int32_t RPPWM_clockFreq_get(RPPWM* self);
-static RPReset* RPReset_new(RP2350* rp2040, const char* name);
+static PWMChannelAAlarmCallback__RP2040* PWMChannelAAlarmCallback__RP2040_new(PWMChannel__RP2040* channel);
+static void PWMChannelAAlarmCallback__RP2040_fire(PWMChannelAAlarmCallback__RP2040* self);
+static PWMChannelBAlarmCallback__RP2040* PWMChannelBAlarmCallback__RP2040_new(PWMChannel__RP2040* channel);
+static void PWMChannelBAlarmCallback__RP2040_fire(PWMChannelBAlarmCallback__RP2040* self);
+static PWMChannelBottomAlarmCallback__RP2040* PWMChannelBottomAlarmCallback__RP2040_new(PWMChannel__RP2040* channel);
+static void PWMChannelBottomAlarmCallback__RP2040_fire(PWMChannelBottomAlarmCallback__RP2040* self);
+static PWMChannel__RP2040* PWMChannel__RP2040_new(RPPWM__RP2040* pwm, SimulationClock* clock, int32_t index);
+static int32_t PWMChannel__RP2040_readRegister(PWMChannel__RP2040* self, int32_t offset);
+static void PWMChannel__RP2040_writeRegister(PWMChannel__RP2040* self, int32_t offset, int32_t value);
+static void PWMChannel__RP2040_reset(PWMChannel__RP2040* self);
+static void PWMChannel__RP2040_updateDoubleBuffered(PWMChannel__RP2040* self);
+static void PWMChannel__RP2040_wrap(PWMChannel__RP2040* self);
+static void PWMChannel__RP2040_setA(PWMChannel__RP2040* self, bool value);
+static void PWMChannel__RP2040_setB(PWMChannel__RP2040* self, bool value);
+static void PWMChannel__RP2040_setBDirection(PWMChannel__RP2040* self, bool value);
+static void PWMChannel__RP2040_gpioBChanged(PWMChannel__RP2040* self);
+static void PWMChannel__RP2040_updateEnable(PWMChannel__RP2040* self);
+static int32_t PWMChannel__RP2040_gpioBValue_get(PWMChannel__RP2040* self);
+static void PWMChannel__RP2040_en_set(PWMChannel__RP2040* self, int32_t value);
+static RPPWM__RP2040* RPPWM__RP2040_new(RP2040* rpchip, const char* name, int32_t pwm_wrap_irq, int32_t pwm_dreq_base);
+static int32_t RPPWM__RP2040_readUint32(RPPWM__RP2040* self, int32_t offset);
+static int32_t RPPWM__RP2040_writeUint32(RPPWM__RP2040* self, int32_t offset, int32_t value);
+static void RPPWM__RP2040_channelInterrupt(RPPWM__RP2040* self, int32_t index);
+static void RPPWM__RP2040_checkInterrupts(RPPWM__RP2040* self);
+static void RPPWM__RP2040_gpioSet(RPPWM__RP2040* self, int32_t index, bool value);
+static void RPPWM__RP2040_gpioSetDir(RPPWM__RP2040* self, int32_t index, bool output);
+static int32_t RPPWM__RP2040_gpioRead(RPPWM__RP2040* self, int32_t index);
+static void RPPWM__RP2040_gpioOnInput(RPPWM__RP2040* self, int32_t index);
+static void RPPWM__RP2040_reset(RPPWM__RP2040* self);
+static int32_t RPPWM__RP2040_intStatus_get(RPPWM__RP2040* self);
+static int32_t RPPWM__RP2040_clockFreq_get(RPPWM__RP2040* self);
+static RPReset* RPReset_new(RP2350* rpchip, const char* name);
 static int32_t RPReset_readUint32(RPReset* self, int32_t offset);
 static void RPReset_writeUint32(RPReset* self, int32_t offset, int32_t value);
+static RPReset__RP2040* RPReset__RP2040_new(RP2040* rpchip, const char* name);
+static int32_t RPReset__RP2040_readUint32(RPReset__RP2040* self, int32_t offset);
+static void RPReset__RP2040_writeUint32(RPReset__RP2040* self, int32_t offset, int32_t value);
 static int32_t RP2040RTC_readUint32(RP2040RTC* self, int32_t offset);
 static void RP2040RTC_writeUint32(RP2040RTC* self, int32_t offset, int32_t value);
-static RP2040RTC* RP2040RTC_new(RP2350* rp2040, const char* name);
+static RP2040RTC* RP2040RTC_new(RP2040* rpchip, const char* name);
 static int32_t RP2350SHA256_readUint32(RP2350SHA256* self, int32_t offset);
 static void RP2350SHA256_writeUint32(RP2350SHA256* self, int32_t offset, int32_t value);
-static RP2350SHA256* RP2350SHA256_new(RP2350* rp2040, const char* name);
+static RP2350SHA256* RP2350SHA256_new(RP2350* rpchip, const char* name);
 static void RPSPI_updateDMATx(RPSPI* self);
 static void RPSPI_updateDMARx(RPSPI* self);
-static RPSPI* RPSPI_new(RP2350* rp2040, const char* name, int32_t irq, ISPIDMAChannels* dreq);
+static RPSPI* RPSPI_new(RP2350* rpchip, const char* name, int32_t irq, ISPIDMAChannels* dreq);
 static void RPSPI_doTX(RPSPI* self);
 static void RPSPI_completeTransmit(RPSPI* self, int32_t rxValue);
 static void RPSPI_checkInterrupts(RPSPI* self);
@@ -2567,36 +3393,66 @@ static int32_t RPSPI_dataBits_get(RPSPI* self);
 static int32_t RPSPI_masterMode_get(RPSPI* self);
 static int32_t RPSPI_spiMode_get(RPSPI* self);
 static int32_t RPSPI_clockFrequency_get(RPSPI* self);
+static void RPSPI__RP2040_updateDMATx(RPSPI__RP2040* self);
+static void RPSPI__RP2040_updateDMARx(RPSPI__RP2040* self);
+static RPSPI__RP2040* RPSPI__RP2040_new(RP2040* rpchip, const char* name, int32_t irq, ISPIDMAChannels* dreq);
+static void RPSPI__RP2040_doTX(RPSPI__RP2040* self);
+static void RPSPI__RP2040_completeTransmit(RPSPI__RP2040* self, int32_t rxValue);
+static void RPSPI__RP2040_checkInterrupts(RPSPI__RP2040* self);
+static void RPSPI__RP2040_fifosUpdated(RPSPI__RP2040* self);
+static int32_t RPSPI__RP2040_readUint32(RPSPI__RP2040* self, int32_t offset);
+static void RPSPI__RP2040_writeUint32(RPSPI__RP2040* self, int32_t offset, int32_t value);
+static int32_t RPSPI__RP2040_intStatus_get(RPSPI__RP2040* self);
+static int32_t RPSPI__RP2040_enabled_get(RPSPI__RP2040* self);
+static int32_t RPSPI__RP2040_dataBits_get(RPSPI__RP2040* self);
+static int32_t RPSPI__RP2040_masterMode_get(RPSPI__RP2040* self);
+static int32_t RPSPI__RP2040_spiMode_get(RPSPI__RP2040* self);
+static int32_t RPSPI__RP2040_clockFrequency_get(RPSPI__RP2040* self);
+static void RPSSI_resetSpiState(RPSSI* self);
+static void RPSSI_rxFifoPush(RPSSI* self, int32_t value);
+static int32_t RPSSI_rxFifoShift(RPSSI* self);
+static int32_t RPSSI_processSpiByte(RPSSI* self, int32_t txByte);
 static int32_t RPSSI_readUint32(RPSSI* self, int32_t offset);
 static void RPSSI_writeUint32(RPSSI* self, int32_t offset, int32_t value);
-static RPSSI* RPSSI_new(RP2350* rp2040, const char* name);
+static RPSSI* RPSSI_new(RP2040* rpchip, const char* name);
 static int32_t RP2040SysCfg_readUint32(RP2040SysCfg* self, int32_t offset);
 static void RP2040SysCfg_writeUint32(RP2040SysCfg* self, int32_t offset, int32_t value);
-static RP2040SysCfg* RP2040SysCfg_new(RP2350* rp2040, const char* name);
+static RP2040SysCfg* RP2040SysCfg_new(RP2040* rpchip, const char* name);
 static int32_t RP2350SysCfg_readUint32(RP2350SysCfg* self, int32_t offset);
 static void RP2350SysCfg_writeUint32(RP2350SysCfg* self, int32_t offset, int32_t value);
-static RP2350SysCfg* RP2350SysCfg_new(RP2350* rp2040, const char* name);
+static RP2350SysCfg* RP2350SysCfg_new(RP2350* rpchip, const char* name);
 static int32_t RP2040SysInfo_readUint32(RP2040SysInfo* self, int32_t offset);
-static RP2040SysInfo* RP2040SysInfo_new(RP2350* rp2040, const char* name);
+static RP2040SysInfo* RP2040SysInfo_new(RP2040* rpchip, const char* name);
 static int32_t RP2350SysInfo_readUint32(RP2350SysInfo* self, int32_t offset);
-static RP2350SysInfo* RP2350SysInfo_new(RP2350* rp2040, const char* name);
+static RP2350SysInfo* RP2350SysInfo_new(RP2350* rpchip, const char* name);
 static int32_t RPTBMAN_readUint32(RPTBMAN* self, int32_t offset);
-static RPTBMAN* RPTBMAN_new(RP2350* rp2040, const char* name);
+static RPTBMAN* RPTBMAN_new(RP2350* rpchip, const char* name);
+static int32_t RPTBMAN__RP2040_readUint32(RPTBMAN__RP2040* self, int32_t offset);
+static RPTBMAN__RP2040* RPTBMAN__RP2040_new(RP2040* rpchip, const char* name);
 static RPTimerAlarm* RPTimerAlarm_new(RPTimer* timer, int32_t bitValue, int32_t index);
 static void RPTimerAlarm_fire(RPTimerAlarm* self);
-static RPTimer* RPTimer_new(RP2350* rp2040, const char* name, int32_t timer_irq_base);
+static RPTimer* RPTimer_new(RP2350* rpchip, const char* name, int32_t timer_irq_base);
 static int32_t RPTimer_readUint32(RPTimer* self, int32_t offset);
 static void RPTimer_writeUint32(RPTimer* self, int32_t offset, int32_t value);
 static void RPTimer_fireAlarm(RPTimer* self, int32_t index);
 static void RPTimer_checkInterrupts(RPTimer* self);
 static void RPTimer_disarmAlarm(RPTimer* self, RPTimerAlarm* alarm);
 static int32_t RPTimer_intStatus_get(RPTimer* self);
+static RPTimerAlarm__RP2040* RPTimerAlarm__RP2040_new(RPTimer__RP2040* timer, int32_t bitValue, int32_t index);
+static void RPTimerAlarm__RP2040_fire(RPTimerAlarm__RP2040* self);
+static RPTimer__RP2040* RPTimer__RP2040_new(RP2040* rpchip, const char* name, int32_t timer_irq_base);
+static int32_t RPTimer__RP2040_readUint32(RPTimer__RP2040* self, int32_t offset);
+static void RPTimer__RP2040_writeUint32(RPTimer__RP2040* self, int32_t offset, int32_t value);
+static void RPTimer__RP2040_fireAlarm(RPTimer__RP2040* self, int32_t index);
+static void RPTimer__RP2040_checkInterrupts(RPTimer__RP2040* self);
+static void RPTimer__RP2040_disarmAlarm(RPTimer__RP2040* self, RPTimerAlarm__RP2040* alarm);
+static int32_t RPTimer__RP2040_intStatus_get(RPTimer__RP2040* self);
 static int32_t RP2350TRNG_nextWord(RP2350TRNG* self);
 static void RP2350TRNG_collect(RP2350TRNG* self);
 static int32_t RP2350TRNG_readUint32(RP2350TRNG* self, int32_t offset);
 static void RP2350TRNG_writeUint32(RP2350TRNG* self, int32_t offset, int32_t value);
-static RP2350TRNG* RP2350TRNG_new(RP2350* rp2040, const char* name);
-static RPUART* RPUART_new(RP2350* rp2040, const char* name, int32_t irq, IUARTDMAChannels* dreq);
+static RP2350TRNG* RP2350TRNG_new(RP2350* rpchip, const char* name);
+static RPUART* RPUART_new(RP2350* rpchip, const char* name, int32_t irq, IUARTDMAChannels* dreq);
 static void RPUART_checkInterrupts(RPUART* self);
 static void RPUART_feedByte(RPUART* self, int32_t value);
 static int32_t RPUART_readUint32(RPUART* self, int32_t offset);
@@ -2609,18 +3465,32 @@ static int32_t RPUART_wordLength_get(RPUART* self);
 static int32_t RPUART_baudDivider_get(RPUART* self);
 static int32_t RPUART_baudRate_get(RPUART* self);
 static int32_t RPUART_flags_get(RPUART* self);
+static RPUART__RP2040* RPUART__RP2040_new(RP2040* rpchip, const char* name, int32_t irq, IUARTDMAChannels* dreq);
+static void RPUART__RP2040_checkInterrupts(RPUART__RP2040* self);
+static void RPUART__RP2040_feedByte(RPUART__RP2040* self, int32_t value);
+static int32_t RPUART__RP2040_readUint32(RPUART__RP2040* self, int32_t offset);
+static void RPUART__RP2040_writeUint32(RPUART__RP2040* self, int32_t offset, int32_t value);
+static int32_t RPUART__RP2040_enabled_get(RPUART__RP2040* self);
+static int32_t RPUART__RP2040_txEnabled_get(RPUART__RP2040* self);
+static int32_t RPUART__RP2040_rxEnabled_get(RPUART__RP2040* self);
+static int32_t RPUART__RP2040_fifosEnabled_get(RPUART__RP2040* self);
+static int32_t RPUART__RP2040_wordLength_get(RPUART__RP2040* self);
+static int32_t RPUART__RP2040_baudDivider_get(RPUART__RP2040* self);
+static int32_t RPUART__RP2040_baudRate_get(RPUART__RP2040* self);
+static int32_t RPUART__RP2040_flags_get(RPUART__RP2040* self);
 static USBEndpointAlarm* USBEndpointAlarm_new(RPUSBController* usb, int32_t endpoint, bool isWrite);
-static void USBEndpointAlarm_schedule(USBEndpointAlarm* self, uint8_t* buffer, int32_t delayNanos);
+static uint8_t* USBEndpointAlarm_bufferSlot(USBEndpointAlarm* self, int32_t index);
+static void USBEndpointAlarm_schedule(USBEndpointAlarm* self, uint8_t* src, int32_t srcOffset, int32_t length, double delayNanos);
 static void USBEndpointAlarm_fire(USBEndpointAlarm* self);
-static RPUSBController* RPUSBController_new(RP2350* rp2040, const char* name, int32_t usbctrl_irq);
+static RPUSBController* RPUSBController_new(RP2350* rpchip, const char* name, int32_t usbctrl_irq);
 static void RPUSBController_fire(RPUSBController* self);
 static int32_t RPUSBController_readUint32(RPUSBController* self, int32_t offset);
 static void RPUSBController_writeUint32(RPUSBController* self, int32_t offset, int32_t value);
 static int32_t RPUSBController_readEndpointControlReg(RPUSBController* self, int32_t endpoint, bool out);
 static int32_t RPUSBController_getEndpointBufferOffset(RPUSBController* self, int32_t endpoint, bool out);
 static void RPUSBController_DPRAMUpdated(RPUSBController* self, int32_t offset, int32_t value);
-static void RPUSBController_endpointReadDone(RPUSBController* self, int32_t endpoint, uint8_t* buffer, int32_t delay);
-static void RPUSBController_finishRead(RPUSBController* self, int32_t endpoint, uint8_t* buffer);
+static void RPUSBController_endpointReadDone(RPUSBController* self, int32_t endpoint, uint8_t* src, int32_t length, int32_t delay);
+static void RPUSBController_finishRead(RPUSBController* self, int32_t endpoint, uint8_t* buffer, int32_t length);
 static void RPUSBController_checkInterrupts(RPUSBController* self);
 static void RPUSBController_resetDevice(RPUSBController* self);
 static void RPUSBController_sendSetupPacket(RPUSBController* self, uint8_t* setupPacket);
@@ -2629,17 +3499,54 @@ static void RPUSBController_buffStatusUpdated(RPUSBController* self);
 static void RPUSBController_mirrorSieBit(RPUSBController* self, int32_t sieBit, int32_t intRawBit);
 static void RPUSBController_sieStatusUpdated(RPUSBController* self);
 static int32_t RPUSBController_intStatus_get(RPUSBController* self);
-static RPWatchdog* RPWatchdog_new(RP2350* rp2040, const char* name);
+static USBEndpointAlarm__RP2040* USBEndpointAlarm__RP2040_new(RPUSBController__RP2040* usb, int32_t endpoint, bool isWrite);
+static uint8_t* USBEndpointAlarm__RP2040_bufferSlot(USBEndpointAlarm__RP2040* self, int32_t index);
+static void USBEndpointAlarm__RP2040_schedule(USBEndpointAlarm__RP2040* self, uint8_t* src, int32_t srcOffset, int32_t length, double delayNanos);
+static void USBEndpointAlarm__RP2040_fire(USBEndpointAlarm__RP2040* self);
+static RPUSBController__RP2040* RPUSBController__RP2040_new(RP2040* rpchip, const char* name, int32_t usbctrl_irq);
+static void RPUSBController__RP2040_fire(RPUSBController__RP2040* self);
+static int32_t RPUSBController__RP2040_readUint32(RPUSBController__RP2040* self, int32_t offset);
+static void RPUSBController__RP2040_writeUint32(RPUSBController__RP2040* self, int32_t offset, int32_t value);
+static int32_t RPUSBController__RP2040_readEndpointControlReg(RPUSBController__RP2040* self, int32_t endpoint, bool out);
+static int32_t RPUSBController__RP2040_getEndpointBufferOffset(RPUSBController__RP2040* self, int32_t endpoint, bool out);
+static void RPUSBController__RP2040_DPRAMUpdated(RPUSBController__RP2040* self, int32_t offset, int32_t value);
+static void RPUSBController__RP2040_endpointReadDone(RPUSBController__RP2040* self, int32_t endpoint, uint8_t* src, int32_t length, int32_t delay);
+static void RPUSBController__RP2040_finishRead(RPUSBController__RP2040* self, int32_t endpoint, uint8_t* buffer, int32_t length);
+static void RPUSBController__RP2040_checkInterrupts(RPUSBController__RP2040* self);
+static void RPUSBController__RP2040_resetDevice(RPUSBController__RP2040* self);
+static void RPUSBController__RP2040_sendSetupPacket(RPUSBController__RP2040* self, uint8_t* setupPacket);
+static void RPUSBController__RP2040_indicateBufferReady(RPUSBController__RP2040* self, int32_t endpoint, bool out);
+static void RPUSBController__RP2040_buffStatusUpdated(RPUSBController__RP2040* self);
+static void RPUSBController__RP2040_mirrorSieBit(RPUSBController__RP2040* self, int32_t sieBit, int32_t intRawBit);
+static void RPUSBController__RP2040_sieStatusUpdated(RPUSBController__RP2040* self);
+static int32_t RPUSBController__RP2040_intStatus_get(RPUSBController__RP2040* self);
+static int32_t RP2040VregAndChipReset_readUint32(RP2040VregAndChipReset* self, int32_t offset);
+static void RP2040VregAndChipReset_writeUint32(RP2040VregAndChipReset* self, int32_t offset, int32_t value);
+static RP2040VregAndChipReset* RP2040VregAndChipReset_new(RP2350* rpchip, const char* name);
+static RPWatchdog* RPWatchdog_new(RP2350* rpchip, const char* name);
 static void RPWatchdog_fire(RPWatchdog* self);
 static void RPWatchdog_reset(RPWatchdog* self);
 static int32_t RPWatchdog_readUint32(RPWatchdog* self, int32_t offset);
 static void RPWatchdog_writeUint32(RPWatchdog* self, int32_t offset, int32_t value);
+static RPWatchdog__RP2040* RPWatchdog__RP2040_new(RP2040* rpchip, const char* name);
+static void RPWatchdog__RP2040_fire(RPWatchdog__RP2040* self);
+static void RPWatchdog__RP2040_reset(RPWatchdog__RP2040* self);
+static int32_t RPWatchdog__RP2040_readUint32(RPWatchdog__RP2040* self, int32_t offset);
+static void RPWatchdog__RP2040_writeUint32(RPWatchdog__RP2040* self, int32_t offset, int32_t value);
+static bool RPXIPQMI_csNow(RPXIPQMI* self);
+static void RPXIPQMI_syncCs(RPXIPQMI* self);
 static int32_t RPXIPQMI_readUint32(RPXIPQMI* self, int32_t offset);
 static void RPXIPQMI_writeUint32(RPXIPQMI* self, int32_t offset, int32_t value);
-static RPXIPQMI* RPXIPQMI_new(RP2350* rp2040, const char* name);
+static void RPXIPQMI_beginTransaction(RPXIPQMI* self);
+static void RPXIPQMI_invalidateFlash(RPXIPQMI* self, int32_t base, int32_t len);
+static void RPXIPQMI_endTransaction(RPXIPQMI* self);
+static void RPXIPQMI_pushRx(RPXIPQMI* self, int32_t byte);
+static int32_t RPXIPQMI_statusByte(RPXIPQMI* self);
+static void RPXIPQMI_spiByte(RPXIPQMI* self, int32_t byte, bool nopush);
+static RPXIPQMI* RPXIPQMI_new(RP2350* rpchip, const char* name);
 static int32_t RPXIP_readUint32(RPXIP* self, int32_t offset);
 static void RPXIP_writeUint32(RPXIP* self, int32_t offset, int32_t value);
-static RPXIP* RPXIP_new(RP2350* rp2040, const char* name);
+static RPXIP* RPXIP_new(RP2350* rpchip, const char* name);
 static int32_t CPU_getRegister(CPU* self, int32_t index);
 static uint32_t CPU_getRegisterU(CPU* self, int32_t index);
 static void CPU_setRegister(CPU* self, int32_t index, int32_t value);
@@ -2651,11 +3558,21 @@ static void CPU_invalidateLrReservation(CPU* self, int32_t addr);
 static void CPU_fireSEV(CPU* self);
 static CPU* CPU_new(RP2350* chip, const char* coreLabel, int32_t mhartid);
 static void CPU_reset(CPU* self);
-static int32_t CPU_fetchInstruction(CPU* self);
 static void CPU_printDisassembly(CPU* self);
 static int32_t CPU_executeInstruction(CPU* self);
 static void CPU_executeInstructionsUpTo(CPU* self, int64_t cycle);
 static void CPU_step(CPU* self, int32_t instruction);
+static void CPU_executePacked(CPU* self);
+static void CPU_execLoad(CPU* self, int32_t tag, int32_t r, int32_t s1, int32_t imm);
+static void CPU_execStore(CPU* self, int32_t tag, int32_t s1, int32_t s2, int32_t imm);
+static void CPU_execOpImm(CPU* self, int32_t tag, int32_t r, int32_t s1, int32_t imm);
+static void CPU_execAmo(CPU* self, int32_t tag, int32_t r, int32_t s1, int32_t s2);
+static void CPU_execOp(CPU* self, int32_t tag, int32_t r, int32_t s1, int32_t s2);
+static void CPU_execH3(CPU* self, int32_t tag);
+static void CPU_execBranch(CPU* self, int32_t tag, int32_t s1, int32_t s2, int32_t imm);
+static void CPU_execSystem(CPU* self, int32_t tag, int32_t r, int32_t s1, int32_t imm);
+static void CPU_execCustom0(CPU* self, int32_t tag, int32_t r, int32_t s1, int32_t s2, int32_t imm);
+static void CPU_execZcmp(CPU* self, int32_t tag, int32_t r, int32_t s1, int32_t s2, int32_t imm);
 static void CPU_setInterruptEnabled(CPU* self, int32_t irq, bool value);
 static void CPU_insertCandidate(CPU* self, int32_t irq, int32_t priority);
 static void CPU_removeCandidate(CPU* self, int32_t irq);
@@ -2676,18 +3593,19 @@ static int32_t CPU_PC_get(CPU* self);
 static int32_t CPU_coreIndex_get(CPU* self);
 static void* CPU_logger_get(CPU* self);
 static void CPU_PC_set(CPU* self, int32_t value);
+static void RP2040_invalidateFlashDecode(RP2040* self, int32_t address, int32_t len);
 static RP2040* RP2040_new(RP2040Options* options);
 static void RP2040_loadBootrom(RP2040* self, uint32_t* bootromData);
 static void RP2040_loadDisassembly(RP2040* self, const char* dis);
 static LoadFirmwareResult* RP2040_loadFirmware(RP2040* self, const char* path, LoadFirmwareOptions* options);
 static void RP2040_reset(RP2040* self);
-static int32_t RP2040_readUint32(RP2040* self, int32_t address);
-static Peripheral RP2040_findPeripheral(RP2040* self, int32_t address);
-static int32_t RP2040_readUint16(RP2040* self, int32_t address);
-static int32_t RP2040_readUint8(RP2040* self, int32_t address);
-static void RP2040_writeUint32(RP2040* self, int32_t address, int32_t value);
-static void RP2040_writeUint8(RP2040* self, int32_t address, int32_t value);
-static void RP2040_writeUint16(RP2040* self, int32_t address, int32_t value);
+static uint32_t RP2040_readUint32(RP2040* self, uint32_t address);
+static Peripheral RP2040_findPeripheral(RP2040* self, uint32_t address);
+static uint32_t RP2040_readUint16(RP2040* self, uint32_t address);
+static uint32_t RP2040_readUint8(RP2040* self, uint32_t address);
+static void RP2040_writeUint32(RP2040* self, uint32_t address, uint32_t value);
+static void RP2040_writeUint8(RP2040* self, uint32_t address, uint32_t value);
+static void RP2040_writeUint16(RP2040* self, uint32_t address, uint32_t value);
 static void RP2040_dma_clearDREQ(RP2040* self, int32_t dreq);
 static void RP2040_dma_setDREQ(RP2040* self, int32_t dreq);
 static int32_t RP2040_gpioValues(RP2040* self, int32_t start_index);
@@ -2704,8 +3622,8 @@ static void RP2040_stepThings(RP2040* self, int32_t cycles);
 static void RP2040_step(RP2040* self);
 static void RP2040_stop(RP2040* self);
 static void RP2040_execute(RP2040* self);
-static int32_t RP2040_core0_get(RP2040* self);
-static int32_t RP2040_core1_get(RP2040* self);
+static CortexM0Core* RP2040_core0_get(RP2040* self);
+static CortexM0Core* RP2040_core1_get(RP2040* self);
 static int32_t RP2040_cycles_get(RP2040* self);
 static RP2350* RP2350_new(RP2350Options* options);
 static void RP2350_loadBootrom(RP2350* self, uint32_t* bootromData);
@@ -2716,6 +3634,9 @@ static uint32_t RP2350_readUint32(RP2350* self, uint32_t address);
 static Peripheral RP2350_findPeripheral(RP2350* self, uint32_t address);
 static uint32_t RP2350_readUint16(RP2350* self, uint32_t address);
 static uint32_t RP2350_readUint8(RP2350* self, uint32_t address);
+static void RP2350_invalidateSramDecode(RP2350* self, uint32_t address, int32_t len);
+static void RP2350_invalidateDecodeCache(RP2350* self);
+static void RP2350_invalidateFlashDecode(RP2350* self, uint32_t address, int32_t len);
 static void RP2350_writeUint32(RP2350* self, uint32_t address, uint32_t value);
 static void RP2350_writeUint8(RP2350* self, uint32_t address, uint32_t value);
 static void RP2350_writeUint16(RP2350* self, uint32_t address, uint32_t value);
@@ -2742,26 +3663,37 @@ static CortexM33Core* RP2350_armCore1_get(RP2350* self);
 static CPU* RP2350_core0_get(RP2350* self);
 static CPU* RP2350_core1_get(RP2350* self);
 static int64_t RP2350_cycles_get(RP2350* self);
-static Simulator* Simulator_new();
+static Simulator* Simulator_new(RP2350* rpchip);
 static void Simulator_execute(Simulator* self);
 static void Simulator_stop(Simulator* self);
 static int32_t Simulator_executing_get(Simulator* self);
-static RPSIOCore* RPSIOCore_new(RP2350* rp2040, FIFO* rxFIFO, FIFO* txFIFO, int32_t sio_interrupt, int32_t sio_interrupt_other_core, int32_t cpuCore, int32_t cpuCoreOther);
+static RPSIOCore* RPSIOCore_new(RP2350* rpchip, FIFO* rxFIFO, FIFO* txFIFO, int32_t sio_interrupt, int32_t sio_interrupt_other_core, int32_t cpuCore, int32_t cpuCoreOther);
 static int32_t RPSIOCore_readUint32(RPSIOCore* self, int32_t offset);
 static void RPSIOCore_writeUint32(RPSIOCore* self, int32_t offset, int32_t value);
 static void RPSIOCore_updateHardwareDivider(RPSIOCore* self, bool signed_);
-static RPSIO* RPSIO_new(RP2350* rp2040, int32_t sio_proc0_irq, int32_t sio_proc1_irq, int32_t sio_mtimecmp_irq);
+static RPSIOCore__RP2040* RPSIOCore__RP2040_new(RP2040* rpchip, FIFO* rxFIFO, FIFO* txFIFO, int32_t sio_interrupt, int32_t sio_interrupt_other_core, int32_t cpuCore, int32_t cpuCoreOther);
+static int32_t RPSIOCore__RP2040_readUint32(RPSIOCore__RP2040* self, int32_t offset);
+static void RPSIOCore__RP2040_writeUint32(RPSIOCore__RP2040* self, int32_t offset, int32_t value);
+static void RPSIOCore__RP2040_updateHardwareDivider(RPSIOCore__RP2040* self, bool signed_);
+static RPSIO* RPSIO_new(RP2040* rpchip, int32_t sio_proc0_irq, int32_t sio_proc1_irq);
 static int32_t RPSIO_readUint32(RPSIO* self, int32_t offset, int32_t cpuCore);
 static void RPSIO_writeUint32(RPSIO* self, int32_t offset, int32_t value, int32_t cpuCore);
-static Timer32PeriodicAlarm* RPSIO_createMtimecmpAlarm(RPSIO* self, RP2350* rp2040, int32_t sio_mtimecmp_irq, int32_t core);
-static int32_t RPSIO_getPinValue(RPSIO* self, int32_t index);
-static int32_t RPSIO_getOutputEnabled(RPSIO* self, int32_t index);
-static MtimecmpAlarmCallback* MtimecmpAlarmCallback_new(RP2350* rp2040, int32_t sio_mtimecmp_irq, int32_t core);
+static MtimecmpAlarmCallback* MtimecmpAlarmCallback_new(RP2350* rpchip, int32_t sio_mtimecmp_irq, int32_t core);
 static void MtimecmpAlarmCallback_fire(MtimecmpAlarmCallback* self);
+static RP2350SIO* RP2350SIO_new(RP2350* rpchip, int32_t sio_proc0_irq, int32_t sio_proc1_irq, int32_t sio_mtimecmp_irq);
+static Timer32PeriodicAlarm* RP2350SIO_createMtimecmpAlarm(RP2350SIO* self, RP2350* rpchip, int32_t sio_mtimecmp_irq, int32_t core);
+static int32_t RP2350SIO_readUint32(RP2350SIO* self, int32_t offset, int32_t cpuCore);
+static void RP2350SIO_writeUint32(RP2350SIO* self, int32_t offset, int32_t value, int32_t cpuCore);
+static int32_t RP2350SIO_getPinValue(RP2350SIO* self, int32_t index);
+static int32_t RP2350SIO_getOutputEnabled(RP2350SIO* self, int32_t index);
 static USBCDC* USBCDC_new(RPUSBController* usb);
 static void USBCDC_cdcSetControlLineState(USBCDC* self, int32_t value, int32_t interfaceNumber);
 static void USBCDC_deliverOutData(USBCDC* self, int32_t size);
 static void USBCDC_sendSerialByte(USBCDC* self, int32_t data);
+static USBCDC__RP2040* USBCDC__RP2040_new(RPUSBController__RP2040* usb);
+static void USBCDC__RP2040_cdcSetControlLineState(USBCDC__RP2040* self, int32_t value, int32_t interfaceNumber);
+static void USBCDC__RP2040_deliverOutData(USBCDC__RP2040* self, int32_t size);
+static void USBCDC__RP2040_sendSerialByte(USBCDC__RP2040* self, int32_t data);
 static EmulatorController* EmulatorController_new();
 static RP2350* EmulatorController_createChip(EmulatorController* self);
 static void EmulatorController_parseDisassembly(EmulatorController* self, const char* content);
@@ -2794,6 +3726,7 @@ static int32_t EmulatorController_convertNumber(EmulatorController* self, void* 
 static int32_t EmulatorController_reset(EmulatorController* self, bool keepBreakpoints);
 static int32_t EmulatorController_dumpPio(EmulatorController* self, int32_t instance);
 static int32_t EmulatorController_dumpGpio(EmulatorController* self);
+static int32_t EmulatorController_driveGpio(EmulatorController* self, int32_t pin, int32_t value);
 static FIFO* FIFO_new(int32_t size);
 static void FIFO_push(FIFO* self, int32_t value);
 static int32_t FIFO_pull(FIFO* self);
@@ -2842,6 +3775,7 @@ static void Timer32PeriodicAlarm_enable_set(Timer32PeriodicAlarm* self, bool val
 static void Timer32PeriodicAlarm_target_set(Timer32PeriodicAlarm* self, int32_t value);
 static int32_t signExtend8(int32_t value);
 static int32_t signExtend16(int32_t value);
+static void checkTraceMagicM0(CortexM0Core* core, int32_t opcodePC);
 static bool conditionPassed(M33Registers* regs, int32_t cond);
 static int32_t coprocessorExecute(CortexM33Core* core, int32_t hw0, int32_t hw1);
 static bool isMrcMcr(int32_t hw0, int32_t hw1);
@@ -2868,6 +3802,7 @@ static void advanceItState(CortexM33Core* core);
 static int32_t cyclesIO(CortexM33Core* core, int32_t addr, bool write);
 static int32_t subFlags(CortexM33Core* core, int32_t minuend, int32_t subtrahend, bool setFlags);
 static int32_t addFlags(CortexM33Core* core, int32_t a, int32_t b, int32_t carryIn, bool setFlags);
+static void checkTraceMagicM33(CortexM33Core* core, int32_t opcodePC);
 static int32_t executeThumb16(CortexM33Core* core, int32_t opcodePC, int32_t opcode);
 static void bxWritePC(CortexM33Core* core, int32_t address);
 static void handleHint(CortexM33Core* core, int32_t opcode);
@@ -2917,71 +3852,27 @@ static int32_t bitReverse(int32_t x);
 static int32_t rotr(int32_t x, int32_t n);
 static int32_t byteswap(int32_t w);
 static void sha256Compress(uint32_t* state, uint32_t* block);
+static int32_t int53High(int64_t packed);
 static int32_t umulh(int32_t a, int32_t b);
-static void executeLoad(int32_t inst, CPU* cpu);
-static void executeMiscMem(int32_t inst, CPU* cpu);
-static void executeOpImm(int32_t inst, CPU* cpu);
-static void executeStore(int32_t inst, CPU* cpu);
-static void executeAmo(int32_t inst, CPU* cpu);
-static void executeOp(int32_t inst, CPU* cpu);
-static void executeBranch(int32_t inst, CPU* cpu);
-static void executeJalr(int32_t inst, CPU* cpu);
-static void executeLui(int32_t inst, CPU* cpu);
-static void executeAuipc(int32_t inst, CPU* cpu);
 static void checkTraceMagic(CPU* cpu, int32_t magicStart);
-static void executeJal(int32_t inst, CPU* cpu);
-static void executeSystem(int32_t inst, CPU* cpu);
-static void executeCustom0(int32_t inst, CPU* cpu);
-static void executeRv32c(CPU* cpu, int32_t inst);
-static void assert(bool a);
-static void caddi4spn(CPU* cpu, int32_t inst);
-static void clw(CPU* cpu, int32_t inst);
-static void zcb_100_00(CPU* cpu, int32_t inst);
-static void csw(CPU* cpu, int32_t inst);
-static void cnop(void);
-static void caddi(CPU* cpu, int32_t inst);
-static void cjal(CPU* cpu, int32_t inst);
-static void cli(CPU* cpu, int32_t inst);
-static void caddi16sp(CPU* cpu, int32_t inst);
-static void clui(CPU* cpu, int32_t inst);
-static void csrli(CPU* cpu, int32_t inst);
-static void csrai(CPU* cpu, int32_t inst);
-static void candi(CPU* cpu, int32_t inst);
-static void csub(CPU* cpu, int32_t inst);
-static void cxor(CPU* cpu, int32_t inst);
-static void cor(CPU* cpu, int32_t inst);
-static void cand(CPU* cpu, int32_t inst);
-static void cj(CPU* cpu, int32_t inst);
-static void cbeqz(CPU* cpu, int32_t inst);
-static void cbenz(CPU* cpu, int32_t inst);
-static void cslli(CPU* cpu, int32_t inst);
-static void clwsp(CPU* cpu, int32_t inst);
-static void cjr(CPU* cpu, int32_t inst);
-static void cmv(CPU* cpu, int32_t inst);
-static void cebreak(CPU* cpu);
-static void cjalr(CPU* cpu, int32_t inst);
-static void cadd(CPU* cpu, int32_t inst);
-static void cswsp(CPU* cpu, int32_t inst);
-static void parse_011_01(CPU* cpu, int32_t inst);
-static void parse_100_01(CPU* cpu, int32_t inst);
-static void parse_100_10(CPU* cpu, int32_t inst);
-static void parse_101_10(CPU* cpu, int32_t inst);
+static int64_t decodeUncached(RP2350* chip, uint32_t address);
+static int64_t decodeAndCache(RP2350* chip, uint64_t* cache, int32_t idx, uint32_t address);
+static int64_t getDecodeEntry(RP2350* chip, uint32_t address);
+static int64_t emit(int32_t tag, int32_t rd, int32_t rs1, int32_t rs2, int32_t imm, int32_t length);
+static int64_t decodeWord(int32_t word);
+static int64_t decodeStandard(int32_t inst);
+static int64_t decodeCompressed(int32_t inst);
 static int32_t dec_rd(int32_t inst);
-static int32_t dec_rs1(int32_t inst);
 static int32_t dec_rs2(int32_t inst);
 static int32_t dec_rd_short(int32_t inst);
 static int32_t dec_rs1_short(int32_t inst);
 static int32_t dec_rs2_short(int32_t inst);
 static int32_t sign_extend(int32_t x, int32_t sign_position);
-static int32_t dec_cr_funct4(int32_t inst);
-static int32_t dec_css_imm(int32_t inst);
-static int32_t dec_ciw_imm(int32_t inst);
-static int32_t dec_clw_csw_imm(int32_t inst);
-static int32_t dec_cs_funct6(int32_t inst);
-static int32_t dec_cs_funct2(int32_t inst);
-static int32_t dec_cb_funct2(int32_t inst);
-static int32_t dec_branch_imm(int32_t inst);
-static int32_t dec_cj_imm(int32_t inst);
+static int64_t decodeC0(int32_t inst);
+static int64_t decodeC1(int32_t inst);
+static int64_t decodeC2(int32_t inst);
+static int32_t decCjImm(int32_t inst);
+static int32_t decBranchImm(int32_t inst);
 static void* resolveBootrom(const char* spec);
 static void* startDaemon(DaemonOptions* opts);
 static void handleConnection(void* conn, EmulatorController* mcp);
@@ -3008,7 +3899,7 @@ static void* sendRequest(const char* tool, void* args);
 static void* flagsToToolArgs(ParsedArgs* parsed, ToolDef* def);
 static void* ensureDaemon(bool noAutostart);
 static void* runToolSubcommand(ParsedArgs* parsed, ToolDef* def);
-static EndpointNumbers* extractEndpointNumbers(int32_t* descriptors);
+static int32_t extractEndpointNumbers(uint8_t* descriptors, int32_t count);
 static uint8_t* createSetupPacket(ISetupPacketParams* params);
 static uint8_t* setDeviceAddressPacket(int32_t address);
 static uint8_t* getDescriptorPacket(DescriptorType type, int32_t length, int32_t index);
@@ -3123,10 +4014,16 @@ static int32_t getCurrentMicroseconds(void);
 static const char* leftPad(const char* value, int32_t minLength, const char* padChar);
 static const char* rightPad(const char* value, int32_t minLength, const char* padChar);
 static const char* formatTime(void* date);
+static int64_t int53Pack(int32_t low, int32_t high);
+static LoadFirmwareResult* loadFirmware__RP2040(RP2040* chip, const char* path, LoadFirmwareOptions* options);
 static LoadFirmwareResult* loadFirmware__RP2350(RP2350* chip, const char* path, LoadFirmwareOptions* options);
+static LoadFirmwareResult* loadFirmwareFromUF2__RP2040(RP2040* chip, const char* path);
+static LoadFirmwareResult* loadFirmwareFromHex__RP2040(RP2040* chip, const char* hex, const char* path);
+static void setupVectoredRamBoot__RP2040(RP2040* chip, int32_t windowBase, int32_t windowSize);
 static LoadFirmwareResult* loadFirmwareFromUF2__RP2350(RP2350* chip, const char* path);
 static LoadFirmwareResult* loadFirmwareFromHex__RP2350(RP2350* chip, const char* hex, const char* path);
 static void setupVectoredRamBoot__RP2350(RP2350* chip, int32_t windowBase, int32_t windowSize);
+static void tryLoadDisassembly__RP2040(const char* path, RP2040* chip, const char* ext);
 static void tryLoadDisassembly__RP2350(const char* path, RP2350* chip, const char* ext);
 static inline int32_t opcode(int32_t i);
 static inline int32_t rd(int32_t i);
@@ -3207,6 +4104,23 @@ static const PeripheralVTable RPADC_Peripheral_vtable = {
   .byteAddressable = (void*)BasePeripheral_byteAddressable,
 };
 
+static const AlarmCallbackVTable ADCSampleAlarm__RP2040_AlarmCallback_vtable = {
+  .fire = (void*)ADCSampleAlarm__RP2040_fire,
+};
+
+static const AlarmCallbackVTable ADCMultiShotAlarm__RP2040_AlarmCallback_vtable = {
+  .fire = (void*)ADCMultiShotAlarm__RP2040_fire,
+};
+
+static const PeripheralVTable RPADC__RP2040_Peripheral_vtable = {
+  .readUint32 = (void*)RPADC__RP2040_readUint32,
+  .readUint32ViaCore = (void*)BasePeripheral__RP2040_readUint32ViaCore,
+  .writeUint32 = (void*)RPADC__RP2040_writeUint32,
+  .writeUint32ViaCore = (void*)BasePeripheral__RP2040_writeUint32ViaCore,
+  .writeUint32Atomic = (void*)BasePeripheral__RP2040_writeUint32Atomic,
+  .byteAddressable = (void*)BasePeripheral__RP2040_byteAddressable,
+};
+
 static const PeripheralVTable RPBootRAM_Peripheral_vtable = {
   .readUint32 = (void*)RPBootRAM_readUint32,
   .readUint32ViaCore = (void*)BasePeripheral_readUint32ViaCore,
@@ -3225,6 +4139,15 @@ static const PeripheralVTable RPBUSCTRL_Peripheral_vtable = {
   .byteAddressable = (void*)BasePeripheral_byteAddressable,
 };
 
+static const PeripheralVTable RPBUSCTRL__RP2040_Peripheral_vtable = {
+  .readUint32 = (void*)RPBUSCTRL__RP2040_readUint32,
+  .readUint32ViaCore = (void*)BasePeripheral__RP2040_readUint32ViaCore,
+  .writeUint32 = (void*)RPBUSCTRL__RP2040_writeUint32,
+  .writeUint32ViaCore = (void*)BasePeripheral__RP2040_writeUint32ViaCore,
+  .writeUint32Atomic = (void*)BasePeripheral__RP2040_writeUint32Atomic,
+  .byteAddressable = (void*)BasePeripheral__RP2040_byteAddressable,
+};
+
 static const PeripheralVTable RPClocks_Peripheral_vtable = {
   .readUint32 = (void*)RPClocks_readUint32,
   .readUint32ViaCore = (void*)BasePeripheral_readUint32ViaCore,
@@ -3234,14 +4157,36 @@ static const PeripheralVTable RPClocks_Peripheral_vtable = {
   .byteAddressable = (void*)BasePeripheral_byteAddressable,
 };
 
+static const PeripheralVTable RPClocks__RP2040_Peripheral_vtable = {
+  .readUint32 = (void*)RPClocks__RP2040_readUint32,
+  .readUint32ViaCore = (void*)BasePeripheral__RP2040_readUint32ViaCore,
+  .writeUint32 = (void*)RPClocks__RP2040_writeUint32,
+  .writeUint32ViaCore = (void*)BasePeripheral__RP2040_writeUint32ViaCore,
+  .writeUint32Atomic = (void*)BasePeripheral__RP2040_writeUint32Atomic,
+  .byteAddressable = (void*)BasePeripheral__RP2040_byteAddressable,
+};
+
 static const AlarmCallbackVTable RPDMAChannel_AlarmCallback_vtable = {
   .fire = (void*)RPDMAChannel_fire,
 };
 
 static const PeripheralVTable RPDMA_Peripheral_vtable = {
   .readUint32 = (void*)RPDMA_readUint32,
-  .readUint32ViaCore = (void*)BasePeripheral_readUint32ViaCore,
+  .readUint32ViaCore = (void*)BasePeripheral__RP2040_readUint32ViaCore,
   .writeUint32 = (void*)RPDMA_writeUint32,
+  .writeUint32ViaCore = (void*)BasePeripheral__RP2040_writeUint32ViaCore,
+  .writeUint32Atomic = (void*)BasePeripheral__RP2040_writeUint32Atomic,
+  .byteAddressable = (void*)BasePeripheral__RP2040_byteAddressable,
+};
+
+static const AlarmCallbackVTable RP2350DMAChannel_AlarmCallback_vtable = {
+  .fire = (void*)RP2350DMAChannel_fire,
+};
+
+static const PeripheralVTable RP2350DMA_Peripheral_vtable = {
+  .readUint32 = (void*)RP2350DMA_readUint32,
+  .readUint32ViaCore = (void*)BasePeripheral_readUint32ViaCore,
+  .writeUint32 = (void*)RP2350DMA_writeUint32,
   .writeUint32ViaCore = (void*)BasePeripheral_writeUint32ViaCore,
   .writeUint32Atomic = (void*)BasePeripheral_writeUint32Atomic,
   .byteAddressable = (void*)BasePeripheral_byteAddressable,
@@ -3256,10 +4201,37 @@ static const PeripheralVTable RPI2C_Peripheral_vtable = {
   .byteAddressable = (void*)BasePeripheral_byteAddressable,
 };
 
+static const PeripheralVTable RPI2C__RP2040_Peripheral_vtable = {
+  .readUint32 = (void*)RPI2C__RP2040_readUint32,
+  .readUint32ViaCore = (void*)BasePeripheral__RP2040_readUint32ViaCore,
+  .writeUint32 = (void*)RPI2C__RP2040_writeUint32,
+  .writeUint32ViaCore = (void*)BasePeripheral__RP2040_writeUint32ViaCore,
+  .writeUint32Atomic = (void*)BasePeripheral__RP2040_writeUint32Atomic,
+  .byteAddressable = (void*)BasePeripheral__RP2040_byteAddressable,
+};
+
 static const PeripheralVTable RPIO_Peripheral_vtable = {
   .readUint32 = (void*)RPIO_readUint32,
-  .readUint32ViaCore = (void*)BasePeripheral_readUint32ViaCore,
+  .readUint32ViaCore = (void*)BasePeripheral__RP2040_readUint32ViaCore,
   .writeUint32 = (void*)RPIO_writeUint32,
+  .writeUint32ViaCore = (void*)BasePeripheral__RP2040_writeUint32ViaCore,
+  .writeUint32Atomic = (void*)BasePeripheral__RP2040_writeUint32Atomic,
+  .byteAddressable = (void*)BasePeripheral__RP2040_byteAddressable,
+};
+
+static const PeripheralVTable RPIOQSPI_Peripheral_vtable = {
+  .readUint32 = (void*)RPIOQSPI_readUint32,
+  .readUint32ViaCore = (void*)BasePeripheral_readUint32ViaCore,
+  .writeUint32 = (void*)RPIOQSPI_writeUint32,
+  .writeUint32ViaCore = (void*)BasePeripheral_writeUint32ViaCore,
+  .writeUint32Atomic = (void*)BasePeripheral_writeUint32Atomic,
+  .byteAddressable = (void*)BasePeripheral_byteAddressable,
+};
+
+static const PeripheralVTable RP2350IO_Peripheral_vtable = {
+  .readUint32 = (void*)RP2350IO_readUint32,
+  .readUint32ViaCore = (void*)BasePeripheral_readUint32ViaCore,
+  .writeUint32 = (void*)RP2350IO_writeUint32,
   .writeUint32ViaCore = (void*)BasePeripheral_writeUint32ViaCore,
   .writeUint32Atomic = (void*)BasePeripheral_writeUint32Atomic,
   .byteAddressable = (void*)BasePeripheral_byteAddressable,
@@ -3285,8 +4257,17 @@ static const PeripheralVTable RP2350OTPData_Peripheral_vtable = {
 
 static const PeripheralVTable RPPADS_Peripheral_vtable = {
   .readUint32 = (void*)RPPADS_readUint32,
-  .readUint32ViaCore = (void*)BasePeripheral_readUint32ViaCore,
+  .readUint32ViaCore = (void*)BasePeripheral__RP2040_readUint32ViaCore,
   .writeUint32 = (void*)RPPADS_writeUint32,
+  .writeUint32ViaCore = (void*)BasePeripheral__RP2040_writeUint32ViaCore,
+  .writeUint32Atomic = (void*)BasePeripheral__RP2040_writeUint32Atomic,
+  .byteAddressable = (void*)BasePeripheral__RP2040_byteAddressable,
+};
+
+static const PeripheralVTable RP2350PADS_Peripheral_vtable = {
+  .readUint32 = (void*)RP2350PADS_readUint32,
+  .readUint32ViaCore = (void*)BasePeripheral_readUint32ViaCore,
+  .writeUint32 = (void*)RP2350PADS_writeUint32,
   .writeUint32ViaCore = (void*)BasePeripheral_writeUint32ViaCore,
   .writeUint32Atomic = (void*)BasePeripheral_writeUint32Atomic,
   .byteAddressable = (void*)BasePeripheral_byteAddressable,
@@ -3310,6 +4291,15 @@ static const PeripheralVTable UnimplementedPeripheral_Peripheral_vtable = {
   .byteAddressable = (void*)BasePeripheral_byteAddressable,
 };
 
+static const PeripheralVTable BasePeripheral__RP2040_Peripheral_vtable = {
+  .readUint32 = (void*)BasePeripheral__RP2040_readUint32,
+  .readUint32ViaCore = (void*)BasePeripheral__RP2040_readUint32ViaCore,
+  .writeUint32 = (void*)BasePeripheral__RP2040_writeUint32,
+  .writeUint32ViaCore = (void*)BasePeripheral__RP2040_writeUint32ViaCore,
+  .writeUint32Atomic = (void*)BasePeripheral__RP2040_writeUint32Atomic,
+  .byteAddressable = (void*)BasePeripheral__RP2040_byteAddressable,
+};
+
 static const PeripheralVTable RPPIO_Peripheral_vtable = {
   .readUint32 = (void*)RPPIO_readUint32,
   .readUint32ViaCore = (void*)BasePeripheral_readUint32ViaCore,
@@ -3317,6 +4307,15 @@ static const PeripheralVTable RPPIO_Peripheral_vtable = {
   .writeUint32ViaCore = (void*)BasePeripheral_writeUint32ViaCore,
   .writeUint32Atomic = (void*)BasePeripheral_writeUint32Atomic,
   .byteAddressable = (void*)BasePeripheral_byteAddressable,
+};
+
+static const PeripheralVTable RPPIO__RP2040_Peripheral_vtable = {
+  .readUint32 = (void*)RPPIO__RP2040_readUint32,
+  .readUint32ViaCore = (void*)BasePeripheral__RP2040_readUint32ViaCore,
+  .writeUint32 = (void*)RPPIO__RP2040_writeUint32,
+  .writeUint32ViaCore = (void*)BasePeripheral__RP2040_writeUint32ViaCore,
+  .writeUint32Atomic = (void*)BasePeripheral__RP2040_writeUint32Atomic,
+  .byteAddressable = (void*)BasePeripheral__RP2040_byteAddressable,
 };
 
 static const PeripheralVTable RP2350PLL_Peripheral_vtable = {
@@ -3347,12 +4346,12 @@ static const PeripheralVTable RP2350POWMAN_Peripheral_vtable = {
 };
 
 static const PeripheralVTable RPPPB_Peripheral_vtable = {
-  .readUint32 = (void*)BasePeripheral_readUint32,
+  .readUint32 = (void*)BasePeripheral__RP2040_readUint32,
   .readUint32ViaCore = (void*)RPPPB_readUint32ViaCore,
-  .writeUint32 = (void*)BasePeripheral_writeUint32,
+  .writeUint32 = (void*)BasePeripheral__RP2040_writeUint32,
   .writeUint32ViaCore = (void*)RPPPB_writeUint32ViaCore,
-  .writeUint32Atomic = (void*)BasePeripheral_writeUint32Atomic,
-  .byteAddressable = (void*)BasePeripheral_byteAddressable,
+  .writeUint32Atomic = (void*)BasePeripheral__RP2040_writeUint32Atomic,
+  .byteAddressable = (void*)BasePeripheral__RP2040_byteAddressable,
 };
 
 static const AlarmCallbackVTable RPPPB_AlarmCallback_vtable = {
@@ -3402,6 +4401,27 @@ static const PeripheralVTable RPPWM_Peripheral_vtable = {
   .byteAddressable = (void*)BasePeripheral_byteAddressable,
 };
 
+static const AlarmCallbackVTable PWMChannelAAlarmCallback__RP2040_AlarmCallback_vtable = {
+  .fire = (void*)PWMChannelAAlarmCallback__RP2040_fire,
+};
+
+static const AlarmCallbackVTable PWMChannelBAlarmCallback__RP2040_AlarmCallback_vtable = {
+  .fire = (void*)PWMChannelBAlarmCallback__RP2040_fire,
+};
+
+static const AlarmCallbackVTable PWMChannelBottomAlarmCallback__RP2040_AlarmCallback_vtable = {
+  .fire = (void*)PWMChannelBottomAlarmCallback__RP2040_fire,
+};
+
+static const PeripheralVTable RPPWM__RP2040_Peripheral_vtable = {
+  .readUint32 = (void*)RPPWM__RP2040_readUint32,
+  .readUint32ViaCore = (void*)BasePeripheral__RP2040_readUint32ViaCore,
+  .writeUint32 = (void*)RPPWM__RP2040_writeUint32,
+  .writeUint32ViaCore = (void*)BasePeripheral__RP2040_writeUint32ViaCore,
+  .writeUint32Atomic = (void*)BasePeripheral__RP2040_writeUint32Atomic,
+  .byteAddressable = (void*)BasePeripheral__RP2040_byteAddressable,
+};
+
 static const PeripheralVTable RPReset_Peripheral_vtable = {
   .readUint32 = (void*)RPReset_readUint32,
   .readUint32ViaCore = (void*)BasePeripheral_readUint32ViaCore,
@@ -3411,13 +4431,22 @@ static const PeripheralVTable RPReset_Peripheral_vtable = {
   .byteAddressable = (void*)BasePeripheral_byteAddressable,
 };
 
+static const PeripheralVTable RPReset__RP2040_Peripheral_vtable = {
+  .readUint32 = (void*)RPReset__RP2040_readUint32,
+  .readUint32ViaCore = (void*)BasePeripheral__RP2040_readUint32ViaCore,
+  .writeUint32 = (void*)RPReset__RP2040_writeUint32,
+  .writeUint32ViaCore = (void*)BasePeripheral__RP2040_writeUint32ViaCore,
+  .writeUint32Atomic = (void*)BasePeripheral__RP2040_writeUint32Atomic,
+  .byteAddressable = (void*)BasePeripheral__RP2040_byteAddressable,
+};
+
 static const PeripheralVTable RP2040RTC_Peripheral_vtable = {
   .readUint32 = (void*)RP2040RTC_readUint32,
-  .readUint32ViaCore = (void*)BasePeripheral_readUint32ViaCore,
+  .readUint32ViaCore = (void*)BasePeripheral__RP2040_readUint32ViaCore,
   .writeUint32 = (void*)RP2040RTC_writeUint32,
-  .writeUint32ViaCore = (void*)BasePeripheral_writeUint32ViaCore,
-  .writeUint32Atomic = (void*)BasePeripheral_writeUint32Atomic,
-  .byteAddressable = (void*)BasePeripheral_byteAddressable,
+  .writeUint32ViaCore = (void*)BasePeripheral__RP2040_writeUint32ViaCore,
+  .writeUint32Atomic = (void*)BasePeripheral__RP2040_writeUint32Atomic,
+  .byteAddressable = (void*)BasePeripheral__RP2040_byteAddressable,
 };
 
 static const PeripheralVTable RP2350SHA256_Peripheral_vtable = {
@@ -3438,22 +4467,31 @@ static const PeripheralVTable RPSPI_Peripheral_vtable = {
   .byteAddressable = (void*)BasePeripheral_byteAddressable,
 };
 
+static const PeripheralVTable RPSPI__RP2040_Peripheral_vtable = {
+  .readUint32 = (void*)RPSPI__RP2040_readUint32,
+  .readUint32ViaCore = (void*)BasePeripheral__RP2040_readUint32ViaCore,
+  .writeUint32 = (void*)RPSPI__RP2040_writeUint32,
+  .writeUint32ViaCore = (void*)BasePeripheral__RP2040_writeUint32ViaCore,
+  .writeUint32Atomic = (void*)BasePeripheral__RP2040_writeUint32Atomic,
+  .byteAddressable = (void*)BasePeripheral__RP2040_byteAddressable,
+};
+
 static const PeripheralVTable RPSSI_Peripheral_vtable = {
   .readUint32 = (void*)RPSSI_readUint32,
-  .readUint32ViaCore = (void*)BasePeripheral_readUint32ViaCore,
+  .readUint32ViaCore = (void*)BasePeripheral__RP2040_readUint32ViaCore,
   .writeUint32 = (void*)RPSSI_writeUint32,
-  .writeUint32ViaCore = (void*)BasePeripheral_writeUint32ViaCore,
-  .writeUint32Atomic = (void*)BasePeripheral_writeUint32Atomic,
-  .byteAddressable = (void*)BasePeripheral_byteAddressable,
+  .writeUint32ViaCore = (void*)BasePeripheral__RP2040_writeUint32ViaCore,
+  .writeUint32Atomic = (void*)BasePeripheral__RP2040_writeUint32Atomic,
+  .byteAddressable = (void*)BasePeripheral__RP2040_byteAddressable,
 };
 
 static const PeripheralVTable RP2040SysCfg_Peripheral_vtable = {
   .readUint32 = (void*)RP2040SysCfg_readUint32,
-  .readUint32ViaCore = (void*)BasePeripheral_readUint32ViaCore,
+  .readUint32ViaCore = (void*)BasePeripheral__RP2040_readUint32ViaCore,
   .writeUint32 = (void*)RP2040SysCfg_writeUint32,
-  .writeUint32ViaCore = (void*)BasePeripheral_writeUint32ViaCore,
-  .writeUint32Atomic = (void*)BasePeripheral_writeUint32Atomic,
-  .byteAddressable = (void*)BasePeripheral_byteAddressable,
+  .writeUint32ViaCore = (void*)BasePeripheral__RP2040_writeUint32ViaCore,
+  .writeUint32Atomic = (void*)BasePeripheral__RP2040_writeUint32Atomic,
+  .byteAddressable = (void*)BasePeripheral__RP2040_byteAddressable,
 };
 
 static const PeripheralVTable RP2350SysCfg_Peripheral_vtable = {
@@ -3467,11 +4505,11 @@ static const PeripheralVTable RP2350SysCfg_Peripheral_vtable = {
 
 static const PeripheralVTable RP2040SysInfo_Peripheral_vtable = {
   .readUint32 = (void*)RP2040SysInfo_readUint32,
-  .readUint32ViaCore = (void*)BasePeripheral_readUint32ViaCore,
-  .writeUint32 = (void*)BasePeripheral_writeUint32,
-  .writeUint32ViaCore = (void*)BasePeripheral_writeUint32ViaCore,
-  .writeUint32Atomic = (void*)BasePeripheral_writeUint32Atomic,
-  .byteAddressable = (void*)BasePeripheral_byteAddressable,
+  .readUint32ViaCore = (void*)BasePeripheral__RP2040_readUint32ViaCore,
+  .writeUint32 = (void*)BasePeripheral__RP2040_writeUint32,
+  .writeUint32ViaCore = (void*)BasePeripheral__RP2040_writeUint32ViaCore,
+  .writeUint32Atomic = (void*)BasePeripheral__RP2040_writeUint32Atomic,
+  .byteAddressable = (void*)BasePeripheral__RP2040_byteAddressable,
 };
 
 static const PeripheralVTable RP2350SysInfo_Peripheral_vtable = {
@@ -3492,6 +4530,15 @@ static const PeripheralVTable RPTBMAN_Peripheral_vtable = {
   .byteAddressable = (void*)BasePeripheral_byteAddressable,
 };
 
+static const PeripheralVTable RPTBMAN__RP2040_Peripheral_vtable = {
+  .readUint32 = (void*)RPTBMAN__RP2040_readUint32,
+  .readUint32ViaCore = (void*)BasePeripheral__RP2040_readUint32ViaCore,
+  .writeUint32 = (void*)BasePeripheral__RP2040_writeUint32,
+  .writeUint32ViaCore = (void*)BasePeripheral__RP2040_writeUint32ViaCore,
+  .writeUint32Atomic = (void*)BasePeripheral__RP2040_writeUint32Atomic,
+  .byteAddressable = (void*)BasePeripheral__RP2040_byteAddressable,
+};
+
 static const AlarmCallbackVTable RPTimerAlarm_AlarmCallback_vtable = {
   .fire = (void*)RPTimerAlarm_fire,
 };
@@ -3503,6 +4550,19 @@ static const PeripheralVTable RPTimer_Peripheral_vtable = {
   .writeUint32ViaCore = (void*)BasePeripheral_writeUint32ViaCore,
   .writeUint32Atomic = (void*)BasePeripheral_writeUint32Atomic,
   .byteAddressable = (void*)BasePeripheral_byteAddressable,
+};
+
+static const AlarmCallbackVTable RPTimerAlarm__RP2040_AlarmCallback_vtable = {
+  .fire = (void*)RPTimerAlarm__RP2040_fire,
+};
+
+static const PeripheralVTable RPTimer__RP2040_Peripheral_vtable = {
+  .readUint32 = (void*)RPTimer__RP2040_readUint32,
+  .readUint32ViaCore = (void*)BasePeripheral__RP2040_readUint32ViaCore,
+  .writeUint32 = (void*)RPTimer__RP2040_writeUint32,
+  .writeUint32ViaCore = (void*)BasePeripheral__RP2040_writeUint32ViaCore,
+  .writeUint32Atomic = (void*)BasePeripheral__RP2040_writeUint32Atomic,
+  .byteAddressable = (void*)BasePeripheral__RP2040_byteAddressable,
 };
 
 static const PeripheralVTable RP2350TRNG_Peripheral_vtable = {
@@ -3523,6 +4583,15 @@ static const PeripheralVTable RPUART_Peripheral_vtable = {
   .byteAddressable = (void*)BasePeripheral_byteAddressable,
 };
 
+static const PeripheralVTable RPUART__RP2040_Peripheral_vtable = {
+  .readUint32 = (void*)RPUART__RP2040_readUint32,
+  .readUint32ViaCore = (void*)BasePeripheral__RP2040_readUint32ViaCore,
+  .writeUint32 = (void*)RPUART__RP2040_writeUint32,
+  .writeUint32ViaCore = (void*)BasePeripheral__RP2040_writeUint32ViaCore,
+  .writeUint32Atomic = (void*)BasePeripheral__RP2040_writeUint32Atomic,
+  .byteAddressable = (void*)BasePeripheral__RP2040_byteAddressable,
+};
+
 static const AlarmCallbackVTable USBEndpointAlarm_AlarmCallback_vtable = {
   .fire = (void*)USBEndpointAlarm_fire,
 };
@@ -3540,6 +4609,32 @@ static const PeripheralVTable RPUSBController_Peripheral_vtable = {
   .byteAddressable = (void*)BasePeripheral_byteAddressable,
 };
 
+static const AlarmCallbackVTable USBEndpointAlarm__RP2040_AlarmCallback_vtable = {
+  .fire = (void*)USBEndpointAlarm__RP2040_fire,
+};
+
+static const AlarmCallbackVTable RPUSBController__RP2040_AlarmCallback_vtable = {
+  .fire = (void*)RPUSBController__RP2040_fire,
+};
+
+static const PeripheralVTable RPUSBController__RP2040_Peripheral_vtable = {
+  .readUint32 = (void*)RPUSBController__RP2040_readUint32,
+  .readUint32ViaCore = (void*)BasePeripheral__RP2040_readUint32ViaCore,
+  .writeUint32 = (void*)RPUSBController__RP2040_writeUint32,
+  .writeUint32ViaCore = (void*)BasePeripheral__RP2040_writeUint32ViaCore,
+  .writeUint32Atomic = (void*)BasePeripheral__RP2040_writeUint32Atomic,
+  .byteAddressable = (void*)BasePeripheral__RP2040_byteAddressable,
+};
+
+static const PeripheralVTable RP2040VregAndChipReset_Peripheral_vtable = {
+  .readUint32 = (void*)RP2040VregAndChipReset_readUint32,
+  .readUint32ViaCore = (void*)BasePeripheral_readUint32ViaCore,
+  .writeUint32 = (void*)RP2040VregAndChipReset_writeUint32,
+  .writeUint32ViaCore = (void*)BasePeripheral_writeUint32ViaCore,
+  .writeUint32Atomic = (void*)BasePeripheral_writeUint32Atomic,
+  .byteAddressable = (void*)BasePeripheral_byteAddressable,
+};
+
 static const PeripheralVTable RPWatchdog_Peripheral_vtable = {
   .readUint32 = (void*)RPWatchdog_readUint32,
   .readUint32ViaCore = (void*)BasePeripheral_readUint32ViaCore,
@@ -3551,6 +4646,19 @@ static const PeripheralVTable RPWatchdog_Peripheral_vtable = {
 
 static const AlarmCallbackVTable RPWatchdog_AlarmCallback_vtable = {
   .fire = (void*)RPWatchdog_fire,
+};
+
+static const PeripheralVTable RPWatchdog__RP2040_Peripheral_vtable = {
+  .readUint32 = (void*)RPWatchdog__RP2040_readUint32,
+  .readUint32ViaCore = (void*)BasePeripheral__RP2040_readUint32ViaCore,
+  .writeUint32 = (void*)RPWatchdog__RP2040_writeUint32,
+  .writeUint32ViaCore = (void*)BasePeripheral__RP2040_writeUint32ViaCore,
+  .writeUint32Atomic = (void*)BasePeripheral__RP2040_writeUint32Atomic,
+  .byteAddressable = (void*)BasePeripheral__RP2040_byteAddressable,
+};
+
+static const AlarmCallbackVTable RPWatchdog__RP2040_AlarmCallback_vtable = {
+  .fire = (void*)RPWatchdog__RP2040_fire,
 };
 
 static const PeripheralVTable RPXIPQMI_Peripheral_vtable = {
@@ -3572,13 +4680,13 @@ static const PeripheralVTable RPXIP_Peripheral_vtable = {
 };
 
 static const ICpuCoreVTable CPU_ICpuCore_vtable = {
-  /* TODO: .coreIndex = [src/riscv/cpu.ts:38: CPU implements ICpuCore] */ NULL,
-  /* TODO: .cycles = [src/riscv/cpu.ts:38: CPU implements ICpuCore] */ NULL,
-  /* TODO: .PC = [src/riscv/cpu.ts:38: CPU implements ICpuCore] */ NULL,
-  /* TODO: .waiting = [src/riscv/cpu.ts:38: CPU implements ICpuCore] */ NULL,
-  /* TODO: .eventRegistered = [src/riscv/cpu.ts:38: CPU implements ICpuCore] */ NULL,
-  /* TODO: .interruptsUpdated = [src/riscv/cpu.ts:38: CPU implements ICpuCore] */ NULL,
-  /* TODO: .otherCore = [src/riscv/cpu.ts:38: CPU implements ICpuCore] */ NULL,
+  /* TODO: .coreIndex = [src/riscv/cpu.ts:164: CPU implements ICpuCore] */ NULL,
+  /* TODO: .cycles = [src/riscv/cpu.ts:164: CPU implements ICpuCore] */ NULL,
+  /* TODO: .PC = [src/riscv/cpu.ts:164: CPU implements ICpuCore] */ NULL,
+  /* TODO: .waiting = [src/riscv/cpu.ts:164: CPU implements ICpuCore] */ NULL,
+  /* TODO: .eventRegistered = [src/riscv/cpu.ts:164: CPU implements ICpuCore] */ NULL,
+  /* TODO: .interruptsUpdated = [src/riscv/cpu.ts:164: CPU implements ICpuCore] */ NULL,
+  /* TODO: .otherCore = [src/riscv/cpu.ts:164: CPU implements ICpuCore] */ NULL,
   .getCycles = (void*)CPU_getCycles,
   .addCycles = (void*)CPU_addCycles,
   .setOtherCore = (void*)CPU_setOtherCore,
@@ -3590,29 +4698,30 @@ static const ICpuCoreVTable CPU_ICpuCore_vtable = {
 };
 
 static const IRPChipVTable RP2040_IRPChip_vtable = {
-  /* TODO: .identifier = [src/rp2040.ts:52: RP2040 implements IRPChip] */ NULL,
-  /* TODO: .logger = [src/rp2040.ts:52: RP2040 implements IRPChip] */ NULL,
+  /* TODO: .identifier = [src/rp2040.ts:54: RP2040 implements IRPChip] */ NULL,
+  /* TODO: .logger = [src/rp2040.ts:54: RP2040 implements IRPChip] */ NULL,
   .loadBootrom = (void*)RP2040_loadBootrom,
-  /* TODO: .disassembly = [src/rp2040.ts:52: RP2040 implements IRPChip] */ NULL,
+  /* TODO: .disassembly = [src/rp2040.ts:54: RP2040 implements IRPChip] */ NULL,
   .loadDisassembly = (void*)RP2040_loadDisassembly,
-  .onTrace = NULL, /* TODO: not implemented [src/rp2040.ts:52: RP2040 implements IRPChip] */
-  /* TODO: .core = [src/rp2040.ts:52: RP2040 implements IRPChip] */ NULL,
-  /* TODO: .currentCore = [src/rp2040.ts:52: RP2040 implements IRPChip] */ NULL,
-  /* TODO: .qspi = [src/rp2040.ts:52: RP2040 implements IRPChip] */ NULL,
-  /* TODO: .gpio = [src/rp2040.ts:52: RP2040 implements IRPChip] */ NULL,
+  .onTrace = NULL, /* TODO: not implemented [src/rp2040.ts:54: RP2040 implements IRPChip] */
+  /* TODO: .core = [src/rp2040.ts:54: RP2040 implements IRPChip] */ NULL,
+  /* TODO: .currentCore = [src/rp2040.ts:54: RP2040 implements IRPChip] */ NULL,
+  /* TODO: .qspi = [src/rp2040.ts:54: RP2040 implements IRPChip] */ NULL,
+  /* TODO: .gpio = [src/rp2040.ts:54: RP2040 implements IRPChip] */ NULL,
   .gpioValues = (void*)RP2040_gpioValues,
   .gpioRawOutputValue = (void*)RP2040_gpioRawOutputValue,
   .gpioRawOutputEnable = (void*)RP2040_gpioRawOutputEnable,
   .gpioInputValueHasBeenSet = (void*)RP2040_gpioInputValueHasBeenSet,
   .updatePioActiveLists = (void*)RP2040_updatePioActiveLists,
-  /* TODO: .pio = [src/rp2040.ts:52: RP2040 implements IRPChip] */ NULL,
-  /* TODO: .flash = [src/rp2040.ts:52: RP2040 implements IRPChip] */ NULL,
-  /* TODO: .sram = [src/rp2040.ts:52: RP2040 implements IRPChip] */ NULL,
-  /* TODO: .usbDPRAM = [src/rp2040.ts:52: RP2040 implements IRPChip] */ NULL,
-  /* TODO: .usbDPRAMView = [src/rp2040.ts:52: RP2040 implements IRPChip] */ NULL,
-  /* TODO: .cycles = [src/rp2040.ts:52: RP2040 implements IRPChip] */ NULL,
-  /* TODO: .clkSys = [src/rp2040.ts:52: RP2040 implements IRPChip] */ NULL,
-  /* TODO: .clkPeri = [src/rp2040.ts:52: RP2040 implements IRPChip] */ NULL,
+  /* TODO: .pio = [src/rp2040.ts:54: RP2040 implements IRPChip] */ NULL,
+  /* TODO: .flash = [src/rp2040.ts:54: RP2040 implements IRPChip] */ NULL,
+  /* TODO: .sram = [src/rp2040.ts:54: RP2040 implements IRPChip] */ NULL,
+  .invalidateFlashDecode = (void*)RP2040_invalidateFlashDecode,
+  /* TODO: .usbDPRAM = [src/rp2040.ts:54: RP2040 implements IRPChip] */ NULL,
+  /* TODO: .usbDPRAMView = [src/rp2040.ts:54: RP2040 implements IRPChip] */ NULL,
+  /* TODO: .cycles = [src/rp2040.ts:54: RP2040 implements IRPChip] */ NULL,
+  /* TODO: .clkSys = [src/rp2040.ts:54: RP2040 implements IRPChip] */ NULL,
+  /* TODO: .clkPeri = [src/rp2040.ts:54: RP2040 implements IRPChip] */ NULL,
   .readUint32 = (void*)RP2040_readUint32,
   .readUint16 = (void*)RP2040_readUint16,
   .readUint8 = (void*)RP2040_readUint8,
@@ -3621,7 +4730,7 @@ static const IRPChipVTable RP2040_IRPChip_vtable = {
   .writeUint16 = (void*)RP2040_writeUint16,
   .dma_clearDREQ = (void*)RP2040_dma_clearDREQ,
   .dma_setDREQ = (void*)RP2040_dma_setDREQ,
-  /* TODO: .clock = [src/rp2040.ts:52: RP2040 implements IRPChip] */ NULL,
+  /* TODO: .clock = [src/rp2040.ts:54: RP2040 implements IRPChip] */ NULL,
   .reset = (void*)RP2040_reset,
   .setInterrupt = (void*)RP2040_setInterrupt,
   .setInterruptCore = (void*)RP2040_setInterruptCore,
@@ -3632,29 +4741,30 @@ static const IRPChipVTable RP2040_IRPChip_vtable = {
 };
 
 static const IRPChipVTable RP2350_IRPChip_vtable = {
-  /* TODO: .identifier = [src/rp2350.ts:87: RP2350 implements IRPChip] */ NULL,
-  /* TODO: .logger = [src/rp2350.ts:87: RP2350 implements IRPChip] */ NULL,
+  /* TODO: .identifier = [src/rp2350.ts:88: RP2350 implements IRPChip] */ NULL,
+  /* TODO: .logger = [src/rp2350.ts:88: RP2350 implements IRPChip] */ NULL,
   .loadBootrom = (void*)RP2350_loadBootrom,
-  /* TODO: .disassembly = [src/rp2350.ts:87: RP2350 implements IRPChip] */ NULL,
+  /* TODO: .disassembly = [src/rp2350.ts:88: RP2350 implements IRPChip] */ NULL,
   .loadDisassembly = (void*)RP2350_loadDisassembly,
-  .onTrace = NULL, /* TODO: not implemented [src/rp2350.ts:87: RP2350 implements IRPChip] */
-  /* TODO: .core = [src/rp2350.ts:87: RP2350 implements IRPChip] */ NULL,
-  /* TODO: .currentCore = [src/rp2350.ts:87: RP2350 implements IRPChip] */ NULL,
-  /* TODO: .qspi = [src/rp2350.ts:87: RP2350 implements IRPChip] */ NULL,
-  /* TODO: .gpio = [src/rp2350.ts:87: RP2350 implements IRPChip] */ NULL,
+  .onTrace = NULL, /* TODO: not implemented [src/rp2350.ts:88: RP2350 implements IRPChip] */
+  /* TODO: .core = [src/rp2350.ts:88: RP2350 implements IRPChip] */ NULL,
+  /* TODO: .currentCore = [src/rp2350.ts:88: RP2350 implements IRPChip] */ NULL,
+  /* TODO: .qspi = [src/rp2350.ts:88: RP2350 implements IRPChip] */ NULL,
+  /* TODO: .gpio = [src/rp2350.ts:88: RP2350 implements IRPChip] */ NULL,
   .gpioValues = (void*)RP2350_gpioValues,
   .gpioRawOutputValue = (void*)RP2350_gpioRawOutputValue,
   .gpioRawOutputEnable = (void*)RP2350_gpioRawOutputEnable,
   .gpioInputValueHasBeenSet = (void*)RP2350_gpioInputValueHasBeenSet,
   .updatePioActiveLists = (void*)RP2350_updatePioActiveLists,
-  /* TODO: .pio = [src/rp2350.ts:87: RP2350 implements IRPChip] */ NULL,
-  /* TODO: .flash = [src/rp2350.ts:87: RP2350 implements IRPChip] */ NULL,
-  /* TODO: .sram = [src/rp2350.ts:87: RP2350 implements IRPChip] */ NULL,
-  /* TODO: .usbDPRAM = [src/rp2350.ts:87: RP2350 implements IRPChip] */ NULL,
-  /* TODO: .usbDPRAMView = [src/rp2350.ts:87: RP2350 implements IRPChip] */ NULL,
-  /* TODO: .cycles = [src/rp2350.ts:87: RP2350 implements IRPChip] */ NULL,
-  /* TODO: .clkSys = [src/rp2350.ts:87: RP2350 implements IRPChip] */ NULL,
-  /* TODO: .clkPeri = [src/rp2350.ts:87: RP2350 implements IRPChip] */ NULL,
+  /* TODO: .pio = [src/rp2350.ts:88: RP2350 implements IRPChip] */ NULL,
+  /* TODO: .flash = [src/rp2350.ts:88: RP2350 implements IRPChip] */ NULL,
+  /* TODO: .sram = [src/rp2350.ts:88: RP2350 implements IRPChip] */ NULL,
+  .invalidateFlashDecode = (void*)RP2350_invalidateFlashDecode,
+  /* TODO: .usbDPRAM = [src/rp2350.ts:88: RP2350 implements IRPChip] */ NULL,
+  /* TODO: .usbDPRAMView = [src/rp2350.ts:88: RP2350 implements IRPChip] */ NULL,
+  /* TODO: .cycles = [src/rp2350.ts:88: RP2350 implements IRPChip] */ NULL,
+  /* TODO: .clkSys = [src/rp2350.ts:88: RP2350 implements IRPChip] */ NULL,
+  /* TODO: .clkPeri = [src/rp2350.ts:88: RP2350 implements IRPChip] */ NULL,
   .readUint32 = (void*)RP2350_readUint32,
   .readUint16 = (void*)RP2350_readUint16,
   .readUint8 = (void*)RP2350_readUint8,
@@ -3663,7 +4773,7 @@ static const IRPChipVTable RP2350_IRPChip_vtable = {
   .writeUint16 = (void*)RP2350_writeUint16,
   .dma_clearDREQ = (void*)RP2350_dma_clearDREQ,
   .dma_setDREQ = (void*)RP2350_dma_setDREQ,
-  /* TODO: .clock = [src/rp2350.ts:87: RP2350 implements IRPChip] */ NULL,
+  /* TODO: .clock = [src/rp2350.ts:88: RP2350 implements IRPChip] */ NULL,
   .reset = (void*)RP2350_reset,
   .setInterrupt = (void*)RP2350_setInterrupt,
   .setInterruptCore = (void*)RP2350_setInterruptCore,
@@ -3675,7 +4785,7 @@ static const IRPChipVTable RP2350_IRPChip_vtable = {
 
 static const IGDBTargetVTable Simulator_IGDBTarget_vtable = {
   /* TODO: .executing = [src/simulator.ts:4: Simulator implements IGDBTarget] */ NULL,
-  /* TODO: .rp2040 = [src/simulator.ts:4: Simulator implements IGDBTarget] */ NULL,
+  /* TODO: .rpchip = [src/simulator.ts:4: Simulator implements IGDBTarget] */ NULL,
   .execute = (void*)Simulator_execute,
   .stop = (void*)Simulator_stop,
 };
@@ -3813,6 +4923,1319 @@ static double SimulationClock_nanosToNextAlarm_get(SimulationClock* self) {
   return 0;
 }
 
+// ─── cortex-m0-core.ts ───
+enum { SYSM_APSR = (0) };
+enum { SYSM_IAPSR = (1) };
+enum { SYSM_EAPSR = (2) };
+enum { SYSM_XPSR = (3) };
+enum { SYSM_IPSR = (5) };
+enum { SYSM_EPSR = (6) };
+enum { SYSM_IEPSR = (7) };
+enum { LOWEST_PRIORITY = (4) };
+static int32_t signExtend8(int32_t value) {
+  return ((int32_t)(((int32_t)((uint32_t)(value) << (24)))) >> (24));
+}
+
+static int32_t signExtend16(int32_t value) {
+  return ((int32_t)(((int32_t)((uint32_t)(value) << (16)))) >> (16));
+}
+
+enum { spRegister = (13) };
+enum { pcRegister = (15) };
+static void CortexM0Core_blTaken_default(void* __ctx, CortexM0Core* core, bool blx) {
+  CortexM0Core* self = (CortexM0Core*)__ctx;
+  (void)core;
+  (void)blx;
+}
+
+static int64_t CortexM0Core_getCycles(CortexM0Core* self) {
+  return self->cycles;
+}
+
+static void CortexM0Core_addCycles(CortexM0Core* self, int32_t delta) {
+  (self->cycles += delta);
+}
+
+static void CortexM0Core_setOtherCore(CortexM0Core* self, ICpuCore other) {
+  (self->otherCore = ((CortexM0Core*)((other).obj)));
+}
+
+static CortexM0Core* CortexM0Core_new(RP2040* rpchip, const char* coreLabel, int32_t coreNumber) {
+  CortexM0Core* self = calloc(1, sizeof(CortexM0Core));
+  (self)->__vtable_ICpuCore = &CortexM0Core_ICpuCore_vtable;
+  self->rpchip = rpchip;
+  self->coreLabel = coreLabel;
+  self->coreNumber = coreNumber;
+  self->bankedSP = 0;
+  self->cycles = 0;
+  self->eventRegistered = false;
+  self->waiting = false;
+  self->N = false;
+  self->C = false;
+  self->Z = false;
+  self->V = false;
+  self->breakRewind = 0;
+  self->PM = false;
+  self->SPSEL = StackPointerBank_SPmain;
+  self->nPRIV = false;
+  self->currentMode = ExecutionModeM0_Mode_Thread;
+  self->IPSR = 0;
+  self->interruptNMIMask = 0;
+  self->pendingInterrupts = 0;
+  self->enabledInterrupts = 0;
+  self->interruptPriorities = calloc(4, sizeof(int32_t));
+  self->interruptPriorities[0] = 4294967295u;
+  self->interruptPriorities[1] = 0;
+  self->interruptPriorities[2] = 0;
+  self->interruptPriorities[3] = 0;
+  self->pendingNMI = false;
+  self->pendingPendSV = false;
+  self->pendingSVCall = false;
+  self->pendingSystick = false;
+  self->interruptsUpdated = false;
+  self->VTOR = 0;
+  self->SHPR2 = 0;
+  self->SHPR3 = 0;
+  self->blTaken_fn = CortexM0Core_blTaken_default;
+  self->blTaken_ctx = self;
+  CortexM0Core_SP_set(self, 4294967292u);
+  (self->bankedSP = 4294967292u);
+  return self;
+}
+
+static void* CortexM0Core_logger_get(CortexM0Core* self) {
+  return self->rpchip->logger;
+}
+
+static int32_t CortexM0Core_coreIndex_get(CortexM0Core* self) {
+  return self->coreNumber;
+}
+
+static void CortexM0Core_fireSEV(CortexM0Core* self) {
+  if (self->otherCore->waiting) {
+  (self->otherCore->waiting = false);
+  } else {
+  (self->otherCore->eventRegistered = true);
+  }
+}
+
+static void CortexM0Core_reset(CortexM0Core* self) {
+  CortexM0Core_SP_set(self, RP2040_readUint32(self->rpchip, self->VTOR));
+  CortexM0Core_PC_set(self, ((int32_t)(RP2040_readUint32(self->rpchip, (self->VTOR + 4))) & (int32_t)(4294967294u)));
+  (self->cycles = 0);
+}
+
+static int32_t CortexM0Core_SP_get(CortexM0Core* self) {
+  return self->registers[13];
+}
+
+static void CortexM0Core_SP_set(CortexM0Core* self, int32_t value) {
+  (self->registers[13] = ((int32_t)(value) & (int32_t)((~3))));
+}
+
+static int32_t CortexM0Core_LR_get(CortexM0Core* self) {
+  return self->registers[14];
+}
+
+static void CortexM0Core_LR_set(CortexM0Core* self, int32_t value) {
+  (self->registers[14] = value);
+}
+
+static int32_t CortexM0Core_PC_get(CortexM0Core* self) {
+  return self->registers[15];
+}
+
+static void CortexM0Core_PC_set(CortexM0Core* self, int32_t value) {
+  (self->registers[15] = value);
+}
+
+static int32_t CortexM0Core_APSR_get(CortexM0Core* self) {
+  return ((int32_t)(((int32_t)(((int32_t)((self->N ? 2147483648u : 0)) | (int32_t)((self->Z ? 1073741824 : 0)))) | (int32_t)((self->C ? 536870912 : 0)))) | (int32_t)((self->V ? 268435456 : 0)));
+}
+
+static void CortexM0Core_APSR_set(CortexM0Core* self, int32_t value) {
+  (self->N = (!(!((int32_t)(value) & (int32_t)(2147483648u)))));
+  (self->Z = (!(!((int32_t)(value) & (int32_t)(1073741824)))));
+  (self->C = (!(!((int32_t)(value) & (int32_t)(536870912)))));
+  (self->V = (!(!((int32_t)(value) & (int32_t)(268435456)))));
+}
+
+static int32_t CortexM0Core_xPSR_get(CortexM0Core* self) {
+  return ((int32_t)(((int32_t)(CortexM0Core_APSR_get(self)) | (int32_t)(self->IPSR))) | (int32_t)(((int32_t)((uint32_t)(1) << (24)))));
+}
+
+static void CortexM0Core_xPSR_set(CortexM0Core* self, int32_t value) {
+  CortexM0Core_APSR_set(self, value);
+  (self->IPSR = ((int32_t)(value) & (int32_t)(63)));
+}
+
+static int32_t CortexM0Core_checkCondition(CortexM0Core* self, int32_t cond) {
+  int32_t result = false;
+  switch (((int32_t)(cond) >> (1))) {
+  case 0:
+  (result = self->Z);
+  break;
+  case 1:
+  (result = self->C);
+  break;
+  case 2:
+  (result = self->N);
+  break;
+  case 3:
+  (result = self->V);
+  break;
+  case 4:
+  (result = (self->C ? (!self->Z) : self->C));
+  break;
+  case 5:
+  (result = (self->N == self->V));
+  break;
+  case 6:
+  (result = ((self->N == self->V) ? (!self->Z) : (self->N == self->V)));
+  break;
+  case 7:
+  (result = true);
+  break;
+  }
+  return ((((int32_t)(cond) & (int32_t)(1)) && (cond != 15)) ? (!result) : result);
+}
+
+static int32_t CortexM0Core_readUint32(CortexM0Core* self, int32_t address) {
+  return RP2040_readUint32(self->rpchip, address);
+}
+
+static int32_t CortexM0Core_readUint16(CortexM0Core* self, int32_t address) {
+  return RP2040_readUint16(self->rpchip, address);
+}
+
+static int32_t CortexM0Core_readUint8(CortexM0Core* self, int32_t address) {
+  return RP2040_readUint8(self->rpchip, address);
+}
+
+static void CortexM0Core_writeUint32(CortexM0Core* self, int32_t address, int32_t value) {
+  RP2040_writeUint32(self->rpchip, address, value);
+}
+
+static void CortexM0Core_writeUint16(CortexM0Core* self, int32_t address, int32_t value) {
+  RP2040_writeUint16(self->rpchip, address, value);
+}
+
+static void CortexM0Core_writeUint8(CortexM0Core* self, int32_t address, int32_t value) {
+  RP2040_writeUint8(self->rpchip, address, value);
+}
+
+static void CortexM0Core_switchStack(CortexM0Core* self, StackPointerBank stack) {
+  if ((self->SPSEL != stack)) {
+  int32_t temp = CortexM0Core_SP_get(self);
+  CortexM0Core_SP_set(self, self->bankedSP);
+  (self->bankedSP = temp);
+  (self->SPSEL = stack);
+  }
+}
+
+static int32_t CortexM0Core_SPprocess_get(CortexM0Core* self) {
+  return ((self->SPSEL == StackPointerBank_SPprocess) ? CortexM0Core_SP_get(self) : self->bankedSP);
+}
+
+static void CortexM0Core_SPprocess_set(CortexM0Core* self, int32_t value) {
+  if ((self->SPSEL == StackPointerBank_SPprocess)) {
+  CortexM0Core_SP_set(self, value);
+  } else {
+  (self->bankedSP = ((uint32_t)(value) >> (0)));
+  }
+}
+
+static int32_t CortexM0Core_SPmain_get(CortexM0Core* self) {
+  return ((self->SPSEL == StackPointerBank_SPmain) ? CortexM0Core_SP_get(self) : self->bankedSP);
+}
+
+static void CortexM0Core_SPmain_set(CortexM0Core* self, int32_t value) {
+  if ((self->SPSEL == StackPointerBank_SPmain)) {
+  CortexM0Core_SP_set(self, value);
+  } else {
+  (self->bankedSP = ((uint32_t)(value) >> (0)));
+  }
+}
+
+static void CortexM0Core_exceptionEntry(CortexM0Core* self, int32_t exceptionNumber) {
+  int32_t framePtr = 0;
+  int32_t framePtrAlign = 0;
+  if ((self->SPSEL && (self->currentMode == ExecutionModeM0_Mode_Thread))) {
+  (framePtrAlign = (((int32_t)(CortexM0Core_SPprocess_get(self)) & (int32_t)(4)) ? 1 : 0));
+  CortexM0Core_SPprocess_set(self, ((int32_t)((CortexM0Core_SPprocess_get(self) - 32)) & (int32_t)((~4))));
+  (framePtr = CortexM0Core_SPprocess_get(self));
+  } else {
+  (framePtrAlign = (((int32_t)(CortexM0Core_SPmain_get(self)) & (int32_t)(4)) ? 1 : 0));
+  CortexM0Core_SPmain_set(self, ((int32_t)((CortexM0Core_SPmain_get(self) - 32)) & (int32_t)((~4))));
+  (framePtr = CortexM0Core_SPmain_get(self));
+  }
+  CortexM0Core_writeUint32(self, framePtr, self->registers[0]);
+  CortexM0Core_writeUint32(self, (framePtr + 4), self->registers[1]);
+  CortexM0Core_writeUint32(self, (framePtr + 8), self->registers[2]);
+  CortexM0Core_writeUint32(self, (framePtr + 12), self->registers[3]);
+  CortexM0Core_writeUint32(self, (framePtr + 16), self->registers[12]);
+  CortexM0Core_writeUint32(self, (framePtr + 20), CortexM0Core_LR_get(self));
+  CortexM0Core_writeUint32(self, (framePtr + 24), ((int32_t)(CortexM0Core_PC_get(self)) & (int32_t)((~1))));
+  CortexM0Core_writeUint32(self, (framePtr + 28), ((int32_t)(((int32_t)(CortexM0Core_xPSR_get(self)) & (int32_t)((~((int32_t)((uint32_t)(1) << (9))))))) | (int32_t)(((int32_t)((uint32_t)(framePtrAlign) << (9))))));
+  if ((self->currentMode == ExecutionModeM0_Mode_Handler)) {
+  CortexM0Core_LR_set(self, 4294967281u);
+  } else {
+  if ((!self->SPSEL)) {
+  CortexM0Core_LR_set(self, 4294967289u);
+  } else {
+  CortexM0Core_LR_set(self, 4294967293u);
+  }
+  }
+  (self->currentMode = ExecutionModeM0_Mode_Handler);
+  (self->IPSR = exceptionNumber);
+  CortexM0Core_switchStack(self, StackPointerBank_SPmain);
+  (self->eventRegistered = true);
+  int32_t vectorTable = self->VTOR;
+  CortexM0Core_PC_set(self, CortexM0Core_readUint32(self, (vectorTable + (4 * exceptionNumber))));
+}
+
+static void CortexM0Core_exceptionReturn(CortexM0Core* self, int32_t excReturn) {
+  int32_t framePtr = CortexM0Core_SPmain_get(self);
+  switch (((int32_t)(excReturn) & (int32_t)(15))) {
+  case 1:
+  (self->currentMode = ExecutionModeM0_Mode_Handler);
+  CortexM0Core_switchStack(self, StackPointerBank_SPmain);
+  break;
+  case 9:
+  (self->currentMode = ExecutionModeM0_Mode_Thread);
+  CortexM0Core_switchStack(self, StackPointerBank_SPmain);
+  break;
+  case 13:
+  (framePtr = CortexM0Core_SPprocess_get(self));
+  (self->currentMode = ExecutionModeM0_Mode_Thread);
+  CortexM0Core_switchStack(self, StackPointerBank_SPprocess);
+  break;
+  }
+  (self->registers[0] = CortexM0Core_readUint32(self, framePtr));
+  (self->registers[1] = CortexM0Core_readUint32(self, (framePtr + 4)));
+  (self->registers[2] = CortexM0Core_readUint32(self, (framePtr + 8)));
+  (self->registers[3] = CortexM0Core_readUint32(self, (framePtr + 12)));
+  (self->registers[12] = CortexM0Core_readUint32(self, (framePtr + 16)));
+  CortexM0Core_LR_set(self, CortexM0Core_readUint32(self, (framePtr + 20)));
+  CortexM0Core_PC_set(self, CortexM0Core_readUint32(self, (framePtr + 24)));
+  int32_t psr = CortexM0Core_readUint32(self, (framePtr + 28));
+  int32_t framePtrAlign = (((int32_t)(psr) & (int32_t)(((int32_t)((uint32_t)(1) << (9))))) ? 4 : 0);
+  switch (((int32_t)(excReturn) & (int32_t)(15))) {
+  case 1:
+  CortexM0Core_SPmain_set(self, ((int32_t)((CortexM0Core_SPmain_get(self) + 32)) | (int32_t)(framePtrAlign)));
+  break;
+  case 9:
+  CortexM0Core_SPmain_set(self, ((int32_t)((CortexM0Core_SPmain_get(self) + 32)) | (int32_t)(framePtrAlign)));
+  break;
+  case 13:
+  CortexM0Core_SPprocess_set(self, ((int32_t)((CortexM0Core_SPprocess_get(self) + 32)) | (int32_t)(framePtrAlign)));
+  break;
+  }
+  CortexM0Core_APSR_set(self, ((int32_t)(psr) & (int32_t)(4026531840u)));
+  int32_t forceThread = ((self->currentMode == ExecutionModeM0_Mode_Thread) ? self->nPRIV : (self->currentMode == ExecutionModeM0_Mode_Thread));
+  (self->IPSR = (forceThread ? 0 : ((int32_t)(psr) & (int32_t)(63))));
+  (self->interruptsUpdated = true);
+  (self->eventRegistered = true);
+}
+
+static int32_t CortexM0Core_pendSVPriority_get(CortexM0Core* self) {
+  return ((int32_t)(((int32_t)(self->SHPR3) >> (22))) & (int32_t)(3));
+}
+
+static int32_t CortexM0Core_svCallPriority_get(CortexM0Core* self) {
+  return ((uint32_t)(self->SHPR2) >> (30));
+}
+
+static int32_t CortexM0Core_systickPriority_get(CortexM0Core* self) {
+  return ((uint32_t)(self->SHPR3) >> (30));
+}
+
+static int32_t CortexM0Core_exceptionPriority(CortexM0Core* self, int32_t n) {
+  switch (n) {
+  case EXC_RESET:
+  return (-3);
+  case EXC_NMI:
+  return (-2);
+  case EXC_HARDFAULT:
+  return (-1);
+  case EXC_SVCALL:
+  return CortexM0Core_svCallPriority_get(self);
+  case EXC_PENDSV:
+  return CortexM0Core_pendSVPriority_get(self);
+  case EXC_SYSTICK:
+  return CortexM0Core_systickPriority_get(self);
+  default:
+  {
+  if ((n < 16)) {
+  return LOWEST_PRIORITY;
+  }
+  int32_t intNum = (n - 16);
+  for (
+int32_t priority = 0
+; (priority < 4); (priority++)) {
+  if (((int32_t)(self->interruptPriorities[priority]) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(intNum)) & 31)))))) {
+  return priority;
+  }
+  }
+  return LOWEST_PRIORITY;
+  }
+  }
+  return (int32_t){0};
+}
+
+static int32_t CortexM0Core_vectPending_get(CortexM0Core* self) {
+  if (self->pendingNMI) {
+  return EXC_NMI;
+  }
+  CortexM0Core* __destruct_tmp_1 = self;
+  int32_t svCallPriority = CortexM0Core_svCallPriority_get(__destruct_tmp_1);
+  int32_t systickPriority = CortexM0Core_systickPriority_get(__destruct_tmp_1);
+  int32_t pendSVPriority = CortexM0Core_pendSVPriority_get(__destruct_tmp_1);
+  int32_t pendingInterrupts = __destruct_tmp_1->pendingInterrupts;
+  for (
+int32_t priority = 0
+; (priority < LOWEST_PRIORITY); (priority++)) {
+  int32_t levelInterrupts = ((int32_t)(pendingInterrupts) & (int32_t)(self->interruptPriorities[priority]));
+  if ((self->pendingSVCall && (priority == svCallPriority))) {
+  return EXC_SVCALL;
+  }
+  if ((self->pendingPendSV && (priority == pendSVPriority))) {
+  return EXC_PENDSV;
+  }
+  if ((self->pendingSystick && (priority == systickPriority))) {
+  return EXC_SYSTICK;
+  }
+  if (levelInterrupts) {
+  for (
+int32_t interruptNumber = 0
+; (interruptNumber < 32); (interruptNumber++)) {
+  if (((int32_t)(levelInterrupts) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(interruptNumber)) & 31)))))) {
+  return (16 + interruptNumber);
+  }
+  }
+  }
+  }
+  return 0;
+}
+
+static void CortexM0Core_setInterrupt(CortexM0Core* self, int32_t irq, bool value) {
+  int32_t irqBit = ((int32_t)((uint32_t)(1) << (((int32_t)(irq)) & 31)));
+  if ((value && (!((int32_t)(self->pendingInterrupts) & (int32_t)(irqBit))))) {
+  (self->pendingInterrupts |= irqBit);
+  (self->interruptsUpdated = true);
+  if ((self->waiting && CortexM0Core_checkForInterrupts(self))) {
+  (self->waiting = false);
+  }
+  } else {
+  if ((!value)) {
+  (self->pendingInterrupts &= (~irqBit));
+  }
+  }
+}
+
+static int32_t CortexM0Core_checkForInterrupts(CortexM0Core* self) {
+  int32_t currentPriority = (self->waiting ? (self->PM ? CortexM0Core_exceptionPriority(self, self->IPSR) : LOWEST_PRIORITY) : min(CortexM0Core_exceptionPriority(self, self->IPSR), (self->PM ? 0 : LOWEST_PRIORITY)));
+  int32_t interruptSet = ((int32_t)(self->pendingInterrupts) & (int32_t)(self->enabledInterrupts));
+  CortexM0Core* __destruct_tmp_1 = self;
+  int32_t svCallPriority = CortexM0Core_svCallPriority_get(__destruct_tmp_1);
+  int32_t systickPriority = CortexM0Core_systickPriority_get(__destruct_tmp_1);
+  int32_t pendSVPriority = CortexM0Core_pendSVPriority_get(__destruct_tmp_1);
+  if (self->pendingNMI) {
+  (self->pendingNMI = false);
+  CortexM0Core_exceptionEntry(self, EXC_NMI);
+  return true;
+  }
+  for (
+int32_t priority = 0
+; (priority < currentPriority); (priority++)) {
+  int32_t levelInterrupts = ((int32_t)(interruptSet) & (int32_t)(self->interruptPriorities[priority]));
+  if ((self->pendingSVCall && (priority == svCallPriority))) {
+  (self->pendingSVCall = false);
+  CortexM0Core_exceptionEntry(self, EXC_SVCALL);
+  return true;
+  }
+  if ((self->pendingPendSV && (priority == pendSVPriority))) {
+  (self->pendingPendSV = false);
+  CortexM0Core_exceptionEntry(self, EXC_PENDSV);
+  return true;
+  }
+  if ((self->pendingSystick && (priority == systickPriority))) {
+  (self->pendingSystick = false);
+  CortexM0Core_exceptionEntry(self, EXC_SYSTICK);
+  return true;
+  }
+  if (levelInterrupts) {
+  for (
+int32_t interruptNumber = 0
+; (interruptNumber < 32); (interruptNumber++)) {
+  if (((int32_t)(levelInterrupts) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(interruptNumber)) & 31)))))) {
+  if ((interruptNumber > MAX_HARDWARE_IRQ)) {
+  (self->pendingInterrupts &= (~((int32_t)((uint32_t)(1) << (((int32_t)(interruptNumber)) & 31)))));
+  }
+  CortexM0Core_exceptionEntry(self, (16 + interruptNumber));
+  return true;
+  }
+  }
+  }
+  }
+  (self->interruptsUpdated = false);
+  return false;
+}
+
+static int32_t CortexM0Core_readSpecialRegister(CortexM0Core* self, int32_t sysm) {
+  switch (sysm) {
+  case SYSM_APSR:
+  return CortexM0Core_APSR_get(self);
+  case SYSM_XPSR:
+  return CortexM0Core_xPSR_get(self);
+  case SYSM_IPSR:
+  return self->IPSR;
+  case SYSM_PRIMASK:
+  return (self->PM ? 1 : 0);
+  case SYSM_MSP:
+  return CortexM0Core_SPmain_get(self);
+  case SYSM_PSP:
+  return CortexM0Core_SPprocess_get(self);
+  case SYSM_CONTROL:
+  return ((int32_t)(((self->SPSEL == StackPointerBank_SPprocess) ? 2 : 0)) | (int32_t)((self->nPRIV ? 1 : 0)));
+  default:
+  /* TODO: log [src/cortex-m0-core.ts:533: this.logger.warn(this.coreLabel, `MRS with unimplemented SYSm value: ${sysm}`);] */ 0;
+  return 0;
+  }
+  return (int32_t){0};
+}
+
+static int32_t CortexM0Core_writeSpecialRegister(CortexM0Core* self, int32_t sysm, int32_t value) {
+  switch (sysm) {
+  case SYSM_APSR:
+  CortexM0Core_APSR_set(self, value);
+  break;
+  case SYSM_XPSR:
+  CortexM0Core_xPSR_set(self, value);
+  break;
+  case SYSM_IPSR:
+  (self->IPSR = value);
+  break;
+  case SYSM_PRIMASK:
+  (self->PM = (!(!((int32_t)(value) & (int32_t)(1)))));
+  (self->interruptsUpdated = true);
+  break;
+  case SYSM_MSP:
+  CortexM0Core_SPmain_set(self, value);
+  break;
+  case SYSM_PSP:
+  CortexM0Core_SPprocess_set(self, value);
+  break;
+  case SYSM_CONTROL:
+  (self->nPRIV = (!(!((int32_t)(value) & (int32_t)(1)))));
+  if ((self->currentMode == ExecutionModeM0_Mode_Thread)) {
+  CortexM0Core_switchStack(self, (((int32_t)(value) & (int32_t)(2)) ? StackPointerBank_SPprocess : StackPointerBank_SPmain));
+  }
+  break;
+  default:
+  /* TODO: log [src/cortex-m0-core.ts:573: this.logger.warn(this.coreLabel, `MRS with unimplemented SYSm value: ${sysm}`);] */ 0;
+  return 0;
+  }
+  return (int32_t){0};
+}
+
+static void CortexM0Core_BXWritePC(CortexM0Core* self, int32_t address) {
+  if (((self->currentMode == ExecutionModeM0_Mode_Handler) && (((uint32_t)(address) >> (28)) == 15))) {
+  CortexM0Core_exceptionReturn(self, ((int32_t)(address) & (int32_t)(268435455)));
+  } else {
+  CortexM0Core_PC_set(self, ((int32_t)(address) & (int32_t)((~1))));
+  }
+}
+
+static int32_t CortexM0Core_substractUpdateFlags(CortexM0Core* self, uint32_t minuend, uint32_t subtrahend) {
+  int32_t result = ((uint32_t)((minuend - subtrahend)) >> (0));
+  (self->N = (!(!((int32_t)(result) & (int32_t)(2147483648u)))));
+  (self->Z = (result == 0));
+  (self->C = (minuend >= subtrahend));
+  (self->V = (((int32_t)(((int32_t)(minuend) ^ (int32_t)(subtrahend))) & (int32_t)(((int32_t)(minuend) ^ (int32_t)(result)))) < 0));
+  return result;
+}
+
+static int32_t CortexM0Core_addUpdateFlags(CortexM0Core* self, int32_t addend1, int32_t addend2) {
+  int32_t result = ((uint32_t)((addend1 + addend2)) >> (0));
+  (self->N = (!(!((int32_t)(result) & (int32_t)(2147483648u)))));
+  (self->Z = (result == 0));
+  (self->C = (((uint32_t)(addend1) >> (0)) > (4294967295u - ((uint32_t)(addend2) >> (0)))));
+  (self->V = (((int32_t)((~((int32_t)(addend1) ^ (int32_t)(addend2)))) & (int32_t)(((int32_t)(addend1) ^ (int32_t)(result)))) < 0));
+  return result;
+}
+
+static int32_t CortexM0Core_cyclesIO(CortexM0Core* self, int32_t addr, bool write) {
+  (addr = ((uint32_t)(addr) >> (0)));
+  if (((addr >= SIO_START_ADDRESS) && (addr < (SIO_START_ADDRESS + 268435456)))) {
+  return 0;
+  }
+  if (((addr >= APB_START_ADDRESS) && (addr < (APB_START_ADDRESS + 268435456)))) {
+  return (write ? 4 : 3);
+  }
+  return 1;
+}
+
+static void CortexM0Core_executeInstructionsUpTo(CortexM0Core* self, int64_t cycle) {
+  if (self->waiting) {
+  if ((self->cycles < cycle)) {
+  (self->cycles = cycle);
+  }
+  return;
+  }
+  while ((self->cycles < cycle)) {
+  CortexM0Core_executeInstruction(self);
+  }
+}
+
+static int32_t CortexM0Core_executeInstruction(CortexM0Core* self) {
+  if (self->waiting) {
+  (self->cycles++);
+  return 1;
+  }
+  if (self->interruptsUpdated) {
+  if (CortexM0Core_checkForInterrupts(self)) {
+  (self->waiting = false);
+  }
+  }
+  int32_t opcodePC = ((int32_t)(CortexM0Core_PC_get(self)) & (int32_t)((~1)));
+  int32_t opcode = CortexM0Core_readUint16(self, opcodePC);
+  int32_t wideInstruction = ((((int32_t)(opcode) >> (12)) == 15) ? (((int32_t)(opcode) >> (12)) == 15) : (((int32_t)(opcode) >> (11)) == 29));
+  int32_t opcode2 = (wideInstruction ? CortexM0Core_readUint16(self, (opcodePC + 2)) : 0);
+  CortexM0Core_PC_set(self, (CortexM0Core_PC_get(self) + 2));
+  int32_t deltaCycles = 1;
+  if ((((int32_t)(opcode) >> (6)) == 261)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rdn = ((int32_t)(opcode) & (int32_t)(7));
+  (self->registers[Rdn] = CortexM0Core_addUpdateFlags(self, self->registers[Rm], (self->registers[Rdn] + (self->C ? 1 : 0))));
+  } else {
+  if ((((int32_t)(opcode) >> (11)) == 21)) {
+  int32_t imm8 = ((int32_t)(opcode) & (int32_t)(255));
+  int32_t Rd = ((int32_t)(((int32_t)(opcode) >> (8))) & (int32_t)(7));
+  (self->registers[Rd] = (CortexM0Core_SP_get(self) + ((int32_t)((uint32_t)(imm8) << (2)))));
+  } else {
+  if ((((int32_t)(opcode) >> (7)) == 352)) {
+  int32_t imm32 = ((int32_t)((uint32_t)(((int32_t)(opcode) & (int32_t)(127))) << (2)));
+  CortexM0Core_SP_set(self, (CortexM0Core_SP_get(self) + imm32));
+  } else {
+  if ((((int32_t)(opcode) >> (9)) == 14)) {
+  int32_t imm3 = ((int32_t)(((int32_t)(opcode) >> (6))) & (int32_t)(7));
+  int32_t Rn = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rd = ((int32_t)(opcode) & (int32_t)(7));
+  (self->registers[Rd] = CortexM0Core_addUpdateFlags(self, self->registers[Rn], imm3));
+  } else {
+  if ((((int32_t)(opcode) >> (11)) == 6)) {
+  int32_t imm8 = ((int32_t)(opcode) & (int32_t)(255));
+  int32_t Rdn = ((int32_t)(((int32_t)(opcode) >> (8))) & (int32_t)(7));
+  (self->registers[Rdn] = CortexM0Core_addUpdateFlags(self, self->registers[Rdn], imm8));
+  } else {
+  if ((((int32_t)(opcode) >> (9)) == 12)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (6))) & (int32_t)(7));
+  int32_t Rn = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rd = ((int32_t)(opcode) & (int32_t)(7));
+  (self->registers[Rd] = CortexM0Core_addUpdateFlags(self, self->registers[Rn], self->registers[Rm]));
+  } else {
+  if ((((int32_t)(opcode) >> (8)) == 68)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(15));
+  int32_t Rdn = ((int32_t)(((int32_t)(((int32_t)(opcode) & (int32_t)(128))) >> (4))) | (int32_t)(((int32_t)(opcode) & (int32_t)(7))));
+  int32_t leftValue = ((Rdn == pcRegister) ? (CortexM0Core_PC_get(self) + 2) : self->registers[Rdn]);
+  uint32_t rightValue = self->registers[Rm];
+  int32_t result = (leftValue + rightValue);
+  if (((Rdn != spRegister) && (Rdn != pcRegister))) {
+  (self->registers[Rdn] = result);
+  } else {
+  if ((Rdn == pcRegister)) {
+  (self->registers[Rdn] = ((int32_t)(result) & (int32_t)((~1))));
+  (deltaCycles++);
+  } else {
+  if ((Rdn == spRegister)) {
+  (self->registers[Rdn] = ((int32_t)(result) & (int32_t)((~3))));
+  }
+  }
+  }
+  } else {
+  if ((((int32_t)(opcode) >> (11)) == 20)) {
+  int32_t imm8 = ((int32_t)(opcode) & (int32_t)(255));
+  int32_t Rd = ((int32_t)(((int32_t)(opcode) >> (8))) & (int32_t)(7));
+  (self->registers[Rd] = ((((int32_t)(opcodePC) & (int32_t)(4294967292u)) + 4) + ((int32_t)((uint32_t)(imm8) << (2)))));
+  } else {
+  if ((((int32_t)(opcode) >> (6)) == 256)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rdn = ((int32_t)(opcode) & (int32_t)(7));
+  int32_t result = ((int32_t)(self->registers[Rdn]) & (int32_t)(self->registers[Rm]));
+  (self->registers[Rdn] = result);
+  (self->N = (!(!((int32_t)(result) & (int32_t)(2147483648u)))));
+  (self->Z = (((int32_t)(result) & (int32_t)(4294967295u)) == 0));
+  } else {
+  if ((((int32_t)(opcode) >> (11)) == 2)) {
+  int32_t imm5 = ((int32_t)(((int32_t)(opcode) >> (6))) & (int32_t)(31));
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rd = ((int32_t)(opcode) & (int32_t)(7));
+  uint32_t input = self->registers[Rm];
+  int32_t shiftN = (imm5 ? imm5 : 32);
+  int32_t result = ((shiftN < 32) ? ((int32_t)(input) >> (((int32_t)(shiftN)) & 31)) : ((int32_t)(((int32_t)(input) & (int32_t)(2147483648u))) >> (31)));
+  (self->registers[Rd] = result);
+  (self->N = (!(!((int32_t)(result) & (int32_t)(2147483648u)))));
+  (self->Z = (((int32_t)(result) & (int32_t)(4294967295u)) == 0));
+  (self->C = (((int32_t)(input) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)((shiftN - 1))) & 31))))) ? true : false));
+  } else {
+  if ((((int32_t)(opcode) >> (6)) == 260)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rdn = ((int32_t)(opcode) & (int32_t)(7));
+  uint32_t input = self->registers[Rdn];
+  int32_t shiftN = ((((int32_t)(self->registers[Rm]) & (int32_t)(255)) < 32) ? ((int32_t)(self->registers[Rm]) & (int32_t)(255)) : 32);
+  int32_t result = ((shiftN < 32) ? ((int32_t)(input) >> (((int32_t)(shiftN)) & 31)) : ((int32_t)(((int32_t)(input) & (int32_t)(2147483648u))) >> (31)));
+  (self->registers[Rdn] = result);
+  (self->N = (!(!((int32_t)(result) & (int32_t)(2147483648u)))));
+  (self->Z = (((int32_t)(result) & (int32_t)(4294967295u)) == 0));
+  (self->C = (((int32_t)(input) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)((shiftN - 1))) & 31))))) ? true : false));
+  } else {
+  if (((((int32_t)(opcode) >> (12)) == 13) && (((int32_t)(((int32_t)(opcode) >> (9))) & (int32_t)(7)) != 7))) {
+  int32_t imm8 = ((int32_t)((uint32_t)(((int32_t)(opcode) & (int32_t)(255))) << (1)));
+  int32_t cond = ((int32_t)(((int32_t)(opcode) >> (8))) & (int32_t)(15));
+  if (((int32_t)(imm8) & (int32_t)(((int32_t)((uint32_t)(1) << (8)))))) {
+  (imm8 = (((int32_t)(imm8) & (int32_t)(511)) - 512));
+  }
+  if (CortexM0Core_checkCondition(self, cond)) {
+  CortexM0Core_PC_set(self, (CortexM0Core_PC_get(self) + (imm8 + 2)));
+  (deltaCycles++);
+  }
+  } else {
+  if ((((int32_t)(opcode) >> (11)) == 28)) {
+  checkTraceMagicM0(self, opcodePC);
+  int32_t imm11 = ((int32_t)((uint32_t)(((int32_t)(opcode) & (int32_t)(2047))) << (1)));
+  if (((int32_t)(imm11) & (int32_t)(((int32_t)((uint32_t)(1) << (11)))))) {
+  (imm11 = (((int32_t)(imm11) & (int32_t)(2047)) - 2048));
+  }
+  CortexM0Core_PC_set(self, (CortexM0Core_PC_get(self) + (imm11 + 2)));
+  (deltaCycles++);
+  } else {
+  if ((((int32_t)(opcode) >> (6)) == 270)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rdn = ((int32_t)(opcode) & (int32_t)(7));
+  int32_t result = (self->registers[Rdn] &= (~self->registers[Rm]));
+  (self->N = (!(!((int32_t)(result) & (int32_t)(2147483648u)))));
+  (self->Z = (result == 0));
+  } else {
+  if ((((int32_t)(opcode) >> (8)) == 190)) {
+  int32_t imm8 = ((int32_t)(opcode) & (int32_t)(255));
+  (self->breakRewind = 2);
+  ((self)->onBreak_fn ? (self)->onBreak_fn((self)->onBreak_ctx, imm8) : (void)0);
+  } else {
+  if ((((((int32_t)(opcode) >> (11)) == 30) && (((int32_t)(opcode2) >> (14)) == 3)) && (((int32_t)(((int32_t)(opcode2) >> (12))) & (int32_t)(1)) == 1))) {
+  int32_t imm11 = ((int32_t)(opcode2) & (int32_t)(2047));
+  int32_t J2 = ((int32_t)(((int32_t)(opcode2) >> (11))) & (int32_t)(1));
+  int32_t J1 = ((int32_t)(((int32_t)(opcode2) >> (13))) & (int32_t)(1));
+  int32_t imm10 = ((int32_t)(opcode) & (int32_t)(1023));
+  int32_t S = ((int32_t)(((int32_t)(opcode) >> (10))) & (int32_t)(1));
+  int32_t I1 = (1 - ((int32_t)(S) ^ (int32_t)(J1)));
+  int32_t I2 = (1 - ((int32_t)(S) ^ (int32_t)(J2)));
+  int32_t imm32 = ((int32_t)(((int32_t)((uint32_t)((S ? 255 : 0)) << (24)))) | (int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)((uint32_t)(I1) << (23)))) | (int32_t)(((int32_t)((uint32_t)(I2) << (22)))))) | (int32_t)(((int32_t)((uint32_t)(imm10) << (12)))))) | (int32_t)(((int32_t)((uint32_t)(imm11) << (1)))))));
+  CortexM0Core_LR_set(self, ((int32_t)((CortexM0Core_PC_get(self) + 2)) | (int32_t)(1)));
+  CortexM0Core_PC_set(self, (CortexM0Core_PC_get(self) + (2 + imm32)));
+  (deltaCycles += 2);
+  ((self)->blTaken_fn ? (self)->blTaken_fn((self)->blTaken_ctx, self, false) : (void)0);
+  } else {
+  if (((((int32_t)(opcode) >> (7)) == 143) && (((int32_t)(opcode) & (int32_t)(7)) == 0))) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(15));
+  CortexM0Core_LR_set(self, ((int32_t)(CortexM0Core_PC_get(self)) | (int32_t)(1)));
+  CortexM0Core_PC_set(self, ((int32_t)(self->registers[Rm]) & (int32_t)((~1))));
+  (deltaCycles++);
+  ((self)->blTaken_fn ? (self)->blTaken_fn((self)->blTaken_ctx, self, true) : (void)0);
+  } else {
+  if (((((int32_t)(opcode) >> (7)) == 142) && (((int32_t)(opcode) & (int32_t)(7)) == 0))) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(15));
+  CortexM0Core_BXWritePC(self, self->registers[Rm]);
+  (deltaCycles++);
+  } else {
+  if ((((int32_t)(opcode) >> (6)) == 267)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rn = ((int32_t)(opcode) & (int32_t)(7));
+  CortexM0Core_addUpdateFlags(self, self->registers[Rn], self->registers[Rm]);
+  } else {
+  if ((((int32_t)(opcode) >> (11)) == 5)) {
+  int32_t Rn = ((int32_t)(((int32_t)(opcode) >> (8))) & (int32_t)(7));
+  int32_t imm8 = ((int32_t)(opcode) & (int32_t)(255));
+  CortexM0Core_substractUpdateFlags(self, self->registers[Rn], imm8);
+  } else {
+  if ((((int32_t)(opcode) >> (6)) == 266)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rn = ((int32_t)(opcode) & (int32_t)(7));
+  CortexM0Core_substractUpdateFlags(self, self->registers[Rn], self->registers[Rm]);
+  } else {
+  if ((((int32_t)(opcode) >> (8)) == 69)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(15));
+  int32_t Rn = ((int32_t)(((int32_t)(((int32_t)(opcode) >> (4))) & (int32_t)(8))) | (int32_t)(((int32_t)(opcode) & (int32_t)(7))));
+  CortexM0Core_substractUpdateFlags(self, self->registers[Rn], self->registers[Rm]);
+  } else {
+  if ((opcode == 46706)) {
+  (self->PM = true);
+  } else {
+  if ((opcode == 46690)) {
+  (self->PM = false);
+  (self->interruptsUpdated = true);
+  } else {
+  if (((opcode == 62399) && (((int32_t)(opcode2) & (int32_t)(65520)) == 36688))) {
+  CortexM0Core_PC_set(self, (CortexM0Core_PC_get(self) + 2));
+  (deltaCycles += 2);
+  } else {
+  if (((opcode == 62399) && (((int32_t)(opcode2) & (int32_t)(65520)) == 36672))) {
+  CortexM0Core_PC_set(self, (CortexM0Core_PC_get(self) + 2));
+  (deltaCycles += 2);
+  } else {
+  if ((((int32_t)(opcode) >> (6)) == 257)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rdn = ((int32_t)(opcode) & (int32_t)(7));
+  int32_t result = ((int32_t)(self->registers[Rm]) ^ (int32_t)(self->registers[Rdn]));
+  (self->registers[Rdn] = result);
+  (self->N = (!(!((int32_t)(result) & (int32_t)(2147483648u)))));
+  (self->Z = (result == 0));
+  } else {
+  if (((opcode == 62399) && (((int32_t)(opcode2) & (int32_t)(65520)) == 36704))) {
+  CortexM0Core_PC_set(self, (CortexM0Core_PC_get(self) + 2));
+  (deltaCycles += 2);
+  } else {
+  if ((((int32_t)(opcode) >> (11)) == 25)) {
+  int32_t Rn = ((int32_t)(((int32_t)(opcode) >> (8))) & (int32_t)(7));
+  int32_t registers = ((int32_t)(opcode) & (int32_t)(255));
+  uint32_t address = self->registers[Rn];
+  for (
+int32_t i = 0
+; (i < 8); (i++)) {
+  if (((int32_t)(registers) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(i)) & 31)))))) {
+  (self->registers[i] = CortexM0Core_readUint32(self, address));
+  (address += 4);
+  (deltaCycles++);
+  }
+  }
+  if ((!((int32_t)(registers) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(Rn)) & 31))))))) {
+  (self->registers[Rn] = address);
+  }
+  } else {
+  if ((((int32_t)(opcode) >> (11)) == 13)) {
+  int32_t imm5 = ((int32_t)((uint32_t)(((int32_t)(((int32_t)(opcode) >> (6))) & (int32_t)(31))) << (2)));
+  int32_t Rn = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rt = ((int32_t)(opcode) & (int32_t)(7));
+  int32_t addr = (self->registers[Rn] + imm5);
+  (deltaCycles += CortexM0Core_cyclesIO(self, addr, false));
+  (self->registers[Rt] = CortexM0Core_readUint32(self, addr));
+  } else {
+  if ((((int32_t)(opcode) >> (11)) == 19)) {
+  int32_t Rt = ((int32_t)(((int32_t)(opcode) >> (8))) & (int32_t)(7));
+  int32_t imm8 = ((int32_t)(opcode) & (int32_t)(255));
+  int32_t addr = (CortexM0Core_SP_get(self) + ((int32_t)((uint32_t)(imm8) << (2))));
+  (deltaCycles += CortexM0Core_cyclesIO(self, addr, false));
+  (self->registers[Rt] = CortexM0Core_readUint32(self, addr));
+  } else {
+  if ((((int32_t)(opcode) >> (11)) == 9)) {
+  int32_t imm8 = ((int32_t)((uint32_t)(((int32_t)(opcode) & (int32_t)(255))) << (2)));
+  int32_t Rt = ((int32_t)(((int32_t)(opcode) >> (8))) & (int32_t)(7));
+  int32_t nextPC = (CortexM0Core_PC_get(self) + 2);
+  int32_t addr = (((int32_t)(nextPC) & (int32_t)(4294967292u)) + imm8);
+  (deltaCycles += CortexM0Core_cyclesIO(self, addr, false));
+  (self->registers[Rt] = CortexM0Core_readUint32(self, addr));
+  } else {
+  if ((((int32_t)(opcode) >> (9)) == 44)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (6))) & (int32_t)(7));
+  int32_t Rn = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rt = ((int32_t)(opcode) & (int32_t)(7));
+  int32_t addr = (self->registers[Rm] + self->registers[Rn]);
+  (deltaCycles += CortexM0Core_cyclesIO(self, addr, false));
+  (self->registers[Rt] = CortexM0Core_readUint32(self, addr));
+  } else {
+  if ((((int32_t)(opcode) >> (11)) == 15)) {
+  int32_t imm5 = ((int32_t)(((int32_t)(opcode) >> (6))) & (int32_t)(31));
+  int32_t Rn = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rt = ((int32_t)(opcode) & (int32_t)(7));
+  int32_t addr = (self->registers[Rn] + imm5);
+  (deltaCycles += CortexM0Core_cyclesIO(self, addr, false));
+  (self->registers[Rt] = CortexM0Core_readUint8(self, addr));
+  } else {
+  if ((((int32_t)(opcode) >> (9)) == 46)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (6))) & (int32_t)(7));
+  int32_t Rn = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rt = ((int32_t)(opcode) & (int32_t)(7));
+  int32_t addr = (self->registers[Rm] + self->registers[Rn]);
+  (deltaCycles += CortexM0Core_cyclesIO(self, addr, false));
+  (self->registers[Rt] = CortexM0Core_readUint8(self, addr));
+  } else {
+  if ((((int32_t)(opcode) >> (11)) == 17)) {
+  int32_t imm5 = ((int32_t)(((int32_t)(opcode) >> (6))) & (int32_t)(31));
+  int32_t Rn = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rt = ((int32_t)(opcode) & (int32_t)(7));
+  int32_t addr = (self->registers[Rn] + ((int32_t)((uint32_t)(imm5) << (1))));
+  (deltaCycles += CortexM0Core_cyclesIO(self, addr, false));
+  (self->registers[Rt] = CortexM0Core_readUint16(self, addr));
+  } else {
+  if ((((int32_t)(opcode) >> (9)) == 45)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (6))) & (int32_t)(7));
+  int32_t Rn = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rt = ((int32_t)(opcode) & (int32_t)(7));
+  int32_t addr = (self->registers[Rm] + self->registers[Rn]);
+  (deltaCycles += CortexM0Core_cyclesIO(self, addr, false));
+  (self->registers[Rt] = CortexM0Core_readUint16(self, addr));
+  } else {
+  if ((((int32_t)(opcode) >> (9)) == 43)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (6))) & (int32_t)(7));
+  int32_t Rn = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rt = ((int32_t)(opcode) & (int32_t)(7));
+  int32_t addr = (self->registers[Rm] + self->registers[Rn]);
+  (deltaCycles += CortexM0Core_cyclesIO(self, addr, false));
+  (self->registers[Rt] = signExtend8(CortexM0Core_readUint8(self, addr)));
+  } else {
+  if ((((int32_t)(opcode) >> (9)) == 47)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (6))) & (int32_t)(7));
+  int32_t Rn = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rt = ((int32_t)(opcode) & (int32_t)(7));
+  int32_t addr = (self->registers[Rm] + self->registers[Rn]);
+  (deltaCycles += CortexM0Core_cyclesIO(self, addr, false));
+  (self->registers[Rt] = signExtend16(CortexM0Core_readUint16(self, addr)));
+  } else {
+  if ((((int32_t)(opcode) >> (11)) == 0)) {
+  int32_t imm5 = ((int32_t)(((int32_t)(opcode) >> (6))) & (int32_t)(31));
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rd = ((int32_t)(opcode) & (int32_t)(7));
+  uint32_t input = self->registers[Rm];
+  int32_t result = ((int32_t)((uint32_t)(input) << (((int32_t)(imm5)) & 31)));
+  (self->registers[Rd] = result);
+  (self->N = (!(!((int32_t)(result) & (int32_t)(2147483648u)))));
+  (self->Z = (result == 0));
+  (self->C = (imm5 ? (!(!((int32_t)(input) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)((32 - imm5))) & 31))))))) : self->C));
+  } else {
+  if ((((int32_t)(opcode) >> (6)) == 258)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rdn = ((int32_t)(opcode) & (int32_t)(7));
+  uint32_t input = self->registers[Rdn];
+  int32_t shiftCount = ((int32_t)(self->registers[Rm]) & (int32_t)(255));
+  int32_t result = ((shiftCount >= 32) ? 0 : ((int32_t)((uint32_t)(input) << (((int32_t)(shiftCount)) & 31))));
+  (self->registers[Rdn] = result);
+  (self->N = (!(!((int32_t)(result) & (int32_t)(2147483648u)))));
+  (self->Z = (result == 0));
+  (self->C = (shiftCount ? (!(!((int32_t)(input) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)((32 - shiftCount))) & 31))))))) : self->C));
+  } else {
+  if ((((int32_t)(opcode) >> (11)) == 1)) {
+  int32_t imm5 = ((int32_t)(((int32_t)(opcode) >> (6))) & (int32_t)(31));
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rd = ((int32_t)(opcode) & (int32_t)(7));
+  uint32_t input = self->registers[Rm];
+  int32_t result = (imm5 ? ((uint32_t)(input) >> (((int32_t)(imm5)) & 31)) : 0);
+  (self->registers[Rd] = result);
+  (self->N = (!(!((int32_t)(result) & (int32_t)(2147483648u)))));
+  (self->Z = (result == 0));
+  (self->C = (!(!((int32_t)(((uint32_t)(input) >> (((int32_t)((imm5 ? (imm5 - 1) : 31))) & 31))) & (int32_t)(1)))));
+  } else {
+  if ((((int32_t)(opcode) >> (6)) == 259)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rdn = ((int32_t)(opcode) & (int32_t)(7));
+  int32_t shiftAmount = ((int32_t)(self->registers[Rm]) & (int32_t)(255));
+  uint32_t input = self->registers[Rdn];
+  int32_t result = ((shiftAmount < 32) ? ((uint32_t)(input) >> (((int32_t)(shiftAmount)) & 31)) : 0);
+  (self->registers[Rdn] = result);
+  (self->N = (!(!((int32_t)(result) & (int32_t)(2147483648u)))));
+  (self->Z = (result == 0));
+  (self->C = ((shiftAmount <= 32) ? (!(!((int32_t)(((uint32_t)(input) >> (((int32_t)((shiftAmount - 1))) & 31))) & (int32_t)(1)))) : false));
+  } else {
+  if ((((int32_t)(opcode) >> (8)) == 70)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(15));
+  int32_t Rd = ((int32_t)(((int32_t)(((int32_t)(opcode) >> (4))) & (int32_t)(8))) | (int32_t)(((int32_t)(opcode) & (int32_t)(7))));
+  int32_t value = ((Rm == pcRegister) ? (CortexM0Core_PC_get(self) + 2) : self->registers[Rm]);
+  if ((Rd == pcRegister)) {
+  (deltaCycles++);
+  (value &= (~1));
+  } else {
+  if ((Rd == spRegister)) {
+  (value &= (~3));
+  }
+  }
+  (self->registers[Rd] = value);
+  } else {
+  if ((((int32_t)(opcode) >> (11)) == 4)) {
+  int32_t value = ((int32_t)(opcode) & (int32_t)(255));
+  int32_t Rd = ((int32_t)(((int32_t)(opcode) >> (8))) & (int32_t)(7));
+  (self->registers[Rd] = value);
+  (self->N = (!(!((int32_t)(value) & (int32_t)(2147483648u)))));
+  (self->Z = (value == 0));
+  } else {
+  if (((opcode == 62447) && (((int32_t)(opcode2) >> (12)) == 8))) {
+  int32_t SYSm = ((int32_t)(opcode2) & (int32_t)(255));
+  int32_t Rd = ((int32_t)(((int32_t)(opcode2) >> (8))) & (int32_t)(15));
+  (self->registers[Rd] = CortexM0Core_readSpecialRegister(self, SYSm));
+  CortexM0Core_PC_set(self, (CortexM0Core_PC_get(self) + 2));
+  (deltaCycles += 2);
+  } else {
+  if (((((int32_t)(opcode) >> (4)) == 3896) && (((int32_t)(opcode2) >> (8)) == 136))) {
+  int32_t SYSm = ((int32_t)(opcode2) & (int32_t)(255));
+  int32_t Rn = ((int32_t)(opcode) & (int32_t)(15));
+  CortexM0Core_writeSpecialRegister(self, SYSm, self->registers[Rn]);
+  CortexM0Core_PC_set(self, (CortexM0Core_PC_get(self) + 2));
+  (deltaCycles += 2);
+  } else {
+  if ((((int32_t)(opcode) >> (6)) == 269)) {
+  int32_t Rn = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rdm = ((int32_t)(opcode) & (int32_t)(7));
+  int32_t result = imul32(self->registers[Rn], self->registers[Rdm]);
+  (self->registers[Rdm] = result);
+  (self->N = (!(!((int32_t)(result) & (int32_t)(2147483648u)))));
+  (self->Z = (((int32_t)(result) & (int32_t)(4294967295u)) == 0));
+  } else {
+  if ((((int32_t)(opcode) >> (6)) == 271)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rd = ((int32_t)(opcode) & (int32_t)(7));
+  int32_t result = (~self->registers[Rm]);
+  (self->registers[Rd] = result);
+  (self->N = (!(!((int32_t)(result) & (int32_t)(2147483648u)))));
+  (self->Z = (result == 0));
+  } else {
+  if ((((int32_t)(opcode) >> (6)) == 268)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rdn = ((int32_t)(opcode) & (int32_t)(7));
+  int32_t result = ((int32_t)(self->registers[Rdn]) | (int32_t)(self->registers[Rm]));
+  (self->registers[Rdn] = result);
+  (self->N = (!(!((int32_t)(result) & (int32_t)(2147483648u)))));
+  (self->Z = (((int32_t)(result) & (int32_t)(4294967295u)) == 0));
+  } else {
+  if ((((int32_t)(opcode) >> (9)) == 94)) {
+  int32_t P = ((int32_t)(((int32_t)(opcode) >> (8))) & (int32_t)(1));
+  int32_t address = CortexM0Core_SP_get(self);
+  for (
+int32_t i = 0
+; (i <= 7); (i++)) {
+  if (((int32_t)(opcode) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(i)) & 31)))))) {
+  (self->registers[i] = CortexM0Core_readUint32(self, address));
+  (address += 4);
+  (deltaCycles++);
+  }
+  }
+  if (P) {
+  CortexM0Core_SP_set(self, (address + 4));
+  CortexM0Core_BXWritePC(self, CortexM0Core_readUint32(self, address));
+  (deltaCycles += 2);
+  } else {
+  CortexM0Core_SP_set(self, address);
+  }
+  } else {
+  if ((((int32_t)(opcode) >> (9)) == 90)) {
+  int32_t bitCount = 0;
+  for (
+int32_t i = 0
+; (i <= 8); (i++)) {
+  if (((int32_t)(opcode) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(i)) & 31)))))) {
+  (bitCount++);
+  }
+  }
+  int32_t address = (CortexM0Core_SP_get(self) - (4 * bitCount));
+  for (
+int32_t i = 0
+; (i <= 7); (i++)) {
+  if (((int32_t)(opcode) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(i)) & 31)))))) {
+  CortexM0Core_writeUint32(self, address, self->registers[i]);
+  (deltaCycles++);
+  (address += 4);
+  }
+  }
+  if (((int32_t)(opcode) & (int32_t)(((int32_t)((uint32_t)(1) << (8)))))) {
+  CortexM0Core_writeUint32(self, address, self->registers[14]);
+  }
+  CortexM0Core_SP_set(self, (CortexM0Core_SP_get(self) - (4 * bitCount)));
+  } else {
+  if ((((int32_t)(opcode) >> (6)) == 744)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rd = ((int32_t)(opcode) & (int32_t)(7));
+  uint32_t input = self->registers[Rm];
+  (self->registers[Rd] = ((int32_t)(((int32_t)(((int32_t)(((int32_t)((uint32_t)(((int32_t)(input) & (int32_t)(255))) << (24)))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(((int32_t)(input) >> (8))) & (int32_t)(255))) << (16)))))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(((int32_t)(input) >> (16))) & (int32_t)(255))) << (8)))))) | (int32_t)(((int32_t)(((int32_t)(input) >> (24))) & (int32_t)(255)))));
+  } else {
+  if ((((int32_t)(opcode) >> (6)) == 745)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rd = ((int32_t)(opcode) & (int32_t)(7));
+  uint32_t input = self->registers[Rm];
+  (self->registers[Rd] = ((int32_t)(((int32_t)(((int32_t)(((int32_t)((uint32_t)(((int32_t)(((int32_t)(input) >> (16))) & (int32_t)(255))) << (24)))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(((int32_t)(input) >> (24))) & (int32_t)(255))) << (16)))))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(input) & (int32_t)(255))) << (8)))))) | (int32_t)(((int32_t)(((int32_t)(input) >> (8))) & (int32_t)(255)))));
+  } else {
+  if ((((int32_t)(opcode) >> (6)) == 747)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rd = ((int32_t)(opcode) & (int32_t)(7));
+  uint32_t input = self->registers[Rm];
+  (self->registers[Rd] = signExtend16(((int32_t)(((int32_t)((uint32_t)(((int32_t)(input) & (int32_t)(255))) << (8)))) | (int32_t)(((int32_t)(((int32_t)(input) >> (8))) & (int32_t)(255))))));
+  } else {
+  if ((((int32_t)(opcode) >> (6)) == 263)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rdn = ((int32_t)(opcode) & (int32_t)(7));
+  uint32_t input = self->registers[Rdn];
+  int32_t shift = (((int32_t)(self->registers[Rm]) & (int32_t)(255)) % 32);
+  int32_t result = ((int32_t)(((uint32_t)(input) >> (((int32_t)(shift)) & 31))) | (int32_t)(((int32_t)((uint32_t)(input) << (((int32_t)((32 - shift))) & 31)))));
+  (self->registers[Rdn] = result);
+  (self->N = (!(!((int32_t)(result) & (int32_t)(2147483648u)))));
+  (self->Z = (result == 0));
+  (self->C = (!(!((int32_t)(result) & (int32_t)(2147483648u)))));
+  } else {
+  if ((((int32_t)(opcode) >> (6)) == 265)) {
+  int32_t Rn = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rd = ((int32_t)(opcode) & (int32_t)(7));
+  (self->registers[Rd] = CortexM0Core_substractUpdateFlags(self, 0, self->registers[Rn]));
+  } else {
+  if ((opcode == 48896)) {
+  } else {
+  if ((((int32_t)(opcode) >> (6)) == 262)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rdn = ((int32_t)(opcode) & (int32_t)(7));
+  (self->registers[Rdn] = CortexM0Core_substractUpdateFlags(self, self->registers[Rdn], (self->registers[Rm] + (1 - (self->C ? 1 : 0)))));
+  } else {
+  if ((opcode == 48960)) {
+  CortexM0Core_fireSEV(self);
+  } else {
+  if ((((int32_t)(opcode) >> (11)) == 24)) {
+  int32_t Rn = ((int32_t)(((int32_t)(opcode) >> (8))) & (int32_t)(7));
+  int32_t registers = ((int32_t)(opcode) & (int32_t)(255));
+  uint32_t address = self->registers[Rn];
+  for (
+int32_t i = 0
+; (i < 8); (i++)) {
+  if (((int32_t)(registers) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(i)) & 31)))))) {
+  CortexM0Core_writeUint32(self, address, self->registers[i]);
+  (address += 4);
+  (deltaCycles++);
+  }
+  }
+  if ((!((int32_t)(registers) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(Rn)) & 31))))))) {
+  (self->registers[Rn] = address);
+  }
+  } else {
+  if ((((int32_t)(opcode) >> (11)) == 12)) {
+  int32_t imm5 = ((int32_t)((uint32_t)(((int32_t)(((int32_t)(opcode) >> (6))) & (int32_t)(31))) << (2)));
+  int32_t Rn = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rt = ((int32_t)(opcode) & (int32_t)(7));
+  int32_t address = (self->registers[Rn] + imm5);
+  (deltaCycles += CortexM0Core_cyclesIO(self, address, true));
+  CortexM0Core_writeUint32(self, address, self->registers[Rt]);
+  } else {
+  if ((((int32_t)(opcode) >> (11)) == 18)) {
+  int32_t Rt = ((int32_t)(((int32_t)(opcode) >> (8))) & (int32_t)(7));
+  int32_t imm8 = ((int32_t)(opcode) & (int32_t)(255));
+  int32_t address = (CortexM0Core_SP_get(self) + ((int32_t)((uint32_t)(imm8) << (2))));
+  (deltaCycles += CortexM0Core_cyclesIO(self, address, true));
+  CortexM0Core_writeUint32(self, address, self->registers[Rt]);
+  } else {
+  if ((((int32_t)(opcode) >> (9)) == 40)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (6))) & (int32_t)(7));
+  int32_t Rn = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rt = ((int32_t)(opcode) & (int32_t)(7));
+  int32_t address = (self->registers[Rm] + self->registers[Rn]);
+  (deltaCycles += CortexM0Core_cyclesIO(self, address, true));
+  CortexM0Core_writeUint32(self, address, self->registers[Rt]);
+  } else {
+  if ((((int32_t)(opcode) >> (11)) == 14)) {
+  int32_t imm5 = ((int32_t)(((int32_t)(opcode) >> (6))) & (int32_t)(31));
+  int32_t Rn = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rt = ((int32_t)(opcode) & (int32_t)(7));
+  int32_t address = (self->registers[Rn] + imm5);
+  (deltaCycles += CortexM0Core_cyclesIO(self, address, true));
+  CortexM0Core_writeUint8(self, address, self->registers[Rt]);
+  } else {
+  if ((((int32_t)(opcode) >> (9)) == 42)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (6))) & (int32_t)(7));
+  int32_t Rn = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rt = ((int32_t)(opcode) & (int32_t)(7));
+  int32_t address = (self->registers[Rm] + self->registers[Rn]);
+  (deltaCycles += CortexM0Core_cyclesIO(self, address, true));
+  CortexM0Core_writeUint8(self, address, self->registers[Rt]);
+  } else {
+  if ((((int32_t)(opcode) >> (11)) == 16)) {
+  int32_t imm5 = ((int32_t)((uint32_t)(((int32_t)(((int32_t)(opcode) >> (6))) & (int32_t)(31))) << (1)));
+  int32_t Rn = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rt = ((int32_t)(opcode) & (int32_t)(7));
+  int32_t address = (self->registers[Rn] + imm5);
+  (deltaCycles += CortexM0Core_cyclesIO(self, address, true));
+  CortexM0Core_writeUint16(self, address, self->registers[Rt]);
+  } else {
+  if ((((int32_t)(opcode) >> (9)) == 41)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (6))) & (int32_t)(7));
+  int32_t Rn = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rt = ((int32_t)(opcode) & (int32_t)(7));
+  int32_t address = (self->registers[Rm] + self->registers[Rn]);
+  (deltaCycles += CortexM0Core_cyclesIO(self, address, true));
+  CortexM0Core_writeUint16(self, address, self->registers[Rt]);
+  } else {
+  if ((((int32_t)(opcode) >> (7)) == 353)) {
+  int32_t imm32 = ((int32_t)((uint32_t)(((int32_t)(opcode) & (int32_t)(127))) << (2)));
+  CortexM0Core_SP_set(self, (CortexM0Core_SP_get(self) - imm32));
+  } else {
+  if ((((int32_t)(opcode) >> (9)) == 15)) {
+  int32_t imm3 = ((int32_t)(((int32_t)(opcode) >> (6))) & (int32_t)(7));
+  int32_t Rn = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rd = ((int32_t)(opcode) & (int32_t)(7));
+  (self->registers[Rd] = CortexM0Core_substractUpdateFlags(self, self->registers[Rn], imm3));
+  } else {
+  if ((((int32_t)(opcode) >> (11)) == 7)) {
+  int32_t imm8 = ((int32_t)(opcode) & (int32_t)(255));
+  int32_t Rdn = ((int32_t)(((int32_t)(opcode) >> (8))) & (int32_t)(7));
+  (self->registers[Rdn] = CortexM0Core_substractUpdateFlags(self, self->registers[Rdn], imm8));
+  } else {
+  if ((((int32_t)(opcode) >> (9)) == 13)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (6))) & (int32_t)(7));
+  int32_t Rn = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rd = ((int32_t)(opcode) & (int32_t)(7));
+  (self->registers[Rd] = CortexM0Core_substractUpdateFlags(self, self->registers[Rn], self->registers[Rm]));
+  } else {
+  if ((((int32_t)(opcode) >> (8)) == 223)) {
+  (self->pendingSVCall = true);
+  (self->interruptsUpdated = true);
+  } else {
+  if ((((int32_t)(opcode) >> (6)) == 713)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rd = ((int32_t)(opcode) & (int32_t)(7));
+  (self->registers[Rd] = signExtend8(self->registers[Rm]));
+  } else {
+  if ((((int32_t)(opcode) >> (6)) == 712)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rd = ((int32_t)(opcode) & (int32_t)(7));
+  (self->registers[Rd] = signExtend16(self->registers[Rm]));
+  } else {
+  if ((((int32_t)(opcode) >> (6)) == 264)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rn = ((int32_t)(opcode) & (int32_t)(7));
+  int32_t result = ((int32_t)(self->registers[Rn]) & (int32_t)(self->registers[Rm]));
+  (self->N = (!(!((int32_t)(result) & (int32_t)(2147483648u)))));
+  (self->Z = (result == 0));
+  } else {
+  if ((((int32_t)(opcode) >> (8)) == 222)) {
+  int32_t imm8 = ((int32_t)(opcode) & (int32_t)(255));
+  (self->breakRewind = 2);
+  ((self)->onBreak_fn ? (self)->onBreak_fn((self)->onBreak_ctx, imm8) : (void)0);
+  } else {
+  if (((((int32_t)(opcode) >> (4)) == 3967) && (((int32_t)(opcode2) >> (12)) == 10))) {
+  int32_t imm4 = ((int32_t)(opcode) & (int32_t)(15));
+  int32_t imm12 = ((int32_t)(opcode2) & (int32_t)(4095));
+  (self->breakRewind = 4);
+  ((self)->onBreak_fn ? (self)->onBreak_fn((self)->onBreak_ctx, ((int32_t)(((int32_t)((uint32_t)(imm4) << (12)))) | (int32_t)(imm12))) : (void)0);
+  CortexM0Core_PC_set(self, (CortexM0Core_PC_get(self) + 2));
+  } else {
+  if ((((int32_t)(opcode) >> (6)) == 715)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rd = ((int32_t)(opcode) & (int32_t)(7));
+  (self->registers[Rd] = ((int32_t)(self->registers[Rm]) & (int32_t)(255)));
+  } else {
+  if ((((int32_t)(opcode) >> (6)) == 714)) {
+  int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(7));
+  int32_t Rd = ((int32_t)(opcode) & (int32_t)(7));
+  (self->registers[Rd] = ((int32_t)(self->registers[Rm]) & (int32_t)(65535)));
+  } else {
+  if ((opcode == 48928)) {
+  (deltaCycles++);
+  if (self->eventRegistered) {
+  (self->eventRegistered = false);
+  } else {
+  (self->waiting = true);
+  }
+  } else {
+  if ((opcode == 48944)) {
+  (deltaCycles++);
+  (self->waiting = true);
+  } else {
+  if ((opcode == 48912)) {
+  /* TODO: log [src/cortex-m0-core.ts:1363: this.logger.info(this.coreLabel, 'Yield');] */ 0;
+  } else {
+  /* TODO: log [src/cortex-m0-core.ts:1365: this.logger.warn(] */ 0;
+  /* TODO: log [src/cortex-m0-core.ts:1369: this.logger.warn(] */ 0;
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  (self->cycles += deltaCycles);
+  return deltaCycles;
+}
+
+static void checkTraceMagicM0(CortexM0Core* core, int32_t opcodePC) {
+  if (CortexM0Core_readUint16(core, opcodePC + 2) == 0xabcd && CortexM0Core_readUint16(core, opcodePC + 4) == 0xffff) {
+    char __trace_tag[64];
+    int __trace_n = 0;
+    for (int32_t __trace_i = opcodePC + 6; __trace_n < (int)sizeof(__trace_tag) - 1; __trace_i++) {
+      int32_t __trace_ch = (int32_t)CortexM0Core_readUint8(core, __trace_i);
+      if (__trace_ch == 0) break;
+      __trace_tag[__trace_n++] = (char)__trace_ch;
+    }
+    __trace_tag[__trace_n] = '\0';
+    if (core->rpchip->onTrace_fn) core->rpchip->onTrace_fn(core->rpchip->onTrace_ctx, core->coreNumber, CortexM0Core_PC_get(core), __trace_tag);
+  }
+}
+
 // ─── conditions.ts ───
 static bool conditionPassed(M33Registers* regs, int32_t cond) {
   switch (((int32_t)(cond) & (int32_t)(15))) {
@@ -3905,7 +6328,7 @@ static int32_t cp0Gpioc(CortexM33Core* core, int32_t hw0, int32_t hw1) {
   int32_t isOe = ((opc1 == 1) ? (opc1 == 1) : (opc1 == 5));
   int32_t isHi = (opc1 >= 4);
   (void)isHi;
-  RPSIO* sio = core->chip->sio;
+  RP2350SIO* sio = core->chip->sio;
   int32_t GPIO_OUT = 16;
   int32_t GPIO_OUT_SET = 24;
   int32_t GPIO_OUT_CLR = 32;
@@ -3920,10 +6343,10 @@ static int32_t cp0Gpioc(CortexM33Core* core, int32_t hw0, int32_t hw1) {
   if (isBulk) {
   if (isRead) {
   if (isInput) {
-  writeMrcResult(core, Rt, ((int32_t)(RPSIO_readUint32(sio, GPIO_IN, core->coreIndex)) & (int32_t)(PIN_MASK)));
+  writeMrcResult(core, Rt, ((int32_t)(RP2350SIO_readUint32(sio, GPIO_IN, core->coreIndex)) & (int32_t)(PIN_MASK)));
   } else {
   if ((!isHi)) {
-  writeMrcResult(core, Rt, ((int32_t)(RPSIO_readUint32(sio, baseOffset, core->coreIndex)) & (int32_t)(PIN_MASK)));
+  writeMrcResult(core, Rt, ((int32_t)(RP2350SIO_readUint32(sio, baseOffset, core->coreIndex)) & (int32_t)(PIN_MASK)));
   } else {
   writeMrcResult(core, Rt, 0);
   }
@@ -3933,16 +6356,16 @@ static int32_t cp0Gpioc(CortexM33Core* core, int32_t hw0, int32_t hw1) {
   if (((!isInput) && (!isHi))) {
   switch (opc2) {
   case 0:
-  RPSIO_writeUint32(sio, baseOffset, val, core->coreIndex);
+  RP2350SIO_writeUint32(sio, baseOffset, val, core->coreIndex);
   break;
   case 1:
-  RPSIO_writeUint32(sio, (isOe ? GPIO_OE_SET : GPIO_OUT_SET), val, core->coreIndex);
+  RP2350SIO_writeUint32(sio, (isOe ? GPIO_OE_SET : GPIO_OUT_SET), val, core->coreIndex);
   break;
   case 2:
-  RPSIO_writeUint32(sio, (isOe ? GPIO_OE_CLR : GPIO_OUT_CLR), val, core->coreIndex);
+  RP2350SIO_writeUint32(sio, (isOe ? GPIO_OE_CLR : GPIO_OUT_CLR), val, core->coreIndex);
   break;
   case 3:
-  RPSIO_writeUint32(sio, (isOe ? GPIO_OE_XOR : GPIO_OUT_XOR), val, core->coreIndex);
+  RP2350SIO_writeUint32(sio, (isOe ? GPIO_OE_XOR : GPIO_OUT_XOR), val, core->coreIndex);
   break;
   }
   }
@@ -3958,28 +6381,28 @@ static int32_t cp0Gpioc(CortexM33Core* core, int32_t hw0, int32_t hw1) {
   int32_t bitMask = ((int32_t)((uint32_t)(1) << (((int32_t)(pin)) & 31)));
   if (isRead) {
   if (isInput) {
-  writeMrcResult(core, Rt, ((int32_t)(((int32_t)(RPSIO_readUint32(sio, GPIO_IN, core->coreIndex)) >> (((int32_t)(pin)) & 31))) & (int32_t)(1)));
+  writeMrcResult(core, Rt, ((int32_t)(((int32_t)(RP2350SIO_readUint32(sio, GPIO_IN, core->coreIndex)) >> (((int32_t)(pin)) & 31))) & (int32_t)(1)));
   } else {
-  writeMrcResult(core, Rt, ((int32_t)(((int32_t)(RPSIO_readUint32(sio, baseOffset, core->coreIndex)) >> (((int32_t)(pin)) & 31))) & (int32_t)(1)));
+  writeMrcResult(core, Rt, ((int32_t)(((int32_t)(RP2350SIO_readUint32(sio, baseOffset, core->coreIndex)) >> (((int32_t)(pin)) & 31))) & (int32_t)(1)));
   }
   } else {
   if (((!isInput) && (!isHi))) {
   switch (opc2) {
   case 4:
   if (((int32_t)(regs->r[Rt]) & (int32_t)(1))) {
-  RPSIO_writeUint32(sio, (isOe ? GPIO_OE_SET : GPIO_OUT_SET), bitMask, core->coreIndex);
+  RP2350SIO_writeUint32(sio, (isOe ? GPIO_OE_SET : GPIO_OUT_SET), bitMask, core->coreIndex);
   } else {
-  RPSIO_writeUint32(sio, (isOe ? GPIO_OE_CLR : GPIO_OUT_CLR), bitMask, core->coreIndex);
+  RP2350SIO_writeUint32(sio, (isOe ? GPIO_OE_CLR : GPIO_OUT_CLR), bitMask, core->coreIndex);
   }
   break;
   case 5:
-  RPSIO_writeUint32(sio, (isOe ? GPIO_OE_SET : GPIO_OUT_SET), bitMask, core->coreIndex);
+  RP2350SIO_writeUint32(sio, (isOe ? GPIO_OE_SET : GPIO_OUT_SET), bitMask, core->coreIndex);
   break;
   case 6:
-  RPSIO_writeUint32(sio, (isOe ? GPIO_OE_CLR : GPIO_OUT_CLR), bitMask, core->coreIndex);
+  RP2350SIO_writeUint32(sio, (isOe ? GPIO_OE_CLR : GPIO_OUT_CLR), bitMask, core->coreIndex);
   break;
   case 7:
-  RPSIO_writeUint32(sio, (isOe ? GPIO_OE_XOR : GPIO_OUT_XOR), bitMask, core->coreIndex);
+  RP2350SIO_writeUint32(sio, (isOe ? GPIO_OE_XOR : GPIO_OUT_XOR), bitMask, core->coreIndex);
   break;
   }
   }
@@ -5065,8 +7488,14 @@ static int32_t fpuExecute(CortexM33Core* core, int32_t hw0, int32_t hw1) {
   int32_t addr = ((uint32_t)((u ? (base + offset) : (base - offset))) >> (0));
   if (isLoad) {
   (regs->s[sd] = bitsToFloat(RP2350_readUint32(core->chip, addr)));
+  if ((coproc == 11)) {
+  (regs->s[(sd + 1)] = bitsToFloat(RP2350_readUint32(core->chip, ((uint32_t)((addr + 4)) >> (0)))));
+  }
   } else {
   RP2350_writeUint32(core->chip, addr, floatToBits(regs->s[sd]));
+  if ((coproc == 11)) {
+  RP2350_writeUint32(core->chip, ((uint32_t)((addr + 4)) >> (0)), floatToBits(regs->s[(sd + 1)]));
+  }
   }
   return 2;
   }
@@ -5146,16 +7575,6 @@ int32_t i = 0
 }
 
 // ─── execute-thumb16.ts ───
-enum { spRegister = (13) };
-enum { pcRegister = (15) };
-static int32_t signExtend8(int32_t value) {
-  return ((int32_t)(((int32_t)((uint32_t)(value) << (24)))) >> (24));
-}
-
-static int32_t signExtend16(int32_t value) {
-  return ((int32_t)(((int32_t)((uint32_t)(value) << (16)))) >> (16));
-}
-
 static int32_t readU8(CortexM33Core* core, int32_t address) {
   return RP2350_readUint8(core->chip, address);
 }
@@ -5192,7 +7611,7 @@ static int32_t subFlags(CortexM33Core* core, int32_t minuend, int32_t subtrahend
   M33Registers_N_set(core->regs, (((int32_t)(result) & (int32_t)(2147483648u)) != 0));
   M33Registers_Z_set(core->regs, (result == 0));
   M33Registers_C_set(core->regs, (((uint32_t)(minuend) >> (0)) >= subtrahend));
-  M33Registers_V_set(core->regs, ((((!(!((int32_t)(result) & (int32_t)(2147483648u)))) ? (!((int32_t)(minuend) & (int32_t)(2147483648u))) : (!(!((int32_t)(result) & (int32_t)(2147483648u))))) ? (!(!((int32_t)(subtrahend) & (int32_t)(2147483648u)))) : ((!(!((int32_t)(result) & (int32_t)(2147483648u)))) ? (!((int32_t)(minuend) & (int32_t)(2147483648u))) : (!(!((int32_t)(result) & (int32_t)(2147483648u)))))) ? (((!(!((int32_t)(result) & (int32_t)(2147483648u)))) ? (!((int32_t)(minuend) & (int32_t)(2147483648u))) : (!(!((int32_t)(result) & (int32_t)(2147483648u))))) ? (!(!((int32_t)(subtrahend) & (int32_t)(2147483648u)))) : ((!(!((int32_t)(result) & (int32_t)(2147483648u)))) ? (!((int32_t)(minuend) & (int32_t)(2147483648u))) : (!(!((int32_t)(result) & (int32_t)(2147483648u)))))) : (((!((int32_t)(result) & (int32_t)(2147483648u))) ? (!(!((int32_t)(minuend) & (int32_t)(2147483648u)))) : (!((int32_t)(result) & (int32_t)(2147483648u)))) ? (!((int32_t)(subtrahend) & (int32_t)(2147483648u))) : ((!((int32_t)(result) & (int32_t)(2147483648u))) ? (!(!((int32_t)(minuend) & (int32_t)(2147483648u)))) : (!((int32_t)(result) & (int32_t)(2147483648u)))))));
+  M33Registers_V_set(core->regs, (((int32_t)(((int32_t)(minuend) ^ (int32_t)(subtrahend))) & (int32_t)(((int32_t)(minuend) ^ (int32_t)(result)))) < 0));
   }
   return result;
 }
@@ -5211,6 +7630,20 @@ static int32_t addFlags(CortexM33Core* core, int32_t a, int32_t b, int32_t carry
   M33Registers_V_set(core->regs, (((int32_t)((~((int32_t)(a) ^ (int32_t)(b)))) & (int32_t)(((int32_t)(a) ^ (int32_t)(result)))) < 0));
   }
   return ((int32_t)(result) & (int32_t)(4294967295u));
+}
+
+static void checkTraceMagicM33(CortexM33Core* core, int32_t opcodePC) {
+  if (RP2350_readUint16(core->chip, opcodePC + 2) == 0xabcd && RP2350_readUint16(core->chip, opcodePC + 4) == 0xffff) {
+    char __trace_tag[64];
+    int __trace_n = 0;
+    for (int32_t __trace_i = opcodePC + 6; __trace_n < (int)sizeof(__trace_tag) - 1; __trace_i++) {
+      int32_t __trace_ch = (int32_t)RP2350_readUint8(core->chip, __trace_i);
+      if (__trace_ch == 0) break;
+      __trace_tag[__trace_n++] = (char)__trace_ch;
+    }
+    __trace_tag[__trace_n] = '\0';
+    if (core->chip->onTrace_fn) core->chip->onTrace_fn(core->chip->onTrace_ctx, core->coreIndex, opcodePC, __trace_tag);
+  }
 }
 
 static int32_t executeThumb16(CortexM33Core* core, int32_t opcodePC, int32_t opcode) {
@@ -5251,7 +7684,7 @@ static int32_t executeThumb16(CortexM33Core* core, int32_t opcodePC, int32_t opc
   if ((((int32_t)(opcode) >> (8)) == 68)) {
   int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(15));
   int32_t Rdn = ((int32_t)(((int32_t)(((int32_t)(opcode) & (int32_t)(128))) >> (4))) | (int32_t)(((int32_t)(opcode) & (int32_t)(7))));
-  int32_t leftValue = ((Rdn == pcRegister) ? (M33Registers_pc_get(regs) + 2) : regs->r[Rdn]);
+  int32_t leftValue = ((Rdn == pcRegister) ? ((uint32_t)(((int32_t)((M33Registers_pc_get(regs) + 2)) & (int32_t)((~3)))) >> (0)) : regs->r[Rdn]);
   uint32_t rightValue = regs->r[Rm];
   int32_t result = (leftValue + rightValue);
   if (((Rdn != spRegister) && (Rdn != pcRegister))) {
@@ -5335,19 +7768,7 @@ static int32_t executeThumb16(CortexM33Core* core, int32_t opcodePC, int32_t opc
   }
   } else {
   if ((((int32_t)(opcode) >> (11)) == 28)) {
-  if (((RP2350_readUint16(core->chip, (opcodePC + 2)) == 43981) && (RP2350_readUint16(core->chip, (opcodePC + 4)) == 65535))) {
-  const char* profTag = "";
-  for (
-int32_t i = (opcodePC + 6)
-; 1; (i++)) {
-  uint32_t ch = RP2350_readUint8(core->chip, i);
-  if ((ch == 0)) {
-  break;
-  }
-  (profTag = strConcat2(profTag, ((const char*)(/* TODO: String.fromCharCode [src/cortex-m33/execute-thumb16.ts:266: profTag += String.fromCharCode(ch);] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "String.fromCharCode [src/cortex-m33/execute-thumb16.ts:266: profTag += String.fromCharCode(ch);]"); abort(); 0; }))))));
-  }
-  ((core->chip)->onTrace_fn ? (core->chip)->onTrace_fn((core->chip)->onTrace_ctx, core->coreIndex, opcodePC, profTag) : (void)0);
-  }
+  checkTraceMagicM33(core, opcodePC);
   int32_t imm11 = ((int32_t)((uint32_t)(((int32_t)(opcode) & (int32_t)(2047))) << (1)));
   if (((int32_t)(imm11) & (int32_t)(((int32_t)((uint32_t)(1) << (11)))))) {
   (imm11 = (((int32_t)(imm11) & (int32_t)(2047)) - 2048));
@@ -5633,7 +8054,7 @@ int32_t i = 0
   if ((((int32_t)(opcode) >> (8)) == 70)) {
   int32_t Rm = ((int32_t)(((int32_t)(opcode) >> (3))) & (int32_t)(15));
   int32_t Rd = ((int32_t)(((int32_t)(((int32_t)(opcode) >> (4))) & (int32_t)(8))) | (int32_t)(((int32_t)(opcode) & (int32_t)(7))));
-  int32_t value = ((Rm == pcRegister) ? (M33Registers_pc_get(regs) + 2) : regs->r[Rm]);
+  int32_t value = ((Rm == pcRegister) ? ((uint32_t)(((int32_t)((M33Registers_pc_get(regs) + 2)) & (int32_t)((~3)))) >> (0)) : regs->r[Rm]);
   if ((Rd == pcRegister)) {
   bxWritePC(core, ((uint32_t)(value) >> (0)));
   (deltaCycles++);
@@ -6150,7 +8571,7 @@ static int32_t executeThumb32(CortexM33Core* core, int32_t opcodePC, int32_t hw0
   M33Registers_N_set(regs, (((int32_t)(r) & (int32_t)(2147483648u)) != 0));
   M33Registers_Z_set(regs, (r == 0));
   M33Registers_C_set(regs, (((uint32_t)(a) >> (0)) >= ((uint32_t)(b) >> (0))));
-  M33Registers_V_set(regs, ((((!(!((int32_t)(r) & (int32_t)(2147483648u)))) ? (!((int32_t)(a) & (int32_t)(2147483648u))) : (!(!((int32_t)(r) & (int32_t)(2147483648u))))) ? (!(!((int32_t)(b) & (int32_t)(2147483648u)))) : ((!(!((int32_t)(r) & (int32_t)(2147483648u)))) ? (!((int32_t)(a) & (int32_t)(2147483648u))) : (!(!((int32_t)(r) & (int32_t)(2147483648u)))))) ? (((!(!((int32_t)(r) & (int32_t)(2147483648u)))) ? (!((int32_t)(a) & (int32_t)(2147483648u))) : (!(!((int32_t)(r) & (int32_t)(2147483648u))))) ? (!(!((int32_t)(b) & (int32_t)(2147483648u)))) : ((!(!((int32_t)(r) & (int32_t)(2147483648u)))) ? (!((int32_t)(a) & (int32_t)(2147483648u))) : (!(!((int32_t)(r) & (int32_t)(2147483648u)))))) : (((!((int32_t)(r) & (int32_t)(2147483648u))) ? (!(!((int32_t)(a) & (int32_t)(2147483648u)))) : (!((int32_t)(r) & (int32_t)(2147483648u)))) ? (!((int32_t)(b) & (int32_t)(2147483648u))) : ((!((int32_t)(r) & (int32_t)(2147483648u))) ? (!(!((int32_t)(a) & (int32_t)(2147483648u)))) : (!((int32_t)(r) & (int32_t)(2147483648u)))))));
+  M33Registers_V_set(regs, (((int32_t)(((int32_t)(a) ^ (int32_t)(b))) & (int32_t)(((int32_t)(a) ^ (int32_t)(r)))) < 0));
   return r;
   }
   void writeRd(int32_t rd, int32_t value) {
@@ -6386,7 +8807,7 @@ static int32_t dispatchDpModifiedImm(CortexM33Core* core, int32_t hw0, int32_t h
   thumbExpandImmC(imm12, M33Registers_C_get(regs), core->immCarryScratch);
   int32_t imm = core->immCarryScratch->value;
   bool teCarry = core->immCarryScratch->carryOut;
-  int32_t rnVal = ((rn == 15) ? M33Registers_pc_get(regs) : regs->r[rn]);
+  int32_t rnVal = ((rn == 15) ? ((uint32_t)(((int32_t)(M33Registers_pc_get(regs)) & (int32_t)((~3)))) >> (0)) : regs->r[rn]);
   void writeLogical(int32_t result, bool isTest) {
   if ((!isTest)) {
   writeDpResult(core, rd, result);
@@ -6464,13 +8885,13 @@ static int32_t dispatchDpPlainImm(CortexM33Core* core, int32_t hw0, int32_t hw1)
   }
   if ((opField == 0)) {
   int32_t imm12 = ((int32_t)(((int32_t)(((int32_t)((uint32_t)(i) << (11)))) | (int32_t)(((int32_t)((uint32_t)(imm3) << (8)))))) | (int32_t)(imm8));
-  int32_t base = ((rn == 15) ? M33Registers_pc_get(regs) : regs->r[rn]);
+  int32_t base = ((rn == 15) ? ((uint32_t)(((int32_t)(M33Registers_pc_get(regs)) & (int32_t)((~3)))) >> (0)) : regs->r[rn]);
   (regs->r[rd] = ((uint32_t)((base + imm12)) >> (0)));
   return 1;
   }
   if ((opField == 10)) {
   int32_t imm12 = ((int32_t)(((int32_t)(((int32_t)((uint32_t)(i) << (11)))) | (int32_t)(((int32_t)((uint32_t)(imm3) << (8)))))) | (int32_t)(imm8));
-  int32_t base = ((rn == 15) ? M33Registers_pc_get(regs) : regs->r[rn]);
+  int32_t base = ((rn == 15) ? ((uint32_t)(((int32_t)(M33Registers_pc_get(regs)) & (int32_t)((~3)))) >> (0)) : regs->r[rn]);
   (regs->r[rd] = ((uint32_t)((base - imm12)) >> (0)));
   return 1;
   }
@@ -6594,7 +9015,7 @@ static int32_t dispatchDpShiftedReg(CortexM33Core* core, int32_t hw0, int32_t hw
   int32_t imm2 = ((int32_t)(((uint32_t)(hw1) >> (6))) & (int32_t)(3));
   int32_t shiftType = ((int32_t)(((uint32_t)(hw1) >> (4))) & (int32_t)(3));
   int32_t shiftAmt = ((int32_t)(((int32_t)((uint32_t)(imm3) << (2)))) | (int32_t)(imm2));
-  int32_t rnVal = ((rn == 15) ? M33Registers_pc_get(regs) : regs->r[rn]);
+  int32_t rnVal = ((rn == 15) ? ((uint32_t)(((int32_t)(M33Registers_pc_get(regs)) & (int32_t)((~3)))) >> (0)) : regs->r[rn]);
   uint32_t rmVal = regs->r[rm];
   int32_t shifted = 0;
   bool shiftCarry = M33Registers_C_get(regs);
@@ -6714,7 +9135,7 @@ static int32_t addSubFlags(CortexM33Core* core, int32_t a, int32_t b, bool isAdd
   M33Registers_N_set(regs, (((int32_t)(r) & (int32_t)(2147483648u)) != 0));
   M33Registers_Z_set(regs, (r == 0));
   M33Registers_C_set(regs, (((uint32_t)(a) >> (0)) >= ((uint32_t)(b) >> (0))));
-  M33Registers_V_set(regs, ((((!(!((int32_t)(r) & (int32_t)(2147483648u)))) ? (!((int32_t)(a) & (int32_t)(2147483648u))) : (!(!((int32_t)(r) & (int32_t)(2147483648u))))) ? (!(!((int32_t)(b) & (int32_t)(2147483648u)))) : ((!(!((int32_t)(r) & (int32_t)(2147483648u)))) ? (!((int32_t)(a) & (int32_t)(2147483648u))) : (!(!((int32_t)(r) & (int32_t)(2147483648u)))))) ? (((!(!((int32_t)(r) & (int32_t)(2147483648u)))) ? (!((int32_t)(a) & (int32_t)(2147483648u))) : (!(!((int32_t)(r) & (int32_t)(2147483648u))))) ? (!(!((int32_t)(b) & (int32_t)(2147483648u)))) : ((!(!((int32_t)(r) & (int32_t)(2147483648u)))) ? (!((int32_t)(a) & (int32_t)(2147483648u))) : (!(!((int32_t)(r) & (int32_t)(2147483648u)))))) : (((!((int32_t)(r) & (int32_t)(2147483648u))) ? (!(!((int32_t)(a) & (int32_t)(2147483648u)))) : (!((int32_t)(r) & (int32_t)(2147483648u)))) ? (!((int32_t)(b) & (int32_t)(2147483648u))) : ((!((int32_t)(r) & (int32_t)(2147483648u))) ? (!(!((int32_t)(a) & (int32_t)(2147483648u)))) : (!((int32_t)(r) & (int32_t)(2147483648u)))))));
+  M33Registers_V_set(regs, (((int32_t)(((int32_t)(a) ^ (int32_t)(b))) & (int32_t)(((int32_t)(a) ^ (int32_t)(r)))) < 0));
   }
   return r;
 }
@@ -7024,7 +9445,7 @@ static int32_t dispatchMultiply(CortexM33Core* core, int32_t hw0, int32_t hw1) {
   if ((op == 11)) {
   int32_t divisor = ((uint32_t)(regs->r[rm]) >> (0));
   int32_t dividend = ((uint32_t)(regs->r[rn]) >> (0));
-  (regs->r[rd] = ((divisor == 0) ? 0 : ((uint32_t)(((double)(dividend) / (double)(divisor))) >> (0))));
+  (regs->r[rd] = ((divisor == 0) ? 0 : ((uint32_t)(((double)(((uint32_t)(dividend) >> (0))) / (double)(((uint32_t)(divisor) >> (0))))) >> (0))));
   return 12;
   }
   if ((op == 9)) {
@@ -7056,28 +9477,23 @@ static int32_t dispatchMultiply(CortexM33Core* core, int32_t hw0, int32_t hw1) {
   return 2;
   }
   if ((op == 12)) {
-  int32_t acc = ((((uint32_t)(regs->r[rdHi]) >> (0)) * 4294967296) + ((uint32_t)(regs->r[rdLo]) >> (0)));
+  int32_t accLo = ((uint32_t)(regs->r[rdLo]) >> (0));
+  int32_t accHi = ((uint32_t)(regs->r[rdHi]) >> (0));
   mul64Signed(regs->r[rn], regs->r[rm], core->mul64Scratch);
-  int32_t hi = core->mul64Scratch->hi;
-  int32_t lo = core->mul64Scratch->lo;
-  int32_t product = ((((uint32_t)(hi) >> (0)) * 4294967296) + ((uint32_t)(lo) >> (0)));
-  int32_t signedAcc = ((acc > 9223372036854776000) ? (acc - 18446744073709552000) : acc);
-  int32_t signedProd = ((product > 9223372036854776000) ? (product - 18446744073709552000) : product);
-  int32_t sum = (signedAcc + signedProd);
-  int32_t u64 = ((sum < 0) ? (sum + 18446744073709552000) : sum);
-  (regs->r[rdLo] = ((int32_t)(u64) & (int32_t)(4294967295u)));
-  (regs->r[rdHi] = ((int32_t)((u64 / 4294967296)) & (int32_t)(4294967295u)));
+  int32_t lo = ((uint32_t)((((uint32_t)(core->mul64Scratch->lo) >> (0)) + accLo)) >> (0));
+  int32_t carry = ((lo < accLo) ? 1 : 0);
+  (regs->r[rdLo] = lo);
+  (regs->r[rdHi] = ((uint32_t)(((((uint32_t)(core->mul64Scratch->hi) >> (0)) + accHi) + carry)) >> (0)));
   return 2;
   }
   if ((op == 14)) {
-  int32_t acc = ((((uint32_t)(regs->r[rdHi]) >> (0)) * 4294967296) + ((uint32_t)(regs->r[rdLo]) >> (0)));
+  int32_t accLo = ((uint32_t)(regs->r[rdLo]) >> (0));
+  int32_t accHi = ((uint32_t)(regs->r[rdHi]) >> (0));
   mul64(((uint32_t)(regs->r[rn]) >> (0)), ((uint32_t)(regs->r[rm]) >> (0)), core->mul64Scratch);
-  int32_t hi = core->mul64Scratch->hi;
-  int32_t lo = core->mul64Scratch->lo;
-  int32_t product = ((((uint32_t)(hi) >> (0)) * 4294967296) + ((uint32_t)(lo) >> (0)));
-  int32_t sum = (acc + product);
-  (regs->r[rdLo] = ((int32_t)(sum) & (int32_t)(4294967295u)));
-  (regs->r[rdHi] = ((int32_t)((sum / 4294967296)) & (int32_t)(4294967295u)));
+  int32_t lo = ((uint32_t)((((uint32_t)(core->mul64Scratch->lo) >> (0)) + accLo)) >> (0));
+  int32_t carry = ((lo < accLo) ? 1 : 0);
+  (regs->r[rdLo] = lo);
+  (regs->r[rdHi] = ((uint32_t)(((((uint32_t)(core->mul64Scratch->hi) >> (0)) + accHi) + carry)) >> (0)));
   return 2;
   }
   return (-1);
@@ -7129,7 +9545,7 @@ static int32_t readSpecialRegister(CortexM33Core* core, int32_t sysm) {
   case 148:
   return ((int32_t)(regs->control_ns) & (int32_t)(7));
   default:
-  /* TODO: log [src/cortex-m33/execute-thumb32.ts:1445: core.logger.warn(core.coreLabel, `MRS with unimplemented SYSm: ${sysm}`);] */ 0;
+  /* TODO: log [src/cortex-m33/execute-thumb32.ts:1437: core.logger.warn(core.coreLabel, `MRS with unimplemented SYSm: ${sysm}`);] */ 0;
   return 0;
   }
   return (int32_t){0};
@@ -7210,7 +9626,7 @@ static void writeSpecialRegister(CortexM33Core* core, int32_t sysm, int32_t valu
   break;
   }
   default:
-  /* TODO: log [src/cortex-m33/execute-thumb32.ts:1545: core.logger.warn(core.coreLabel, `MSR with unimplemented SYSm: ${sysm}`);] */ 0;
+  /* TODO: log [src/cortex-m33/execute-thumb32.ts:1537: core.logger.warn(core.coreLabel, `MSR with unimplemented SYSm: ${sysm}`);] */ 0;
   }
 }
 
@@ -7589,9 +10005,9 @@ enum { IRQ_EDGE_HIGH = (8) }; /* ((int32_t)((uint32_t)(1) << (3))) */
 enum { IRQ_EDGE_LOW = (4) }; /* ((int32_t)((uint32_t)(1) << (2))) */
 enum { IRQ_LEVEL_HIGH = (2) }; /* ((int32_t)((uint32_t)(1) << (1))) */
 enum { IRQ_LEVEL_LOW = (1) }; /* ((int32_t)((uint32_t)(1) << (0))) */
-static GPIOPin* GPIOPin_new(RP2350* rp2040, int32_t index, const char* name) {
+static GPIOPin* GPIOPin_new(RP2350* rpchip, int32_t index, const char* name) {
   GPIOPin* self = calloc(1, sizeof(GPIOPin));
-  self->rp2040 = rp2040;
+  self->rpchip = rpchip;
   self->index = index;
   self->name = name;
   self->rawInputValue = false;
@@ -7667,11 +10083,11 @@ static int32_t GPIOPin_irqValue_get(GPIOPin* self) {
 }
 
 static int32_t GPIOPin_outputEnable_get(GPIOPin* self) {
-  return applyOverride(RP2350_gpioRawOutputEnable(self->rp2040, self->index), GPIOPin_outputEnableOverride_get(self));
+  return applyOverride(RP2350_gpioRawOutputEnable(self->rpchip, self->index), GPIOPin_outputEnableOverride_get(self));
 }
 
 static int32_t GPIOPin_outputValue_get(GPIOPin* self) {
-  return applyOverride(RP2350_gpioRawOutputValue(self->rp2040, self->index), GPIOPin_outputOverride_get(self));
+  return applyOverride(RP2350_gpioRawOutputValue(self->rpchip, self->index), GPIOPin_outputOverride_get(self));
 }
 
 static int32_t GPIOPin_status_get(GPIOPin* self) {
@@ -7680,9 +10096,9 @@ static int32_t GPIOPin_status_get(GPIOPin* self) {
   int32_t inToPeri = (GPIOPin_inputValue_get(self) ? ((int32_t)((uint32_t)(1) << (19))) : 0);
   int32_t inFromPad = (self->rawInputValue ? ((int32_t)((uint32_t)(1) << (17))) : 0);
   int32_t oeToPad = (GPIOPin_outputEnable_get(self) ? ((int32_t)((uint32_t)(1) << (13))) : 0);
-  int32_t oeFromPeri = (RP2350_gpioRawOutputEnable(self->rp2040, self->index) ? ((int32_t)((uint32_t)(1) << (12))) : 0);
+  int32_t oeFromPeri = (RP2350_gpioRawOutputEnable(self->rpchip, self->index) ? ((int32_t)((uint32_t)(1) << (12))) : 0);
   int32_t outToPad = (GPIOPin_outputValue_get(self) ? ((int32_t)((uint32_t)(1) << (9))) : 0);
-  int32_t outFromPeri = (RP2350_gpioRawOutputValue(self->rp2040, self->index) ? ((int32_t)((uint32_t)(1) << (8))) : 0);
+  int32_t outFromPeri = (RP2350_gpioRawOutputValue(self->rpchip, self->index) ? ((int32_t)((uint32_t)(1) << (8))) : 0);
   return ((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(irqToProc) | (int32_t)(irqFromPad))) | (int32_t)(inToPeri))) | (int32_t)(inFromPad))) | (int32_t)(oeToPad))) | (int32_t)(oeFromPeri))) | (int32_t)(outToPad))) | (int32_t)(outFromPeri));
 }
 
@@ -7712,9 +10128,9 @@ static void GPIOPin_setInputValue(GPIOPin* self, bool value) {
   (self->irqStatus &= (~IRQ_LEVEL_HIGH));
   }
   if ((GPIOPin_irqValue_get(self) != prevIrqValue)) {
-  RP2350_updateIOInterrupt(self->rp2040);
+  RP2350_updateIOInterrupt(self->rpchip);
   }
-  RP2350_gpioInputValueHasBeenSet(self->rp2040, self->index);
+  RP2350_gpioInputValueHasBeenSet(self->rpchip, self->index);
 }
 
 static void GPIOPin_checkForUpdates(GPIOPin* self) {
@@ -7740,15 +10156,178 @@ static void GPIOPin_refreshInput(GPIOPin* self) {
 static void GPIOPin_updateIRQValue(GPIOPin* self, int32_t value) {
   if ((((int32_t)(value) & (int32_t)(IRQ_EDGE_LOW)) && ((int32_t)(self->irqStatus) & (int32_t)(IRQ_EDGE_LOW)))) {
   (self->irqStatus &= (~IRQ_EDGE_LOW));
-  RP2350_updateIOInterrupt(self->rp2040);
+  RP2350_updateIOInterrupt(self->rpchip);
   }
   if ((((int32_t)(value) & (int32_t)(IRQ_EDGE_HIGH)) && ((int32_t)(self->irqStatus) & (int32_t)(IRQ_EDGE_HIGH)))) {
   (self->irqStatus &= (~IRQ_EDGE_HIGH));
-  RP2350_updateIOInterrupt(self->rp2040);
+  RP2350_updateIOInterrupt(self->rpchip);
   }
 }
 
 static void GPIOPin_addListener(GPIOPin* self, GPIOPinListener callback) {
+  (__extension__({ if (self->listeners_count < 8) { self->listeners[self->listeners_count++] = callback; } else { fprintf(stderr, "cts2c: %s capacity (%d) exceeded\n", "listeners", 8); abort(); } }));
+}
+
+static GPIOPin__RP2040* GPIOPin__RP2040_new(RP2040* rpchip, int32_t index, const char* name) {
+  GPIOPin__RP2040* self = calloc(1, sizeof(GPIOPin__RP2040));
+  self->rpchip = rpchip;
+  self->index = index;
+  self->name = name;
+  self->rawInputValue = false;
+  self->lastValue = GPIOPinState_Input;
+  self->ctrl = 31;
+  self->padValue = 54;
+  self->irqEnableMask = 0;
+  self->irqForceMask = 0;
+  self->irqStatus = 0;
+  self->listeners = calloc(8, sizeof(GPIOPinListener));
+  self->listeners_count = 0;
+  return self;
+}
+
+static int32_t GPIOPin__RP2040_rawInterrupt_get(GPIOPin__RP2040* self) {
+  return (!(!((int32_t)(((int32_t)(self->irqStatus) & (int32_t)(self->irqEnableMask))) | (int32_t)(self->irqForceMask))));
+}
+
+static int32_t GPIOPin__RP2040_isSlewFast_get(GPIOPin__RP2040* self) {
+  return (!(!((int32_t)(self->padValue) & (int32_t)(1))));
+}
+
+static int32_t GPIOPin__RP2040_schmittEnabled_get(GPIOPin__RP2040* self) {
+  return (!(!((int32_t)(self->padValue) & (int32_t)(2))));
+}
+
+static int32_t GPIOPin__RP2040_pulldownEnabled_get(GPIOPin__RP2040* self) {
+  return (!(!((int32_t)(self->padValue) & (int32_t)(4))));
+}
+
+static int32_t GPIOPin__RP2040_pullupEnabled_get(GPIOPin__RP2040* self) {
+  return (!(!((int32_t)(self->padValue) & (int32_t)(8))));
+}
+
+static int32_t GPIOPin__RP2040_driveStrength_get(GPIOPin__RP2040* self) {
+  return ((int32_t)(((int32_t)(self->padValue) >> (4))) & (int32_t)(3));
+}
+
+static int32_t GPIOPin__RP2040_inputEnable_get(GPIOPin__RP2040* self) {
+  return (!(!((int32_t)(self->padValue) & (int32_t)(64))));
+}
+
+static int32_t GPIOPin__RP2040_outputDisable_get(GPIOPin__RP2040* self) {
+  return (!(!((int32_t)(self->padValue) & (int32_t)(128))));
+}
+
+static int32_t GPIOPin__RP2040_functionSelect_get(GPIOPin__RP2040* self) {
+  return ((int32_t)(self->ctrl) & (int32_t)(31));
+}
+
+static int32_t GPIOPin__RP2040_outputOverride_get(GPIOPin__RP2040* self) {
+  return ((int32_t)(((int32_t)(self->ctrl) >> (8))) & (int32_t)(3));
+}
+
+static int32_t GPIOPin__RP2040_outputEnableOverride_get(GPIOPin__RP2040* self) {
+  return ((int32_t)(((int32_t)(self->ctrl) >> (12))) & (int32_t)(3));
+}
+
+static int32_t GPIOPin__RP2040_inputOverride_get(GPIOPin__RP2040* self) {
+  return ((int32_t)(((int32_t)(self->ctrl) >> (16))) & (int32_t)(3));
+}
+
+static int32_t GPIOPin__RP2040_irqOverride_get(GPIOPin__RP2040* self) {
+  return ((int32_t)(((int32_t)(self->ctrl) >> (28))) & (int32_t)(3));
+}
+
+static int32_t GPIOPin__RP2040_inputValue_get(GPIOPin__RP2040* self) {
+  return applyOverride((self->rawInputValue ? GPIOPin__RP2040_inputEnable_get(self) : self->rawInputValue), GPIOPin__RP2040_inputOverride_get(self));
+}
+
+static int32_t GPIOPin__RP2040_irqValue_get(GPIOPin__RP2040* self) {
+  return applyOverride(GPIOPin__RP2040_rawInterrupt_get(self), GPIOPin__RP2040_irqOverride_get(self));
+}
+
+static int32_t GPIOPin__RP2040_outputEnable_get(GPIOPin__RP2040* self) {
+  return applyOverride(RP2040_gpioRawOutputEnable(self->rpchip, self->index), GPIOPin__RP2040_outputEnableOverride_get(self));
+}
+
+static int32_t GPIOPin__RP2040_outputValue_get(GPIOPin__RP2040* self) {
+  return applyOverride(RP2040_gpioRawOutputValue(self->rpchip, self->index), GPIOPin__RP2040_outputOverride_get(self));
+}
+
+static int32_t GPIOPin__RP2040_status_get(GPIOPin__RP2040* self) {
+  int32_t irqToProc = (GPIOPin__RP2040_irqValue_get(self) ? ((int32_t)((uint32_t)(1) << (26))) : 0);
+  int32_t irqFromPad = (GPIOPin__RP2040_rawInterrupt_get(self) ? ((int32_t)((uint32_t)(1) << (24))) : 0);
+  int32_t inToPeri = (GPIOPin__RP2040_inputValue_get(self) ? ((int32_t)((uint32_t)(1) << (19))) : 0);
+  int32_t inFromPad = (self->rawInputValue ? ((int32_t)((uint32_t)(1) << (17))) : 0);
+  int32_t oeToPad = (GPIOPin__RP2040_outputEnable_get(self) ? ((int32_t)((uint32_t)(1) << (13))) : 0);
+  int32_t oeFromPeri = (RP2040_gpioRawOutputEnable(self->rpchip, self->index) ? ((int32_t)((uint32_t)(1) << (12))) : 0);
+  int32_t outToPad = (GPIOPin__RP2040_outputValue_get(self) ? ((int32_t)((uint32_t)(1) << (9))) : 0);
+  int32_t outFromPeri = (RP2040_gpioRawOutputValue(self->rpchip, self->index) ? ((int32_t)((uint32_t)(1) << (8))) : 0);
+  return ((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(irqToProc) | (int32_t)(irqFromPad))) | (int32_t)(inToPeri))) | (int32_t)(inFromPad))) | (int32_t)(oeToPad))) | (int32_t)(oeFromPeri))) | (int32_t)(outToPad))) | (int32_t)(outFromPeri));
+}
+
+static int32_t GPIOPin__RP2040_value_get(GPIOPin__RP2040* self) {
+  if (GPIOPin__RP2040_outputEnable_get(self)) {
+  return (GPIOPin__RP2040_outputValue_get(self) ? GPIOPinState_High : GPIOPinState_Low);
+  } else {
+  if (GPIOPin__RP2040_pulldownEnabled_get(self)) {
+  return GPIOPinState_InputPullDown;
+  }
+  if (GPIOPin__RP2040_pullupEnabled_get(self)) {
+  return GPIOPinState_InputPullUp;
+  }
+  return GPIOPinState_Input;
+  }
+  return (int32_t){0};
+}
+
+static void GPIOPin__RP2040_setInputValue(GPIOPin__RP2040* self, bool value) {
+  (self->rawInputValue = value);
+  int32_t prevIrqValue = GPIOPin__RP2040_irqValue_get(self);
+  if ((value && GPIOPin__RP2040_inputEnable_get(self))) {
+  (self->irqStatus |= ((int32_t)(IRQ_EDGE_HIGH) | (int32_t)(IRQ_LEVEL_HIGH)));
+  (self->irqStatus &= (~IRQ_LEVEL_LOW));
+  } else {
+  (self->irqStatus |= ((int32_t)(IRQ_EDGE_LOW) | (int32_t)(IRQ_LEVEL_LOW)));
+  (self->irqStatus &= (~IRQ_LEVEL_HIGH));
+  }
+  if ((GPIOPin__RP2040_irqValue_get(self) != prevIrqValue)) {
+  RP2040_updateIOInterrupt(self->rpchip);
+  }
+  RP2040_gpioInputValueHasBeenSet(self->rpchip, self->index);
+}
+
+static void GPIOPin__RP2040_checkForUpdates(GPIOPin__RP2040* self) {
+  GPIOPin__RP2040* __destruct_tmp_1 = self;
+  GPIOPinState lastValue = __destruct_tmp_1->lastValue;
+  int32_t value = GPIOPin__RP2040_value_get(__destruct_tmp_1);
+  if ((value != lastValue)) {
+  (self->lastValue = value);
+  {
+    int32_t __forof_n = self->listeners_count;
+    for (int32_t __forof_i = 0; __forof_i < __forof_n; __forof_i++) {
+      GPIOPinListener listener = self->listeners[__forof_i];
+  listener(value, lastValue);
+    }
+  }
+  }
+}
+
+static void GPIOPin__RP2040_refreshInput(GPIOPin__RP2040* self) {
+  GPIOPin__RP2040_setInputValue(self, self->rawInputValue);
+}
+
+static void GPIOPin__RP2040_updateIRQValue(GPIOPin__RP2040* self, int32_t value) {
+  if ((((int32_t)(value) & (int32_t)(IRQ_EDGE_LOW)) && ((int32_t)(self->irqStatus) & (int32_t)(IRQ_EDGE_LOW)))) {
+  (self->irqStatus &= (~IRQ_EDGE_LOW));
+  RP2040_updateIOInterrupt(self->rpchip);
+  }
+  if ((((int32_t)(value) & (int32_t)(IRQ_EDGE_HIGH)) && ((int32_t)(self->irqStatus) & (int32_t)(IRQ_EDGE_HIGH)))) {
+  (self->irqStatus &= (~IRQ_EDGE_HIGH));
+  RP2040_updateIOInterrupt(self->rpchip);
+  }
+}
+
+static void GPIOPin__RP2040_addListener(GPIOPin__RP2040* self, GPIOPinListener callback) {
   (__extension__({ if (self->listeners_count < 8) { self->listeners[self->listeners_count++] = callback; } else { fprintf(stderr, "cts2c: %s capacity (%d) exceeded\n", "listeners", 8); abort(); } }));
 }
 
@@ -7999,10 +10578,10 @@ static void RPADC_activeChannel_set(RPADC* self, int32_t channel) {
   (self->cs |= ((int32_t)((uint32_t)(((int32_t)(channel) & (int32_t)(CS_AINSEL_SHIFT))) << (((int32_t)(CS_AINSEL_SHIFT)) & 31))));
 }
 
-static RPADC* RPADC_new(RP2350* rp2040, const char* name, int32_t adc_interrupt, int32_t adc_dreq) {
+static RPADC* RPADC_new(RP2350* rpchip, const char* name, int32_t adc_interrupt, int32_t adc_dreq) {
   RPADC* self = calloc(1, sizeof(RPADC));
   {
-    BasePeripheral* __super_4 = BasePeripheral_new(rp2040, name);
+    BasePeripheral* __super_4 = BasePeripheral_new(rpchip, name);
     self->base = *__super_4;
     free(__super_4);
   }
@@ -8030,13 +10609,13 @@ static RPADC* RPADC_new(RP2350* rp2040, const char* name, int32_t adc_interrupt,
   self->busy = false;
   self->err = false;
   self->currentChannel = 0;
-  (self->sampleAlarm = SimulationClock_createAlarm(self->base.rp2040->clock, (AlarmCallback){ .obj = (void*)(ADCSampleAlarm_new(self)), .vtable = &ADCSampleAlarm_AlarmCallback_vtable }));
-  (self->multiShotAlarm = SimulationClock_createAlarm(self->base.rp2040->clock, (AlarmCallback){ .obj = (void*)(ADCMultiShotAlarm_new(self)), .vtable = &ADCMultiShotAlarm_AlarmCallback_vtable }));
+  (self->sampleAlarm = SimulationClock_createAlarm(self->base.rpchip->clock, (AlarmCallback){ .obj = (void*)(ADCSampleAlarm_new(self)), .vtable = &ADCSampleAlarm_AlarmCallback_vtable }));
+  (self->multiShotAlarm = SimulationClock_createAlarm(self->base.rpchip->clock, (AlarmCallback){ .obj = (void*)(ADCMultiShotAlarm_new(self)), .vtable = &ADCMultiShotAlarm_AlarmCallback_vtable }));
   return self;
 }
 
 static void RPADC_checkInterrupts(RPADC* self) {
-  RP2350_setInterrupt(self->base.rp2040, self->adc_interrupt, (!(!RPADC_intStatus_get(self))));
+  RP2350_setInterrupt(self->base.rpchip, self->adc_interrupt, (!(!RPADC_intStatus_get(self))));
 }
 
 static void RPADC_startADCRead(RPADC* self) {
@@ -8048,9 +10627,9 @@ static void RPADC_updateDMA(RPADC* self) {
   if (((int32_t)(self->fcs) & (int32_t)(FCS_DREQ_EN))) {
   int32_t thres = ((int32_t)(((int32_t)(self->fcs) >> (((int32_t)(FCS_THRESH_SHIFT)) & 31))) & (int32_t)(FCS_THRES_MASK));
   if ((FIFO_itemCount_get(self->fifo) >= thres)) {
-  RP2350_dma_setDREQ(self->base.rp2040, self->adc_dreq);
+  RP2350_dma_setDREQ(self->base.rpchip, self->adc_dreq);
   } else {
-  RP2350_dma_clearDREQ(self->base.rp2040, self->adc_dreq);
+  RP2350_dma_clearDREQ(self->base.rpchip, self->adc_dreq);
   }
   }
 }
@@ -8160,16 +10739,237 @@ static void RPADC_writeUint32(RPADC* self, int32_t offset, int32_t value) {
   }
 }
 
+static ADCSampleAlarm__RP2040* ADCSampleAlarm__RP2040_new(RPADC__RP2040* adc) {
+  ADCSampleAlarm__RP2040* self = calloc(1, sizeof(ADCSampleAlarm__RP2040));
+  (self)->__vtable_AlarmCallback = &ADCSampleAlarm__RP2040_AlarmCallback_vtable;
+  self->adc = adc;
+  return self;
+}
+
+static void ADCSampleAlarm__RP2040_fire(ADCSampleAlarm__RP2040* self) {
+  RPADC__RP2040_completeADCRead(self->adc, self->adc->channelValues[self->adc->currentChannel], false);
+}
+
+static ADCMultiShotAlarm__RP2040* ADCMultiShotAlarm__RP2040_new(RPADC__RP2040* adc) {
+  ADCMultiShotAlarm__RP2040* self = calloc(1, sizeof(ADCMultiShotAlarm__RP2040));
+  (self)->__vtable_AlarmCallback = &ADCMultiShotAlarm__RP2040_AlarmCallback_vtable;
+  self->adc = adc;
+  return self;
+}
+
+static void ADCMultiShotAlarm__RP2040_fire(ADCMultiShotAlarm__RP2040* self) {
+  if (((int32_t)(self->adc->cs) & (int32_t)(CS_START_MANY))) {
+  RPADC__RP2040_startADCRead(self->adc);
+  }
+}
+
+static void RPADC__RP2040_onADCRead_default(void* __ctx, int32_t channel) {
+  RPADC__RP2040* self = (RPADC__RP2040*)__ctx;
+  (self->currentChannel = channel);
+  IAlarm_schedule(self->sampleAlarm, (self->sampleTime * 1000));
+}
+
+static int32_t RPADC__RP2040_temperatueEnable_get(RPADC__RP2040* self) {
+  return ((int32_t)(self->cs) & (int32_t)(CS_TS_EN));
+}
+
+static int32_t RPADC__RP2040_enabled_get(RPADC__RP2040* self) {
+  return ((int32_t)(self->cs) & (int32_t)(CS_EN));
+}
+
+static int32_t RPADC__RP2040_divider_get(RPADC__RP2040* self) {
+  return ((1 + ((int32_t)(((int32_t)(self->clockDiv) >> (((int32_t)(DIV_INT_SHIFT)) & 31))) & (int32_t)(DIV_INT_MASK))) + ((double)(((int32_t)(((int32_t)(self->clockDiv) >> (((int32_t)(DIV_FRAC_SHIFT)) & 31))) & (int32_t)(DIV_FRAC_MASK))) / (double)(256)));
+}
+
+static int32_t RPADC__RP2040_intRaw_get(RPADC__RP2040* self) {
+  int32_t thres = ((int32_t)(((int32_t)(self->fcs) >> (((int32_t)(FCS_THRESH_SHIFT)) & 31))) & (int32_t)(FCS_THRES_MASK));
+  return ((FIFO_itemCount_get(self->fifo) >= thres) ? FIFO_INT : 0);
+}
+
+static int32_t RPADC__RP2040_intStatus_get(RPADC__RP2040* self) {
+  return ((int32_t)(((int32_t)(RPADC__RP2040_intRaw_get(self)) & (int32_t)(self->intEnable))) | (int32_t)(self->intForce));
+}
+
+static int32_t RPADC__RP2040_activeChannel_get(RPADC__RP2040* self) {
+  return ((int32_t)(((int32_t)(self->cs) >> (((int32_t)(CS_AINSEL_SHIFT)) & 31))) & (int32_t)(CS_AINSEL_MASK));
+}
+
+static void RPADC__RP2040_activeChannel_set(RPADC__RP2040* self, int32_t channel) {
+  (self->cs &= (~((int32_t)((uint32_t)(CS_AINSEL_MASK) << (((int32_t)(CS_AINSEL_SHIFT)) & 31)))));
+  (self->cs |= ((int32_t)((uint32_t)(((int32_t)(channel) & (int32_t)(CS_AINSEL_SHIFT))) << (((int32_t)(CS_AINSEL_SHIFT)) & 31))));
+}
+
+static RPADC__RP2040* RPADC__RP2040_new(RP2040* rpchip, const char* name, int32_t adc_interrupt, int32_t adc_dreq) {
+  RPADC__RP2040* self = calloc(1, sizeof(RPADC__RP2040));
+  {
+    BasePeripheral__RP2040* __super_5 = BasePeripheral__RP2040_new(rpchip, name);
+    self->base = *__super_5;
+    free(__super_5);
+  }
+  (&(self)->base)->__vtable_Peripheral = &RPADC__RP2040_Peripheral_vtable;
+  self->adc_interrupt = adc_interrupt;
+  self->adc_dreq = adc_dreq;
+  self->numChannels = 5;
+  self->resolution = 12;
+  self->sampleTime = 2;
+  self->channelValues = calloc(5, sizeof(int32_t));
+  self->channelValues[0] = 0;
+  self->channelValues[1] = 0;
+  self->channelValues[2] = 0;
+  self->channelValues[3] = 0;
+  self->channelValues[4] = 0;
+  self->onADCRead_fn = RPADC__RP2040_onADCRead_default;
+  self->onADCRead_ctx = self;
+  self->fifo = FIFO_new(4);
+  self->cs = 0;
+  self->fcs = 0;
+  self->clockDiv = 0;
+  self->intEnable = 0;
+  self->intForce = 0;
+  self->result = 0;
+  self->busy = false;
+  self->err = false;
+  self->currentChannel = 0;
+  (self->sampleAlarm = SimulationClock_createAlarm(self->base.rpchip->clock, (AlarmCallback){ .obj = (void*)(ADCSampleAlarm__RP2040_new(self)), .vtable = &ADCSampleAlarm__RP2040_AlarmCallback_vtable }));
+  (self->multiShotAlarm = SimulationClock_createAlarm(self->base.rpchip->clock, (AlarmCallback){ .obj = (void*)(ADCMultiShotAlarm__RP2040_new(self)), .vtable = &ADCMultiShotAlarm__RP2040_AlarmCallback_vtable }));
+  return self;
+}
+
+static void RPADC__RP2040_checkInterrupts(RPADC__RP2040* self) {
+  RP2040_setInterrupt(self->base.rpchip, self->adc_interrupt, (!(!RPADC__RP2040_intStatus_get(self))));
+}
+
+static void RPADC__RP2040_startADCRead(RPADC__RP2040* self) {
+  (self->busy = true);
+  ((self)->onADCRead_fn ? (self)->onADCRead_fn((self)->onADCRead_ctx, RPADC__RP2040_activeChannel_get(self)) : (void)0);
+}
+
+static void RPADC__RP2040_updateDMA(RPADC__RP2040* self) {
+  if (((int32_t)(self->fcs) & (int32_t)(FCS_DREQ_EN))) {
+  int32_t thres = ((int32_t)(((int32_t)(self->fcs) >> (((int32_t)(FCS_THRESH_SHIFT)) & 31))) & (int32_t)(FCS_THRES_MASK));
+  if ((FIFO_itemCount_get(self->fifo) >= thres)) {
+  RP2040_dma_setDREQ(self->base.rpchip, self->adc_dreq);
+  } else {
+  RP2040_dma_clearDREQ(self->base.rpchip, self->adc_dreq);
+  }
+  }
+}
+
+static void RPADC__RP2040_completeADCRead(RPADC__RP2040* self, int32_t value, bool error) {
+  (self->busy = false);
+  (self->result = value);
+  if (error) {
+  (self->cs |= ((int32_t)(CS_ERR_STICKY) | (int32_t)(CS_ERR)));
+  } else {
+  (self->cs &= (~CS_ERR));
+  }
+  if (((int32_t)(self->fcs) & (int32_t)(FCS_EN))) {
+  if (FIFO_full_get(self->fifo)) {
+  (self->fcs |= FCS_OVER);
+  } else {
+  (value &= 4095);
+  if (((int32_t)(self->fcs) & (int32_t)(FCS_SHIFT))) {
+  (value = (int32_t)(value) >> (4));
+  }
+  if ((error && ((int32_t)(self->fcs) & (int32_t)(FCS_ERR)))) {
+  (value |= FIFO_ERR);
+  }
+  FIFO_push(self->fifo, value);
+  RPADC__RP2040_updateDMA(self);
+  RPADC__RP2040_checkInterrupts(self);
+  }
+  }
+  int32_t round = ((int32_t)(((int32_t)(self->cs) >> (((int32_t)(CS_RROBIN_SHIFT)) & 31))) & (int32_t)(CS_RROBIN_MASK));
+  if (round) {
+  int32_t channel = (RPADC__RP2040_activeChannel_get(self) + 1);
+  while ((!((int32_t)(round) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(channel)) & 31))))))) {
+  (channel = ((channel + 1) % self->numChannels));
+  }
+  RPADC__RP2040_activeChannel_set(self, channel);
+  }
+  if (((int32_t)(self->cs) & (int32_t)(CS_START_MANY))) {
+  int32_t clockMHZ = 48;
+  int32_t sampleTicks = (clockMHZ * self->sampleTime);
+  if ((RPADC__RP2040_divider_get(self) > sampleTicks)) {
+  int32_t micros = ((double)((RPADC__RP2040_divider_get(self) - sampleTicks)) / (double)(clockMHZ));
+  IAlarm_schedule(self->multiShotAlarm, (micros * 1000));
+  } else {
+  RPADC__RP2040_startADCRead(self);
+  }
+  }
+}
+
+static int32_t RPADC__RP2040_readUint32(RPADC__RP2040* self, int32_t offset) {
+  switch (offset) {
+  case CS:
+  return ((int32_t)(((int32_t)(self->cs) | (int32_t)((self->err ? CS_ERR : 0)))) | (int32_t)((self->busy ? 0 : CS_READY)));
+  case RESULT:
+  return self->result;
+  case FCS:
+  return ((int32_t)(((int32_t)(((int32_t)(self->fcs) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(FIFO_itemCount_get(self->fifo)) & (int32_t)(FCS_LEVEL_MASK))) << (((int32_t)(FCS_LEVEL_SHIFT)) & 31)))))) | (int32_t)((FIFO_full_get(self->fifo) ? FCS_FULL : 0)))) | (int32_t)((FIFO_empty_get(self->fifo) ? FCS_EMPTY : 0)));
+  case FIFO_REG:
+  if (FIFO_empty_get(self->fifo)) {
+  (self->fcs |= FCS_UNDER);
+  return 0;
+  } else {
+  int32_t value = FIFO_pull(self->fifo);
+  RPADC__RP2040_updateDMA(self);
+  return value;
+  }
+  case DIV:
+  return self->clockDiv;
+  case INTR:
+  return RPADC__RP2040_intRaw_get(self);
+  case INTE:
+  return self->intEnable;
+  case INTF:
+  return self->intForce;
+  case INTS:
+  return RPADC__RP2040_intStatus_get(self);
+  }
+  return BasePeripheral__RP2040_readUint32(&self->base, offset);
+}
+
+static void RPADC__RP2040_writeUint32(RPADC__RP2040* self, int32_t offset, int32_t value) {
+  switch (offset) {
+  case CS:
+  (self->fcs &= (~((int32_t)(value) & (int32_t)(CS_ERR_STICKY))));
+  (self->cs = ((int32_t)(((int32_t)(self->cs) & (int32_t)((~CS_WRITE_MASK)))) | (int32_t)(((int32_t)(value) & (int32_t)(CS_WRITE_MASK)))));
+  if (((((int32_t)(value) & (int32_t)(CS_EN)) && (!self->busy)) && (((int32_t)(value) & (int32_t)(CS_START_ONE)) || ((int32_t)(value) & (int32_t)(CS_START_MANY))))) {
+  RPADC__RP2040_startADCRead(self);
+  }
+  break;
+  case FCS:
+  (self->fcs &= (~((int32_t)(value) & (int32_t)(((int32_t)(FCS_OVER) | (int32_t)(FCS_UNDER))))));
+  (self->fcs = ((int32_t)(((int32_t)(self->fcs) & (int32_t)((~FCS_WRITE_MASK)))) | (int32_t)(((int32_t)(value) & (int32_t)(FCS_WRITE_MASK)))));
+  RPADC__RP2040_checkInterrupts(self);
+  break;
+  case DIV:
+  (self->clockDiv = value);
+  break;
+  case INTE:
+  (self->intEnable = ((int32_t)(value) & (int32_t)(FIFO_INT)));
+  RPADC__RP2040_checkInterrupts(self);
+  break;
+  case INTF:
+  (self->intForce = ((int32_t)(value) & (int32_t)(FIFO_INT)));
+  RPADC__RP2040_checkInterrupts(self);
+  break;
+  default:
+  BasePeripheral__RP2040_writeUint32(&self->base, offset, value);
+  }
+}
+
 // ─── bootram.ts ───
 enum { BOOTLOCK_ST = (2056) };
 enum { BOOTLOCK0 = (2060) };
 enum { BOOTLOCK7 = (2088) };
 enum { WRITE_ONCE0 = (2048) };
 enum { WRITE_ONCE1 = (2052) };
-static RPBootRAM* RPBootRAM_new(RP2350* rp2040, const char* name) {
+static RPBootRAM* RPBootRAM_new(RP2350* rpchip, const char* name) {
   RPBootRAM* self = calloc(1, sizeof(RPBootRAM));
   {
-    BasePeripheral* __base = BasePeripheral_new(rp2040, name);
+    BasePeripheral* __base = BasePeripheral_new(rpchip, name);
     self->base = *__base;
     free(__base);
   }
@@ -8228,12 +11028,12 @@ enum { PERFCTR2 = (24) };
 enum { PERFSEL2 = (28) };
 enum { PERFCTR3 = (32) };
 enum { PERFSEL3 = (36) };
-static RPBUSCTRL* RPBUSCTRL_new(RP2350* rp2040, const char* name) {
+static RPBUSCTRL* RPBUSCTRL_new(RP2350* rpchip, const char* name) {
   RPBUSCTRL* self = calloc(1, sizeof(RPBUSCTRL));
   {
-    BasePeripheral* __super_5 = BasePeripheral_new(rp2040, name);
-    self->base = *__super_5;
-    free(__super_5);
+    BasePeripheral* __super_6 = BasePeripheral_new(rpchip, name);
+    self->base = *__super_6;
+    free(__super_6);
   }
   (&(self)->base)->__vtable_Peripheral = &RPBUSCTRL_Peripheral_vtable;
   self->voltageSelect = 0;
@@ -8305,23 +11105,100 @@ static void RPBUSCTRL_writeUint32(RPBUSCTRL* self, int32_t offset, int32_t value
   }
 }
 
+static RPBUSCTRL__RP2040* RPBUSCTRL__RP2040_new(RP2040* rpchip, const char* name) {
+  RPBUSCTRL__RP2040* self = calloc(1, sizeof(RPBUSCTRL__RP2040));
+  {
+    BasePeripheral__RP2040* __super_7 = BasePeripheral__RP2040_new(rpchip, name);
+    self->base = *__super_7;
+    free(__super_7);
+  }
+  (&(self)->base)->__vtable_Peripheral = &RPBUSCTRL__RP2040_Peripheral_vtable;
+  self->voltageSelect = 0;
+  self->perfCtr = calloc(4, sizeof(int32_t));
+  self->perfCtr[0] = 0;
+  self->perfCtr[1] = 0;
+  self->perfCtr[2] = 0;
+  self->perfCtr[3] = 0;
+  self->perfSel = calloc(4, sizeof(int32_t));
+  self->perfSel[0] = 31;
+  self->perfSel[1] = 31;
+  self->perfSel[2] = 31;
+  self->perfSel[3] = 31;
+  return self;
+}
+
+static int32_t RPBUSCTRL__RP2040_readUint32(RPBUSCTRL__RP2040* self, int32_t offset) {
+  switch (offset) {
+  case BUS_PRIORITY_ACK:
+  return 1;
+  case PERFCTR0:
+  return self->perfCtr[0];
+  case PERFSEL0:
+  return self->perfSel[0];
+  case PERFCTR1:
+  return self->perfCtr[1];
+  case PERFSEL1:
+  return self->perfSel[1];
+  case PERFCTR2:
+  return self->perfCtr[2];
+  case PERFSEL2:
+  return self->perfSel[2];
+  case PERFCTR3:
+  return self->perfCtr[3];
+  case PERFSEL3:
+  return self->perfSel[3];
+  }
+  return BasePeripheral__RP2040_readUint32(&self->base, offset);
+}
+
+static void RPBUSCTRL__RP2040_writeUint32(RPBUSCTRL__RP2040* self, int32_t offset, int32_t value) {
+  switch (offset) {
+  case PERFCTR0:
+  (self->perfCtr[0] = 0);
+  break;
+  case PERFSEL0:
+  (self->perfSel[0] = ((int32_t)(value) & (int32_t)(31)));
+  break;
+  case PERFCTR1:
+  (self->perfCtr[1] = 0);
+  break;
+  case PERFSEL1:
+  (self->perfSel[1] = ((int32_t)(value) & (int32_t)(31)));
+  break;
+  case PERFCTR2:
+  (self->perfCtr[2] = 0);
+  break;
+  case PERFSEL2:
+  (self->perfSel[2] = ((int32_t)(value) & (int32_t)(31)));
+  break;
+  case PERFCTR3:
+  (self->perfCtr[3] = 0);
+  break;
+  case PERFSEL3:
+  (self->perfSel[3] = ((int32_t)(value) & (int32_t)(31)));
+  break;
+  default:
+  BasePeripheral__RP2040_writeUint32(&self->base, offset, value);
+  }
+}
+
 // ─── clocks.ts ───
 enum { CLK_REF_CTRL = (48) };
 enum { CLK_REF_SELECTED = (56) };
 enum { CLK_SYS_CTRL = (60) };
 enum { CLK_SYS_SELECTED = (68) };
-static RPClocks* RPClocks_new(RP2350* rp2040, const char* name) {
+static RPClocks* RPClocks_new(RP2350* rpchip, const char* name) {
   RPClocks* self = calloc(1, sizeof(RPClocks));
   {
-    BasePeripheral* __super_6 = BasePeripheral_new(rp2040, name);
-    self->base = *__super_6;
-    free(__super_6);
+    BasePeripheral* __super_8 = BasePeripheral_new(rpchip, name);
+    self->base = *__super_8;
+    free(__super_8);
   }
   (&(self)->base)->__vtable_Peripheral = &RPClocks_Peripheral_vtable;
   self->refCtrl = 0;
   self->sysCtrl = 0;
   self->clkFc0StatusOffset = 0;
-  if ((strcmp(rp2040->identifier, "rp2350") == 0)) {
+  if ((strcmp(rpchip->identifier, "rp2350") == 0)) {
   (self->clkFc0StatusOffset = 164);
   } else {
   (self->clkFc0StatusOffset = 152);
@@ -8356,6 +11233,56 @@ static void RPClocks_writeUint32(RPClocks* self, int32_t offset, int32_t value) 
   break;
   default:
   BasePeripheral_writeUint32(&self->base, offset, value);
+  break;
+  }
+}
+
+static RPClocks__RP2040* RPClocks__RP2040_new(RP2040* rpchip, const char* name) {
+  RPClocks__RP2040* self = calloc(1, sizeof(RPClocks__RP2040));
+  {
+    BasePeripheral__RP2040* __super_9 = BasePeripheral__RP2040_new(rpchip, name);
+    self->base = *__super_9;
+    free(__super_9);
+  }
+  (&(self)->base)->__vtable_Peripheral = &RPClocks__RP2040_Peripheral_vtable;
+  self->refCtrl = 0;
+  self->sysCtrl = 0;
+  self->clkFc0StatusOffset = 0;
+  if ((strcmp(rpchip->identifier, "rp2350") == 0)) {
+  (self->clkFc0StatusOffset = 164);
+  } else {
+  (self->clkFc0StatusOffset = 152);
+  }
+  return self;
+}
+
+static int32_t RPClocks__RP2040_readUint32(RPClocks__RP2040* self, int32_t offset) {
+  if ((offset == self->clkFc0StatusOffset)) {
+  return 17;
+  }
+  switch (offset) {
+  case CLK_REF_CTRL:
+  return self->refCtrl;
+  case CLK_REF_SELECTED:
+  return ((int32_t)((uint32_t)(1) << (((int32_t)(((int32_t)(self->refCtrl) & (int32_t)(3)))) & 31)));
+  case CLK_SYS_CTRL:
+  return self->sysCtrl;
+  case CLK_SYS_SELECTED:
+  return ((int32_t)((uint32_t)(1) << (((int32_t)(((int32_t)(self->sysCtrl) & (int32_t)(1)))) & 31)));
+  }
+  return BasePeripheral__RP2040_readUint32(&self->base, offset);
+}
+
+static void RPClocks__RP2040_writeUint32(RPClocks__RP2040* self, int32_t offset, int32_t value) {
+  switch (offset) {
+  case CLK_REF_CTRL:
+  (self->refCtrl = value);
+  break;
+  case CLK_SYS_CTRL:
+  (self->sysCtrl = value);
+  break;
+  default:
+  BasePeripheral__RP2040_writeUint32(&self->base, offset, value);
   break;
   }
 }
@@ -8429,11 +11356,11 @@ enum { HIGH_PRIORITY = (2) }; /* ((int32_t)((uint32_t)(1) << (1))) */
 enum { EN = (1) }; /* ((int32_t)((uint32_t)(1) << (0))) */
 enum { CHn_CTRL_TRIG_WRITE_MASK = (16777215) };
 enum { CHn_CTRL_TRIG_WC_MASK = (1610612736) }; /* ((int32_t)(READ_ERROR) | (int32_t)(WRITE_ERROR)) */
-static RPDMAChannel* RPDMAChannel_new(RPDMA* dma, RP2350* rp2040, int32_t index) {
-  RPDMAChannel* self = calloc(1, sizeof(RPDMAChannel));
-  (self)->__vtable_AlarmCallback = &RPDMAChannel_AlarmCallback_vtable;
+static RP2350DMAChannel* RP2350DMAChannel_new(RP2350DMA* dma, RP2350* rpchip, int32_t index) {
+  RP2350DMAChannel* self = calloc(1, sizeof(RP2350DMAChannel));
+  (self)->__vtable_AlarmCallback = &RP2350DMAChannel_AlarmCallback_vtable;
   self->dma = dma;
-  self->rp2040 = rp2040;
+  self->rpchip = rpchip;
   self->index = index;
   self->ctrl = 0;
   self->readAddr = 0;
@@ -8447,16 +11374,496 @@ static RPDMAChannel* RPDMAChannel_new(RPDMA* dma, RP2350* rp2040, int32_t index)
   self->transferKind = TransferKind_Direct8;
   self->chainTo = 0;
   self->ringMask = 0;
-  (self->transferAlarm = SimulationClock_createAlarm(rp2040->clock, (AlarmCallback){ .obj = (void*)(self), .vtable = &RPDMAChannel_AlarmCallback_vtable }));
+  (self->transferAlarm = SimulationClock_createAlarm(rpchip->clock, (AlarmCallback){ .obj = (void*)(self), .vtable = &RP2350DMAChannel_AlarmCallback_vtable }));
+  RP2350DMAChannel_reset(self);
+  return self;
+}
+
+static void RP2350DMAChannel_start(RP2350DMAChannel* self) {
+  if (((!((int32_t)(self->ctrl) & (int32_t)(EN))) || ((int32_t)(self->ctrl) & (int32_t)(BUSY)))) {
+  return;
+  }
+  (self->ctrl |= BUSY);
+  (self->transCount = self->transCountReload);
+  if (self->transCount) {
+  RP2350DMAChannel_scheduleTransfer(self);
+  }
+}
+
+static int32_t RP2350DMAChannel_treq_get(RP2350DMAChannel* self) {
+  return self->treqValue;
+}
+
+static int32_t RP2350DMAChannel_active_get(RP2350DMAChannel* self) {
+  return (((int32_t)(self->ctrl) & (int32_t)(EN)) ? ((int32_t)(self->ctrl) & (int32_t)(BUSY)) : ((int32_t)(self->ctrl) & (int32_t)(EN)));
+}
+
+static void RP2350DMAChannel_transfer8(RP2350DMAChannel* self) {
+  RP2350DMAChannel* __destruct_tmp_1 = self;
+  RP2350* rpchip = __destruct_tmp_1->rpchip;
+  RP2350_writeUint8(rpchip, self->writeAddr, RP2350_readUint8(rpchip, self->readAddr));
+}
+
+static void RP2350DMAChannel_transfer16(RP2350DMAChannel* self) {
+  RP2350DMAChannel* __destruct_tmp_1 = self;
+  RP2350* rpchip = __destruct_tmp_1->rpchip;
+  RP2350_writeUint16(rpchip, self->writeAddr, RP2350_readUint16(rpchip, self->readAddr));
+}
+
+static void RP2350DMAChannel_transferSwap16(RP2350DMAChannel* self) {
+  RP2350DMAChannel* __destruct_tmp_1 = self;
+  RP2350* rpchip = __destruct_tmp_1->rpchip;
+  uint32_t input = RP2350_readUint16(rpchip, self->readAddr);
+  RP2350_writeUint16(rpchip, self->writeAddr, ((int32_t)(((int32_t)((uint32_t)(((int32_t)(input) & (int32_t)(255))) << (8)))) | (int32_t)(((int32_t)(input) >> (8)))));
+}
+
+static void RP2350DMAChannel_transfer32(RP2350DMAChannel* self) {
+  RP2350DMAChannel* __destruct_tmp_1 = self;
+  RP2350* rpchip = __destruct_tmp_1->rpchip;
+  RP2350_writeUint32(rpchip, self->writeAddr, RP2350_readUint32(rpchip, self->readAddr));
+}
+
+static void RP2350DMAChannel_transferSwap32(RP2350DMAChannel* self) {
+  RP2350DMAChannel* __destruct_tmp_1 = self;
+  RP2350* rpchip = __destruct_tmp_1->rpchip;
+  uint32_t input = RP2350_readUint32(rpchip, self->readAddr);
+  RP2350_writeUint32(rpchip, self->writeAddr, ((int32_t)(((int32_t)(((int32_t)(((int32_t)((uint32_t)(((int32_t)(input) & (int32_t)(255))) << (24)))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(input) & (int32_t)(65280))) << (8)))))) | (int32_t)(((int32_t)(((int32_t)(input) & (int32_t)(16711680))) >> (8))))) | (int32_t)(((int32_t)(((int32_t)(input) >> (24))) & (int32_t)(255)))));
+}
+
+static void RP2350DMAChannel_fire(RP2350DMAChannel* self) {
+  RP2350DMAChannel* __destruct_tmp_1 = self;
+  int32_t ctrl = __destruct_tmp_1->ctrl;
+  int32_t dataSize = __destruct_tmp_1->dataSize;
+  int32_t ringMask = __destruct_tmp_1->ringMask;
+  switch (self->transferKind) {
+  case TransferKind_Direct16:
+  RP2350DMAChannel_transfer16(self);
+  break;
+  case TransferKind_Swap16:
+  RP2350DMAChannel_transferSwap16(self);
+  break;
+  case TransferKind_Direct32:
+  RP2350DMAChannel_transfer32(self);
+  break;
+  case TransferKind_Swap32:
+  RP2350DMAChannel_transferSwap32(self);
+  break;
+  default:
+  RP2350DMAChannel_transfer8(self);
+  }
+  if (((int32_t)(ctrl) & (int32_t)(INCR_READ))) {
+  if ((ringMask && (!((int32_t)(ctrl) & (int32_t)(RING_SEL))))) {
+  (self->readAddr = ((int32_t)(((int32_t)(self->readAddr) & (int32_t)((~ringMask)))) | (int32_t)(((int32_t)((self->readAddr + dataSize)) & (int32_t)(ringMask)))));
+  } else {
+  (self->readAddr += dataSize);
+  }
+  }
+  if (((int32_t)(ctrl) & (int32_t)(INCR_WRITE))) {
+  if ((ringMask && ((int32_t)(ctrl) & (int32_t)(RING_SEL)))) {
+  (self->writeAddr = ((int32_t)(((int32_t)(self->writeAddr) & (int32_t)((~ringMask)))) | (int32_t)(((int32_t)((self->writeAddr + dataSize)) & (int32_t)(ringMask)))));
+  } else {
+  (self->writeAddr += dataSize);
+  }
+  }
+  if ((self->transMode != 15)) {
+  (self->transCount--);
+  }
+  if ((self->transCount > 0)) {
+  RP2350DMAChannel_scheduleTransfer(self);
+  } else {
+  if ((!((int32_t)(self->ctrl) & (int32_t)(IRQ_QUIET)))) {
+  (self->dma->intRaw |= ((int32_t)((uint32_t)(1) << (((int32_t)(self->index)) & 31))));
+  RP2350DMA_checkInterrupts(self->dma);
+  }
+  if ((self->chainTo != self->index)) {
+  RP2350DMAChannel_start(self->dma->channels[self->chainTo]);
+  }
+  if ((self->transMode == 1)) {
+  (self->transCount = self->transCountReload);
+  RP2350DMAChannel_scheduleTransfer(self);
+  } else {
+  (self->ctrl &= (~BUSY));
+  }
+  }
+}
+
+static void RP2350DMAChannel_scheduleTransfer(RP2350DMAChannel* self) {
+  if ((self->dma->dreq[self->treqValue] || (self->treqValue == TREQ_Permanent))) {
+  IAlarm_schedule(self->transferAlarm, 0);
+  } else {
+  int32_t delay = RP2350DMA_getTimer(self->dma, self->treqValue);
+  if (delay) {
+  IAlarm_schedule(self->transferAlarm, (delay * 1000));
+  }
+  }
+}
+
+static void RP2350DMAChannel_abort(RP2350DMAChannel* self) {
+  (self->ctrl &= (~BUSY));
+  IAlarm_cancel(self->transferAlarm);
+}
+
+static int32_t RP2350DMAChannel_readUint32(RP2350DMAChannel* self, int32_t offset) {
+  switch (offset) {
+  case CHn_READ_ADDR:
+  case CHn_AL1_READ_ADDR:
+  case CHn_AL2_READ_ADDR:
+  case CHn_AL3_READ_ADDR_TRIG:
+  return self->readAddr;
+  case CHn_WRITE_ADDR:
+  case CHn_AL1_WRITE_ADDR:
+  case CHn_AL2_WRITE_ADDR_TRIG:
+  case CHn_AL3_WRITE_ADDR:
+  return self->writeAddr;
+  case CHn_TRANS_COUNT:
+  case CHn_AL1_TRANS_COUNT_TRIG:
+  case CHn_AL2_TRANS_COUNT:
+  case CHn_AL3_TRANS_COUNT:
+  return self->transCount;
+  case CHn_CTRL_TRIG:
+  case CHn_AL1_CTRL:
+  case CHn_AL2_CTRL:
+  case CHn_AL3_CTRL:
+  return self->ctrl;
+  case CHn_DBG_CTDREQ:
+  return self->dreqCounter;
+  case CHn_DBG_TCR:
+  return self->transCountReload;
+  }
+  return 0;
+}
+
+static void RP2350DMAChannel_writeUint32(RP2350DMAChannel* self, int32_t offset, int32_t value) {
+  switch (offset) {
+  case CHn_READ_ADDR:
+  case CHn_AL1_READ_ADDR:
+  case CHn_AL2_READ_ADDR:
+  case CHn_AL3_READ_ADDR_TRIG:
+  (self->readAddr = value);
+  break;
+  case CHn_WRITE_ADDR:
+  case CHn_AL1_WRITE_ADDR:
+  case CHn_AL2_WRITE_ADDR_TRIG:
+  case CHn_AL3_WRITE_ADDR:
+  (self->writeAddr = value);
+  break;
+  case CHn_TRANS_COUNT:
+  case CHn_AL1_TRANS_COUNT_TRIG:
+  case CHn_AL2_TRANS_COUNT:
+  case CHn_AL3_TRANS_COUNT:
+  (self->transCountReload = ((int32_t)(value) & (int32_t)(268435455)));
+  (self->transMode = ((uint32_t)(value) >> (28)));
+  break;
+  case CHn_CTRL_TRIG:
+  case CHn_AL1_CTRL:
+  case CHn_AL2_CTRL:
+  case CHn_AL3_CTRL:
+  {
+  (self->ctrl = ((int32_t)(((int32_t)(self->ctrl) & (int32_t)((~CHn_CTRL_TRIG_WRITE_MASK)))) | (int32_t)(((int32_t)(value) & (int32_t)(CHn_CTRL_TRIG_WRITE_MASK)))));
+  (self->ctrl &= (~((int32_t)(value) & (int32_t)(CHn_CTRL_TRIG_WC_MASK))));
+  (self->treqValue = ((int32_t)(((int32_t)(self->ctrl) >> (((int32_t)(TREQ_SEL_SHIFT)) & 31))) & (int32_t)(TREQ_SEL_MASK)));
+  (self->chainTo = ((int32_t)(((int32_t)(self->ctrl) >> (((int32_t)(CHAIN_TO_SHIFT)) & 31))) & (int32_t)(CHAIN_TO_MASK)));
+  int32_t ringSize = ((int32_t)(((int32_t)(self->ctrl) >> (((int32_t)(RING_SIZE_SHIFT)) & 31))) & (int32_t)(RING_SIZE_MASK));
+  (self->ringMask = (ringSize ? (((int32_t)((uint32_t)(1) << (((int32_t)(ringSize)) & 31))) - 1) : 0));
+  switch (((int32_t)(((int32_t)(self->ctrl) >> (((int32_t)(DATA_SIZE_SHIFT)) & 31))) & (int32_t)(DATA_SIZE_MASK))) {
+  case 1:
+  (self->dataSize = 2);
+  (self->transferKind = (((int32_t)(self->ctrl) & (int32_t)(BSWAP)) ? TransferKind_Swap16 : TransferKind_Direct16));
+  break;
+  case 2:
+  (self->dataSize = 4);
+  (self->transferKind = (((int32_t)(self->ctrl) & (int32_t)(BSWAP)) ? TransferKind_Swap32 : TransferKind_Direct32));
+  break;
+  case 0:
+  default:
+  (self->dataSize = 1);
+  (self->transferKind = TransferKind_Direct8);
+  }
+  if ((((int32_t)(self->ctrl) & (int32_t)(EN)) && ((int32_t)(self->ctrl) & (int32_t)(BUSY)))) {
+  RP2350DMAChannel_scheduleTransfer(self);
+  }
+  if ((!((int32_t)(self->ctrl) & (int32_t)(EN)))) {
+  IAlarm_cancel(self->transferAlarm);
+  }
+  break;
+  }
+  case CHn_DBG_CTDREQ:
+  (self->dreqCounter = 0);
+  break;
+  }
+  if (((((offset == CHn_AL3_READ_ADDR_TRIG) || (offset == CHn_AL2_WRITE_ADDR_TRIG)) || (offset == CHn_AL1_TRANS_COUNT_TRIG)) || (offset == CHn_CTRL_TRIG))) {
+  if (value) {
+  RP2350DMAChannel_start(self);
+  } else {
+  if (((int32_t)(self->ctrl) & (int32_t)(IRQ_QUIET))) {
+  (self->dma->intRaw |= ((int32_t)((uint32_t)(1) << (((int32_t)(self->index)) & 31))));
+  RP2350DMA_checkInterrupts(self->dma);
+  }
+  }
+  }
+}
+
+static void RP2350DMAChannel_reset(RP2350DMAChannel* self) {
+  RP2350DMAChannel_writeUint32(self, CHn_CTRL_TRIG, ((int32_t)((uint32_t)(self->index) << (((int32_t)(CHAIN_TO_SHIFT)) & 31))));
+}
+
+static RP2350DMA* RP2350DMA_new(RP2350* rpchip, const char* name, int32_t dma_irq_base) {
+  RP2350DMA* self = calloc(1, sizeof(RP2350DMA));
+  {
+    BasePeripheral* __super_10 = BasePeripheral_new(rpchip, name);
+    self->base = *__super_10;
+    free(__super_10);
+  }
+  (&(self)->base)->__vtable_Peripheral = &RP2350DMA_Peripheral_vtable;
+  self->rpchip = rpchip;
+  self->dma_irq_base = dma_irq_base;
+  self->channels = calloc(CHANNEL_COUNT, sizeof(RP2350DMAChannel*));
+  for (int32_t i = 0; i < CHANNEL_COUNT; i++) {
+    self->channels[i] = RP2350DMAChannel_new(self, self->rpchip, i);
+  }
+  self->intRaw = 0;
+  self->intEnable = calloc(4, sizeof(int32_t));
+  self->intEnable[0] = 0;
+  self->intEnable[1] = 0;
+  self->intEnable[2] = 0;
+  self->intEnable[3] = 0;
+  self->intForce = calloc(4, sizeof(int32_t));
+  self->intForce[0] = 0;
+  self->intForce[1] = 0;
+  self->intForce[2] = 0;
+  self->intForce[3] = 0;
+  self->timer0 = 0;
+  self->timer1 = 0;
+  self->timer2 = 0;
+  self->timer3 = 0;
+  self->dreq = calloc(DREQChannel_DREQ_MAX, sizeof(bool));
+  return self;
+}
+
+static int32_t RP2350DMA_intStatus(RP2350DMA* self, int32_t intNum) {
+  return ((int32_t)(((int32_t)(self->intRaw) & (int32_t)(self->intEnable[intNum]))) | (int32_t)(self->intForce[intNum]));
+}
+
+static int32_t RP2350DMA_intNumFromOffset(RP2350DMA* self, int32_t offset) {
+  return ((uint32_t)(((double)((offset - INTE0)) / (double)((INTE1 - INTE0)))) >> (0));
+}
+
+static int32_t RP2350DMA_readUint32(RP2350DMA* self, int32_t offset) {
+  if (((offset % DEBUG_REGISTER_START) < (CHANNEL_COUNT * REGISTERS_SIZE_PER_CHANNEL))) {
+  int32_t channelIndex = ((uint32_t)(((double)((offset % DEBUG_REGISTER_START)) / (double)(REGISTERS_SIZE_PER_CHANNEL))) >> (0));
+  return RP2350DMAChannel_readUint32(self->channels[channelIndex], ((int32_t)(offset) & (int32_t)(((int32_t)(DEBUG_REGISTER_START) | (int32_t)((REGISTERS_SIZE_PER_CHANNEL - 1))))));
+  }
+  switch (offset) {
+  case TIMER0:
+  return self->timer0;
+  case TIMER1:
+  return self->timer1;
+  case TIMER2:
+  return self->timer2;
+  case TIMER3:
+  return self->timer3;
+  case INTR__dma_rp2350:
+  return self->intRaw;
+  case INTE0:
+  case INTE1:
+  case INTE2:
+  case INTE3:
+  return self->intEnable[RP2350DMA_intNumFromOffset(self, offset)];
+  case INTF0:
+  case INTF1:
+  case INTF2:
+  case INTF3:
+  return self->intForce[RP2350DMA_intNumFromOffset(self, offset)];
+  case INTS0:
+  case INTS1:
+  case INTS2:
+  case INTS3:
+  return RP2350DMA_intStatus(self, RP2350DMA_intNumFromOffset(self, offset));
+  case CHAN_ABORT:
+  return 0;
+  case N_CHANNELS:
+  return CHANNEL_COUNT;
+  }
+  return BasePeripheral_readUint32(&self->base, offset);
+}
+
+static void RP2350DMA_writeUint32(RP2350DMA* self, int32_t offset, int32_t value) {
+  if (((offset % DEBUG_REGISTER_START) < (CHANNEL_COUNT * REGISTERS_SIZE_PER_CHANNEL))) {
+  int32_t channelIndex = ((uint32_t)(((double)((offset % DEBUG_REGISTER_START)) / (double)(REGISTERS_SIZE_PER_CHANNEL))) >> (0));
+  RP2350DMAChannel_writeUint32(self->channels[channelIndex], ((int32_t)(offset) & (int32_t)(((int32_t)(DEBUG_REGISTER_START) | (int32_t)((REGISTERS_SIZE_PER_CHANNEL - 1))))), value);
+  return;
+  }
+  switch (offset) {
+  case TIMER0:
+  (self->timer0 = value);
+  return;
+  case TIMER1:
+  (self->timer1 = value);
+  return;
+  case TIMER2:
+  (self->timer2 = value);
+  return;
+  case TIMER3:
+  (self->timer3 = value);
+  return;
+  case INTR__dma_rp2350:
+  case INTS0:
+  case INTS1:
+  case INTS2:
+  case INTS3:
+  (self->intRaw &= (~self->base.rawWriteValue));
+  RP2350DMA_checkInterrupts(self);
+  return;
+  case INTE0:
+  case INTE1:
+  case INTE2:
+  case INTE3:
+  (self->intEnable[RP2350DMA_intNumFromOffset(self, offset)] = ((int32_t)(value) & (int32_t)(65535)));
+  RP2350DMA_checkInterrupts(self);
+  return;
+  case INTF0:
+  case INTF1:
+  case INTF2:
+  case INTF3:
+  (self->intForce[RP2350DMA_intNumFromOffset(self, offset)] = ((int32_t)(value) & (int32_t)(65535)));
+  RP2350DMA_checkInterrupts(self);
+  return;
+  case MULTI_CHAN_TRIGGER:
+  {
+    int32_t __forof_n = CHANNEL_COUNT;
+    for (int32_t __forof_i = 0; __forof_i < __forof_n; __forof_i++) {
+      RP2350DMAChannel* chan = self->channels[__forof_i];
+  if (((int32_t)(value) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(chan->index)) & 31)))))) {
+  RP2350DMAChannel_start(chan);
+  }
+    }
+  }
+  return;
+  case CHAN_ABORT:
+  {
+    int32_t __forof_n = CHANNEL_COUNT;
+    for (int32_t __forof_i = 0; __forof_i < __forof_n; __forof_i++) {
+      RP2350DMAChannel* chan = self->channels[__forof_i];
+  if (((int32_t)(value) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(chan->index)) & 31)))))) {
+  RP2350DMAChannel_abort(chan);
+  }
+    }
+  }
+  return;
+  default:
+  BasePeripheral_writeUint32(&self->base, offset, value);
+  }
+}
+
+static void RP2350DMA_setDREQ(RP2350DMA* self, DREQChannel dreqChannel) {
+  RP2350DMA* __destruct_tmp_1 = self;
+  bool* dreq = __destruct_tmp_1->dreq;
+  if ((!dreq[dreqChannel])) {
+  (dreq[dreqChannel] = true);
+  {
+    int32_t __forof_n = CHANNEL_COUNT;
+    for (int32_t __forof_i = 0; __forof_i < __forof_n; __forof_i++) {
+      RP2350DMAChannel* channel = self->channels[__forof_i];
+  if (((RP2350DMAChannel_treq_get(channel) == dreqChannel) && RP2350DMAChannel_active_get(channel))) {
+  RP2350DMAChannel_scheduleTransfer(channel);
+  }
+    }
+  }
+  }
+}
+
+static void RP2350DMA_clearDREQ(RP2350DMA* self, DREQChannel dreqChannel) {
+  (self->dreq[dreqChannel] = false);
+}
+
+static int32_t RP2350DMA_getTimer(RP2350DMA* self, TREQ treq) {
+  int32_t dividend = 0;
+  int32_t divisor = 1;
+  switch (treq) {
+  case TREQ_Permanent:
+  (dividend = 1);
+  (divisor = 1);
+  break;
+  case TREQ_Timer0:
+  (dividend = ((uint32_t)(self->timer0) >> (16)));
+  (divisor = ((int32_t)(self->timer0) & (int32_t)(65535)));
+  break;
+  case TREQ_Timer1:
+  (dividend = ((uint32_t)(self->timer1) >> (16)));
+  (divisor = ((int32_t)(self->timer1) & (int32_t)(65535)));
+  break;
+  case TREQ_Timer2:
+  (dividend = ((uint32_t)(self->timer2) >> (16)));
+  (divisor = ((int32_t)(self->timer2) & (int32_t)(65535)));
+  break;
+  case TREQ_Timer3:
+  (dividend = ((uint32_t)(self->timer3) >> (16)));
+  (divisor = ((int32_t)(self->timer3) & (int32_t)(65535)));
+  break;
+  }
+  if ((divisor == 0)) {
+  return 0;
+  }
+  return ((double)((((double)(dividend) / (double)(divisor)) * 1e6)) / (double)(self->rpchip->clkSys));
+}
+
+static void RP2350DMA_checkInterrupts(RP2350DMA* self) {
+  RP2350_setInterrupt(self->rpchip, (self->dma_irq_base + 0), (!(!RP2350DMA_intStatus(self, 0))));
+  RP2350_setInterrupt(self->rpchip, (self->dma_irq_base + 1), (!(!RP2350DMA_intStatus(self, 1))));
+  RP2350_setInterrupt(self->rpchip, (self->dma_irq_base + 2), (!(!RP2350DMA_intStatus(self, 2))));
+  RP2350_setInterrupt(self->rpchip, (self->dma_irq_base + 3), (!(!RP2350DMA_intStatus(self, 3))));
+}
+
+// ─── dma.ts ───
+enum { CHANNEL_REGISTERS_SIZE = (768) }; /* (12 * 64) */
+enum { CHANNEL_REGISTERS_MASK = (2111) };
+enum { INTR__dma = (1024) };
+enum { TIMER0__dma = (1056) };
+enum { TIMER1__dma = (1060) };
+enum { TIMER2__dma = (1064) };
+enum { TIMER3__dma = (1068) };
+enum { MULTI_CHAN_TRIGGER__dma = (1072) };
+enum { SNIFF_CTRL__dma = (1076) };
+enum { SNIFF_DATA__dma = (1080) };
+enum { FIFO_LEVELS__dma = (1088) };
+enum { CHAN_ABORT__dma = (1092) };
+enum { N_CHANNELS__dma = (1096) };
+enum { BUSY__dma = (16777216) }; /* ((int32_t)((uint32_t)(1) << (24))) */
+enum { SNIFF_EN__dma = (8388608) }; /* ((int32_t)((uint32_t)(1) << (23))) */
+enum { BSWAP__dma = (4194304) }; /* ((int32_t)((uint32_t)(1) << (22))) */
+enum { IRQ_QUIET__dma = (2097152) }; /* ((int32_t)((uint32_t)(1) << (21))) */
+enum { TREQ_SEL_SHIFT__dma = (15) };
+enum { CHAIN_TO_SHIFT__dma = (11) };
+enum { RING_SEL__dma = (1024) }; /* ((int32_t)((uint32_t)(1) << (10))) */
+enum { RING_SIZE_SHIFT__dma = (6) };
+enum { INCR_WRITE__dma = (32) }; /* ((int32_t)((uint32_t)(1) << (5))) */
+static RPDMAChannel* RPDMAChannel_new(RPDMA* dma, RP2040* rpchip, int32_t index) {
+  RPDMAChannel* self = calloc(1, sizeof(RPDMAChannel));
+  (self)->__vtable_AlarmCallback = &RPDMAChannel_AlarmCallback_vtable;
+  self->dma = dma;
+  self->rpchip = rpchip;
+  self->index = index;
+  self->ctrl = 0;
+  self->readAddr = 0;
+  self->writeAddr = 0;
+  self->transCount = 0;
+  self->dreqCounter = 0;
+  self->transCountReload = 0;
+  self->treqValue = 0;
+  self->dataSize = 1;
+  self->transferKind = TransferKind_Direct8;
+  self->chainTo = 0;
+  self->ringMask = 0;
+  (self->transferAlarm = SimulationClock_createAlarm(rpchip->clock, (AlarmCallback){ .obj = (void*)(self), .vtable = &RPDMAChannel_AlarmCallback_vtable }));
   RPDMAChannel_reset(self);
   return self;
 }
 
 static void RPDMAChannel_start(RPDMAChannel* self) {
-  if (((!((int32_t)(self->ctrl) & (int32_t)(EN))) || ((int32_t)(self->ctrl) & (int32_t)(BUSY)))) {
+  if (((!((int32_t)(self->ctrl) & (int32_t)(EN))) || ((int32_t)(self->ctrl) & (int32_t)(BUSY__dma)))) {
   return;
   }
-  (self->ctrl |= BUSY);
+  (self->ctrl |= BUSY__dma);
   (self->transCount = self->transCountReload);
   if (self->transCount) {
   RPDMAChannel_scheduleTransfer(self);
@@ -8468,39 +11875,39 @@ static int32_t RPDMAChannel_treq_get(RPDMAChannel* self) {
 }
 
 static int32_t RPDMAChannel_active_get(RPDMAChannel* self) {
-  return (((int32_t)(self->ctrl) & (int32_t)(EN)) ? ((int32_t)(self->ctrl) & (int32_t)(BUSY)) : ((int32_t)(self->ctrl) & (int32_t)(EN)));
+  return (((int32_t)(self->ctrl) & (int32_t)(EN)) ? ((int32_t)(self->ctrl) & (int32_t)(BUSY__dma)) : ((int32_t)(self->ctrl) & (int32_t)(EN)));
 }
 
 static void RPDMAChannel_transfer8(RPDMAChannel* self) {
   RPDMAChannel* __destruct_tmp_1 = self;
-  RP2350* rp2040 = __destruct_tmp_1->rp2040;
-  RP2350_writeUint8(rp2040, self->writeAddr, RP2350_readUint8(rp2040, self->readAddr));
+  RP2040* rpchip = __destruct_tmp_1->rpchip;
+  RP2040_writeUint8(rpchip, self->writeAddr, RP2040_readUint8(rpchip, self->readAddr));
 }
 
 static void RPDMAChannel_transfer16(RPDMAChannel* self) {
   RPDMAChannel* __destruct_tmp_1 = self;
-  RP2350* rp2040 = __destruct_tmp_1->rp2040;
-  RP2350_writeUint16(rp2040, self->writeAddr, RP2350_readUint16(rp2040, self->readAddr));
+  RP2040* rpchip = __destruct_tmp_1->rpchip;
+  RP2040_writeUint16(rpchip, self->writeAddr, RP2040_readUint16(rpchip, self->readAddr));
 }
 
 static void RPDMAChannel_transferSwap16(RPDMAChannel* self) {
   RPDMAChannel* __destruct_tmp_1 = self;
-  RP2350* rp2040 = __destruct_tmp_1->rp2040;
-  uint32_t input = RP2350_readUint16(rp2040, self->readAddr);
-  RP2350_writeUint16(rp2040, self->writeAddr, ((int32_t)(((int32_t)((uint32_t)(((int32_t)(input) & (int32_t)(255))) << (8)))) | (int32_t)(((int32_t)(input) >> (8)))));
+  RP2040* rpchip = __destruct_tmp_1->rpchip;
+  uint32_t input = RP2040_readUint16(rpchip, self->readAddr);
+  RP2040_writeUint16(rpchip, self->writeAddr, ((int32_t)(((int32_t)((uint32_t)(((int32_t)(input) & (int32_t)(255))) << (8)))) | (int32_t)(((int32_t)(input) >> (8)))));
 }
 
 static void RPDMAChannel_transfer32(RPDMAChannel* self) {
   RPDMAChannel* __destruct_tmp_1 = self;
-  RP2350* rp2040 = __destruct_tmp_1->rp2040;
-  RP2350_writeUint32(rp2040, self->writeAddr, RP2350_readUint32(rp2040, self->readAddr));
+  RP2040* rpchip = __destruct_tmp_1->rpchip;
+  RP2040_writeUint32(rpchip, self->writeAddr, RP2040_readUint32(rpchip, self->readAddr));
 }
 
 static void RPDMAChannel_transferSwap32(RPDMAChannel* self) {
   RPDMAChannel* __destruct_tmp_1 = self;
-  RP2350* rp2040 = __destruct_tmp_1->rp2040;
-  uint32_t input = RP2350_readUint32(rp2040, self->readAddr);
-  RP2350_writeUint32(rp2040, self->writeAddr, ((int32_t)(((int32_t)(((int32_t)(((int32_t)((uint32_t)(((int32_t)(input) & (int32_t)(255))) << (24)))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(input) & (int32_t)(65280))) << (8)))))) | (int32_t)(((int32_t)(((int32_t)(input) & (int32_t)(16711680))) >> (8))))) | (int32_t)(((int32_t)(((int32_t)(input) >> (24))) & (int32_t)(255)))));
+  RP2040* rpchip = __destruct_tmp_1->rpchip;
+  uint32_t input = RP2040_readUint32(rpchip, self->readAddr);
+  RP2040_writeUint32(rpchip, self->writeAddr, ((int32_t)(((int32_t)(((int32_t)(((int32_t)((uint32_t)(((int32_t)(input) & (int32_t)(255))) << (24)))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(input) & (int32_t)(65280))) << (8)))))) | (int32_t)(((int32_t)(((int32_t)(input) & (int32_t)(16711680))) >> (8))))) | (int32_t)(((int32_t)(((int32_t)(input) >> (24))) & (int32_t)(255)))));
 }
 
 static void RPDMAChannel_fire(RPDMAChannel* self) {
@@ -8525,37 +11932,30 @@ static void RPDMAChannel_fire(RPDMAChannel* self) {
   RPDMAChannel_transfer8(self);
   }
   if (((int32_t)(ctrl) & (int32_t)(INCR_READ))) {
-  if ((ringMask && (!((int32_t)(ctrl) & (int32_t)(RING_SEL))))) {
+  if ((ringMask && (!((int32_t)(ctrl) & (int32_t)(RING_SEL__dma))))) {
   (self->readAddr = ((int32_t)(((int32_t)(self->readAddr) & (int32_t)((~ringMask)))) | (int32_t)(((int32_t)((self->readAddr + dataSize)) & (int32_t)(ringMask)))));
   } else {
   (self->readAddr += dataSize);
   }
   }
-  if (((int32_t)(ctrl) & (int32_t)(INCR_WRITE))) {
-  if ((ringMask && ((int32_t)(ctrl) & (int32_t)(RING_SEL)))) {
+  if (((int32_t)(ctrl) & (int32_t)(INCR_WRITE__dma))) {
+  if ((ringMask && ((int32_t)(ctrl) & (int32_t)(RING_SEL__dma)))) {
   (self->writeAddr = ((int32_t)(((int32_t)(self->writeAddr) & (int32_t)((~ringMask)))) | (int32_t)(((int32_t)((self->writeAddr + dataSize)) & (int32_t)(ringMask)))));
   } else {
   (self->writeAddr += dataSize);
   }
   }
-  if ((self->transMode != 15)) {
   (self->transCount--);
-  }
   if ((self->transCount > 0)) {
   RPDMAChannel_scheduleTransfer(self);
   } else {
-  if ((!((int32_t)(self->ctrl) & (int32_t)(IRQ_QUIET)))) {
+  (self->ctrl &= (~BUSY__dma));
+  if ((!((int32_t)(self->ctrl) & (int32_t)(IRQ_QUIET__dma)))) {
   (self->dma->intRaw |= ((int32_t)((uint32_t)(1) << (((int32_t)(self->index)) & 31))));
   RPDMA_checkInterrupts(self->dma);
   }
-  if ((self->chainTo != self->index)) {
+  if (((self->chainTo != self->index) && (self->chainTo < 12))) {
   RPDMAChannel_start(self->dma->channels[self->chainTo]);
-  }
-  if ((self->transMode == 1)) {
-  (self->transCount = self->transCountReload);
-  RPDMAChannel_scheduleTransfer(self);
-  } else {
-  (self->ctrl &= (~BUSY));
   }
   }
 }
@@ -8572,7 +11972,7 @@ static void RPDMAChannel_scheduleTransfer(RPDMAChannel* self) {
 }
 
 static void RPDMAChannel_abort(RPDMAChannel* self) {
-  (self->ctrl &= (~BUSY));
+  (self->ctrl &= (~BUSY__dma));
   IAlarm_cancel(self->transferAlarm);
 }
 
@@ -8624,8 +12024,7 @@ static void RPDMAChannel_writeUint32(RPDMAChannel* self, int32_t offset, int32_t
   case CHn_AL1_TRANS_COUNT_TRIG:
   case CHn_AL2_TRANS_COUNT:
   case CHn_AL3_TRANS_COUNT:
-  (self->transCountReload = ((int32_t)(value) & (int32_t)(268435455)));
-  (self->transMode = ((uint32_t)(value) >> (28)));
+  (self->transCountReload = value);
   break;
   case CHn_CTRL_TRIG:
   case CHn_AL1_CTRL:
@@ -8634,25 +12033,25 @@ static void RPDMAChannel_writeUint32(RPDMAChannel* self, int32_t offset, int32_t
   {
   (self->ctrl = ((int32_t)(((int32_t)(self->ctrl) & (int32_t)((~CHn_CTRL_TRIG_WRITE_MASK)))) | (int32_t)(((int32_t)(value) & (int32_t)(CHn_CTRL_TRIG_WRITE_MASK)))));
   (self->ctrl &= (~((int32_t)(value) & (int32_t)(CHn_CTRL_TRIG_WC_MASK))));
-  (self->treqValue = ((int32_t)(((int32_t)(self->ctrl) >> (((int32_t)(TREQ_SEL_SHIFT)) & 31))) & (int32_t)(TREQ_SEL_MASK)));
-  (self->chainTo = ((int32_t)(((int32_t)(self->ctrl) >> (((int32_t)(CHAIN_TO_SHIFT)) & 31))) & (int32_t)(CHAIN_TO_MASK)));
-  int32_t ringSize = ((int32_t)(((int32_t)(self->ctrl) >> (((int32_t)(RING_SIZE_SHIFT)) & 31))) & (int32_t)(RING_SIZE_MASK));
+  (self->treqValue = ((int32_t)(((int32_t)(self->ctrl) >> (((int32_t)(TREQ_SEL_SHIFT__dma)) & 31))) & (int32_t)(TREQ_SEL_MASK)));
+  (self->chainTo = ((int32_t)(((int32_t)(self->ctrl) >> (((int32_t)(CHAIN_TO_SHIFT__dma)) & 31))) & (int32_t)(CHAIN_TO_MASK)));
+  int32_t ringSize = ((int32_t)(((int32_t)(self->ctrl) >> (((int32_t)(RING_SIZE_SHIFT__dma)) & 31))) & (int32_t)(RING_SIZE_MASK));
   (self->ringMask = (ringSize ? (((int32_t)((uint32_t)(1) << (((int32_t)(ringSize)) & 31))) - 1) : 0));
   switch (((int32_t)(((int32_t)(self->ctrl) >> (((int32_t)(DATA_SIZE_SHIFT)) & 31))) & (int32_t)(DATA_SIZE_MASK))) {
   case 1:
   (self->dataSize = 2);
-  (self->transferKind = (((int32_t)(self->ctrl) & (int32_t)(BSWAP)) ? TransferKind_Swap16 : TransferKind_Direct16));
+  (self->transferKind = (((int32_t)(self->ctrl) & (int32_t)(BSWAP__dma)) ? TransferKind_Swap16 : TransferKind_Direct16));
   break;
   case 2:
   (self->dataSize = 4);
-  (self->transferKind = (((int32_t)(self->ctrl) & (int32_t)(BSWAP)) ? TransferKind_Swap32 : TransferKind_Direct32));
+  (self->transferKind = (((int32_t)(self->ctrl) & (int32_t)(BSWAP__dma)) ? TransferKind_Swap32 : TransferKind_Direct32));
   break;
   case 0:
   default:
   (self->dataSize = 1);
   (self->transferKind = TransferKind_Direct8);
   }
-  if ((((int32_t)(self->ctrl) & (int32_t)(EN)) && ((int32_t)(self->ctrl) & (int32_t)(BUSY)))) {
+  if ((((int32_t)(self->ctrl) & (int32_t)(EN)) && ((int32_t)(self->ctrl) & (int32_t)(BUSY__dma)))) {
   RPDMAChannel_scheduleTransfer(self);
   }
   if ((!((int32_t)(self->ctrl) & (int32_t)(EN)))) {
@@ -8668,7 +12067,7 @@ static void RPDMAChannel_writeUint32(RPDMAChannel* self, int32_t offset, int32_t
   if (value) {
   RPDMAChannel_start(self);
   } else {
-  if (((int32_t)(self->ctrl) & (int32_t)(IRQ_QUIET))) {
+  if (((int32_t)(self->ctrl) & (int32_t)(IRQ_QUIET__dma))) {
   (self->dma->intRaw |= ((int32_t)((uint32_t)(1) << (((int32_t)(self->index)) & 31))));
   RPDMA_checkInterrupts(self->dma);
   }
@@ -8677,34 +12076,36 @@ static void RPDMAChannel_writeUint32(RPDMAChannel* self, int32_t offset, int32_t
 }
 
 static void RPDMAChannel_reset(RPDMAChannel* self) {
-  RPDMAChannel_writeUint32(self, CHn_CTRL_TRIG, ((int32_t)((uint32_t)(self->index) << (((int32_t)(CHAIN_TO_SHIFT)) & 31))));
+  RPDMAChannel_writeUint32(self, CHn_CTRL_TRIG, ((int32_t)((uint32_t)(self->index) << (((int32_t)(CHAIN_TO_SHIFT__dma)) & 31))));
 }
 
-static RPDMA* RPDMA_new(RP2350* rp2040, const char* name, int32_t dma_irq_base) {
+static RPDMA* RPDMA_new(RP2040* rpchip, const char* name, int32_t dma_irq_base) {
   RPDMA* self = calloc(1, sizeof(RPDMA));
   {
-    BasePeripheral* __super_7 = BasePeripheral_new(rp2040, name);
-    self->base = *__super_7;
-    free(__super_7);
+    BasePeripheral__RP2040* __super_11 = BasePeripheral__RP2040_new(rpchip, name);
+    self->base = *__super_11;
+    free(__super_11);
   }
   (&(self)->base)->__vtable_Peripheral = &RPDMA_Peripheral_vtable;
-  self->rp2040 = rp2040;
+  self->rpchip = rpchip;
   self->dma_irq_base = dma_irq_base;
-  self->channels = calloc(CHANNEL_COUNT, sizeof(RPDMAChannel*));
-  for (int32_t i = 0; i < CHANNEL_COUNT; i++) {
-    self->channels[i] = RPDMAChannel_new(self, self->rp2040, i);
-  }
+  self->channels[0] = RPDMAChannel_new(self, self->rpchip, 0);
+  self->channels[1] = RPDMAChannel_new(self, self->rpchip, 1);
+  self->channels[2] = RPDMAChannel_new(self, self->rpchip, 2);
+  self->channels[3] = RPDMAChannel_new(self, self->rpchip, 3);
+  self->channels[4] = RPDMAChannel_new(self, self->rpchip, 4);
+  self->channels[5] = RPDMAChannel_new(self, self->rpchip, 5);
+  self->channels[6] = RPDMAChannel_new(self, self->rpchip, 6);
+  self->channels[7] = RPDMAChannel_new(self, self->rpchip, 7);
+  self->channels[8] = RPDMAChannel_new(self, self->rpchip, 8);
+  self->channels[9] = RPDMAChannel_new(self, self->rpchip, 9);
+  self->channels[10] = RPDMAChannel_new(self, self->rpchip, 10);
+  self->channels[11] = RPDMAChannel_new(self, self->rpchip, 11);
   self->intRaw = 0;
-  self->intEnable = calloc(4, sizeof(int32_t));
-  self->intEnable[0] = 0;
-  self->intEnable[1] = 0;
-  self->intEnable[2] = 0;
-  self->intEnable[3] = 0;
-  self->intForce = calloc(4, sizeof(int32_t));
-  self->intForce[0] = 0;
-  self->intForce[1] = 0;
-  self->intForce[2] = 0;
-  self->intForce[3] = 0;
+  self->intEnable0 = 0;
+  self->intForce0 = 0;
+  self->intEnable1 = 0;
+  self->intForce1 = 0;
   self->timer0 = 0;
   self->timer1 = 0;
   self->timer2 = 0;
@@ -8713,97 +12114,94 @@ static RPDMA* RPDMA_new(RP2350* rp2040, const char* name, int32_t dma_irq_base) 
   return self;
 }
 
-static int32_t RPDMA_intStatus(RPDMA* self, int32_t intNum) {
-  return ((int32_t)(((int32_t)(self->intRaw) & (int32_t)(self->intEnable[intNum]))) | (int32_t)(self->intForce[intNum]));
+static int32_t RPDMA_intStatus0_get(RPDMA* self) {
+  return ((int32_t)(((int32_t)(self->intRaw) & (int32_t)(self->intEnable0))) | (int32_t)(self->intForce0));
 }
 
-static int32_t RPDMA_intNumFromOffset(RPDMA* self, int32_t offset) {
-  return ((uint32_t)(((double)((offset - INTE0)) / (double)((INTE1 - INTE0)))) >> (0));
+static int32_t RPDMA_intStatus1_get(RPDMA* self) {
+  return ((int32_t)(((int32_t)(self->intRaw) & (int32_t)(self->intEnable1))) | (int32_t)(self->intForce1));
 }
 
 static int32_t RPDMA_readUint32(RPDMA* self, int32_t offset) {
-  if (((offset % DEBUG_REGISTER_START) < (CHANNEL_COUNT * REGISTERS_SIZE_PER_CHANNEL))) {
-  int32_t channelIndex = ((uint32_t)(((double)((offset % DEBUG_REGISTER_START)) / (double)(REGISTERS_SIZE_PER_CHANNEL))) >> (0));
-  return RPDMAChannel_readUint32(self->channels[channelIndex], ((int32_t)(offset) & (int32_t)(((int32_t)(DEBUG_REGISTER_START) | (int32_t)((REGISTERS_SIZE_PER_CHANNEL - 1))))));
+  if ((((int32_t)(offset) & (int32_t)(2047)) <= CHANNEL_REGISTERS_SIZE)) {
+  int32_t channelIndex = ((int32_t)(((int32_t)(offset) & (int32_t)(2047))) >> (6));
+  return RPDMAChannel_readUint32(self->channels[channelIndex], ((int32_t)(offset) & (int32_t)(CHANNEL_REGISTERS_MASK)));
   }
   switch (offset) {
-  case TIMER0:
+  case TIMER0__dma:
   return self->timer0;
-  case TIMER1:
+  case TIMER1__dma:
   return self->timer1;
-  case TIMER2:
+  case TIMER2__dma:
   return self->timer2;
-  case TIMER3:
+  case TIMER3__dma:
   return self->timer3;
-  case INTR__dma_rp2350:
+  case INTR__dma:
   return self->intRaw;
   case INTE0:
-  case INTE1:
-  case INTE2:
-  case INTE3:
-  return self->intEnable[RPDMA_intNumFromOffset(self, offset)];
+  return self->intEnable0;
   case INTF0:
-  case INTF1:
-  case INTF2:
-  case INTF3:
-  return self->intForce[RPDMA_intNumFromOffset(self, offset)];
+  return self->intForce0;
   case INTS0:
+  return RPDMA_intStatus0_get(self);
+  case INTE1:
+  return self->intEnable1;
+  case INTF1:
+  return self->intForce1;
   case INTS1:
-  case INTS2:
-  case INTS3:
-  return RPDMA_intStatus(self, RPDMA_intNumFromOffset(self, offset));
-  case CHAN_ABORT:
+  return RPDMA_intStatus1_get(self);
+  case CHAN_ABORT__dma:
   return 0;
-  case N_CHANNELS:
-  return CHANNEL_COUNT;
+  case N_CHANNELS__dma:
+  return 12;
   }
-  return BasePeripheral_readUint32(&self->base, offset);
+  return BasePeripheral__RP2040_readUint32(&self->base, offset);
 }
 
 static void RPDMA_writeUint32(RPDMA* self, int32_t offset, int32_t value) {
-  if (((offset % DEBUG_REGISTER_START) < (CHANNEL_COUNT * REGISTERS_SIZE_PER_CHANNEL))) {
-  int32_t channelIndex = ((uint32_t)(((double)((offset % DEBUG_REGISTER_START)) / (double)(REGISTERS_SIZE_PER_CHANNEL))) >> (0));
-  RPDMAChannel_writeUint32(self->channels[channelIndex], ((int32_t)(offset) & (int32_t)(((int32_t)(DEBUG_REGISTER_START) | (int32_t)((REGISTERS_SIZE_PER_CHANNEL - 1))))), value);
+  if ((((int32_t)(offset) & (int32_t)(2047)) <= CHANNEL_REGISTERS_SIZE)) {
+  int32_t channelIndex = ((int32_t)(((int32_t)(offset) & (int32_t)(2047))) >> (6));
+  RPDMAChannel_writeUint32(self->channels[channelIndex], ((int32_t)(offset) & (int32_t)(CHANNEL_REGISTERS_MASK)), value);
   return;
   }
   switch (offset) {
-  case TIMER0:
+  case TIMER0__dma:
   (self->timer0 = value);
   return;
-  case TIMER1:
+  case TIMER1__dma:
   (self->timer1 = value);
   return;
-  case TIMER2:
+  case TIMER2__dma:
   (self->timer2 = value);
   return;
-  case TIMER3:
+  case TIMER3__dma:
   (self->timer3 = value);
   return;
-  case INTR__dma_rp2350:
+  case INTR__dma:
   case INTS0:
   case INTS1:
-  case INTS2:
-  case INTS3:
   (self->intRaw &= (~self->base.rawWriteValue));
   RPDMA_checkInterrupts(self);
   return;
   case INTE0:
-  case INTE1:
-  case INTE2:
-  case INTE3:
-  (self->intEnable[RPDMA_intNumFromOffset(self, offset)] = ((int32_t)(value) & (int32_t)(65535)));
+  (self->intEnable0 = ((int32_t)(value) & (int32_t)(65535)));
   RPDMA_checkInterrupts(self);
   return;
   case INTF0:
-  case INTF1:
-  case INTF2:
-  case INTF3:
-  (self->intForce[RPDMA_intNumFromOffset(self, offset)] = ((int32_t)(value) & (int32_t)(65535)));
+  (self->intForce0 = ((int32_t)(value) & (int32_t)(65535)));
   RPDMA_checkInterrupts(self);
   return;
-  case MULTI_CHAN_TRIGGER:
+  case INTE1:
+  (self->intEnable1 = ((int32_t)(value) & (int32_t)(65535)));
+  RPDMA_checkInterrupts(self);
+  return;
+  case INTF1:
+  (self->intForce1 = ((int32_t)(value) & (int32_t)(65535)));
+  RPDMA_checkInterrupts(self);
+  return;
+  case MULTI_CHAN_TRIGGER__dma:
   {
-    int32_t __forof_n = CHANNEL_COUNT;
+    int32_t __forof_n = 12;
     for (int32_t __forof_i = 0; __forof_i < __forof_n; __forof_i++) {
       RPDMAChannel* chan = self->channels[__forof_i];
   if (((int32_t)(value) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(chan->index)) & 31)))))) {
@@ -8812,9 +12210,9 @@ static void RPDMA_writeUint32(RPDMA* self, int32_t offset, int32_t value) {
     }
   }
   return;
-  case CHAN_ABORT:
+  case CHAN_ABORT__dma:
   {
-    int32_t __forof_n = CHANNEL_COUNT;
+    int32_t __forof_n = 12;
     for (int32_t __forof_i = 0; __forof_i < __forof_n; __forof_i++) {
       RPDMAChannel* chan = self->channels[__forof_i];
   if (((int32_t)(value) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(chan->index)) & 31)))))) {
@@ -8824,7 +12222,7 @@ static void RPDMA_writeUint32(RPDMA* self, int32_t offset, int32_t value) {
   }
   return;
   default:
-  BasePeripheral_writeUint32(&self->base, offset, value);
+  BasePeripheral__RP2040_writeUint32(&self->base, offset, value);
   }
 }
 
@@ -8834,7 +12232,7 @@ static void RPDMA_setDREQ(RPDMA* self, DREQChannel dreqChannel) {
   if ((!dreq[dreqChannel])) {
   (dreq[dreqChannel] = true);
   {
-    int32_t __forof_n = CHANNEL_COUNT;
+    int32_t __forof_n = 12;
     for (int32_t __forof_i = 0; __forof_i < __forof_n; __forof_i++) {
       RPDMAChannel* channel = self->channels[__forof_i];
   if (((RPDMAChannel_treq_get(channel) == dreqChannel) && RPDMAChannel_active_get(channel))) {
@@ -8877,45 +12275,12 @@ static int32_t RPDMA_getTimer(RPDMA* self, TREQ treq) {
   if ((divisor == 0)) {
   return 0;
   }
-  return ((double)((((double)(dividend) / (double)(divisor)) * 1000000)) / (double)(self->rp2040->clkSys));
+  return ((double)((((double)(dividend) / (double)(divisor)) * 1e6)) / (double)(self->rpchip->clkSys));
 }
 
 static void RPDMA_checkInterrupts(RPDMA* self) {
-  RP2350_setInterrupt(self->rp2040, (self->dma_irq_base + 0), (!(!RPDMA_intStatus(self, 0))));
-  RP2350_setInterrupt(self->rp2040, (self->dma_irq_base + 1), (!(!RPDMA_intStatus(self, 1))));
-  RP2350_setInterrupt(self->rp2040, (self->dma_irq_base + 2), (!(!RPDMA_intStatus(self, 2))));
-  RP2350_setInterrupt(self->rp2040, (self->dma_irq_base + 3), (!(!RPDMA_intStatus(self, 3))));
-}
-
-// ─── dma.ts ───
-enum { CHANNEL_REGISTERS_SIZE = (768) }; /* (12 * 64) */
-enum { CHANNEL_REGISTERS_MASK = (2111) };
-enum { INTR__dma = (1024) };
-enum { TIMER0__dma = (1056) };
-enum { TIMER1__dma = (1060) };
-enum { TIMER2__dma = (1064) };
-enum { TIMER3__dma = (1068) };
-enum { MULTI_CHAN_TRIGGER__dma = (1072) };
-enum { SNIFF_CTRL__dma = (1076) };
-enum { SNIFF_DATA__dma = (1080) };
-enum { FIFO_LEVELS__dma = (1088) };
-enum { CHAN_ABORT__dma = (1092) };
-enum { N_CHANNELS__dma = (1096) };
-enum { BUSY__dma = (16777216) }; /* ((int32_t)((uint32_t)(1) << (24))) */
-enum { SNIFF_EN__dma = (8388608) }; /* ((int32_t)((uint32_t)(1) << (23))) */
-enum { BSWAP__dma = (4194304) }; /* ((int32_t)((uint32_t)(1) << (22))) */
-enum { IRQ_QUIET__dma = (2097152) }; /* ((int32_t)((uint32_t)(1) << (21))) */
-enum { TREQ_SEL_SHIFT__dma = (15) };
-enum { CHAIN_TO_SHIFT__dma = (11) };
-enum { RING_SEL__dma = (1024) }; /* ((int32_t)((uint32_t)(1) << (10))) */
-enum { RING_SIZE_SHIFT__dma = (6) };
-enum { INCR_WRITE__dma = (32) }; /* ((int32_t)((uint32_t)(1) << (5))) */
-static int32_t RPDMA_intStatus0_get(RPDMA* self) {
-  return ((int32_t)(((int32_t)(self->intRaw) & (int32_t)(self->intEnable0))) | (int32_t)(self->intForce0));
-}
-
-static int32_t RPDMA_intStatus1_get(RPDMA* self) {
-  return ((int32_t)(((int32_t)(self->intRaw) & (int32_t)(self->intEnable1))) | (int32_t)(self->intForce1));
+  RP2040_setInterrupt(self->rpchip, (self->dma_irq_base + 0), (!(!RPDMA_intStatus0_get(self))));
+  RP2040_setInterrupt(self->rpchip, (self->dma_irq_base + 1), (!(!RPDMA_intStatus1_get(self))));
 }
 
 // ─── i2c.ts ───
@@ -9065,12 +12430,12 @@ static int32_t RPI2C_masterBits_get(RPI2C* self) {
   return (((int32_t)(self->control) & (int32_t)(IC_10BITADDR_MASTER)) ? 10 : 7);
 }
 
-static RPI2C* RPI2C_new(RP2350* rp2040, const char* name, int32_t irq) {
+static RPI2C* RPI2C_new(RP2350* rpchip, const char* name, int32_t irq) {
   RPI2C* self = calloc(1, sizeof(RPI2C));
   {
-    BasePeripheral* __super_8 = BasePeripheral_new(rp2040, name);
-    self->base = *__super_8;
-    free(__super_8);
+    BasePeripheral* __super_12 = BasePeripheral_new(rpchip, name);
+    self->base = *__super_12;
+    free(__super_12);
   }
   (&(self)->base)->__vtable_Peripheral = &RPI2C_Peripheral_vtable;
   self->irq = irq;
@@ -9108,7 +12473,7 @@ static RPI2C* RPI2C_new(RP2350* rp2040, const char* name, int32_t irq) {
 }
 
 static void RPI2C_checkInterrupts(RPI2C* self) {
-  RP2350_setInterrupt(self->base.rp2040, self->irq, (!(!RPI2C_intStatus_get(self))));
+  RP2350_setInterrupt(self->base.rpchip, self->irq, (!(!RPI2C_intStatus_get(self))));
 }
 
 static int32_t RPI2C_clearInterrupts(RPI2C* self, int32_t mask) {
@@ -9143,7 +12508,7 @@ static void RPI2C_nextCommand(RPI2C* self) {
   return;
   }
   (self->busy = true);
-  int32_t restart = (__extension__({ __typeof__((__extension__({ __typeof__((!(!((int32_t)(FIFO_peek(self->txFIFO)) & (int32_t)(RESTART))))) __lg_9 = ((!(!((int32_t)(FIFO_peek(self->txFIFO)) & (int32_t)(RESTART))))); __lg_9 ? ((!self->pendingRestart)) : __lg_9; }))) __lg_10 = ((__extension__({ __typeof__((!(!((int32_t)(FIFO_peek(self->txFIFO)) & (int32_t)(RESTART))))) __lg_9 = ((!(!((int32_t)(FIFO_peek(self->txFIFO)) & (int32_t)(RESTART))))); __lg_9 ? ((!self->pendingRestart)) : __lg_9; }))); __lg_10 ? ((!self->stop)) : __lg_10; }));
+  int32_t restart = (__extension__({ __typeof__((__extension__({ __typeof__((!(!((int32_t)(FIFO_peek(self->txFIFO)) & (int32_t)(RESTART))))) __lg_13 = ((!(!((int32_t)(FIFO_peek(self->txFIFO)) & (int32_t)(RESTART))))); __lg_13 ? ((!self->pendingRestart)) : __lg_13; }))) __lg_14 = ((__extension__({ __typeof__((!(!((int32_t)(FIFO_peek(self->txFIFO)) & (int32_t)(RESTART))))) __lg_13 = ((!(!((int32_t)(FIFO_peek(self->txFIFO)) & (int32_t)(RESTART))))); __lg_13 ? ((!self->pendingRestart)) : __lg_13; }))); __lg_14 ? ((!self->stop)) : __lg_14; }));
   if (((self->state == I2CState_Idle) || restart)) {
   (self->pendingRestart = restart);
   (self->stop = false);
@@ -9404,34 +12769,419 @@ static void RPI2C_writeUint32(RPI2C* self, int32_t offset, int32_t value) {
   }
 }
 
+static void RPI2C__RP2040_onStart_default(void* __ctx, bool __arg0) {
+  RPI2C__RP2040* self = (RPI2C__RP2040*)__ctx;
+  return RPI2C__RP2040_completeStart(self);
+}
+
+static void RPI2C__RP2040_onConnect_default(void* __ctx, int32_t __arg0, I2CMode __arg1) {
+  RPI2C__RP2040* self = (RPI2C__RP2040*)__ctx;
+  return RPI2C__RP2040_completeConnect(self, false, 0);
+}
+
+static void RPI2C__RP2040_onWriteByte_default(void* __ctx, int32_t __arg0) {
+  RPI2C__RP2040* self = (RPI2C__RP2040*)__ctx;
+  return RPI2C__RP2040_completeWrite(self, false);
+}
+
+static void RPI2C__RP2040_onReadByte_default(void* __ctx, bool __arg0) {
+  RPI2C__RP2040* self = (RPI2C__RP2040*)__ctx;
+  return RPI2C__RP2040_completeRead(self, 255);
+}
+
+static void RPI2C__RP2040_onStop_default(void* __ctx) {
+  RPI2C__RP2040* self = (RPI2C__RP2040*)__ctx;
+  return RPI2C__RP2040_completeStop(self);
+}
+
+static int32_t RPI2C__RP2040_intStatus_get(RPI2C__RP2040* self) {
+  return ((int32_t)(self->intRaw) & (int32_t)(self->intEnable));
+}
+
+static int32_t RPI2C__RP2040_speed_get(RPI2C__RP2040* self) {
+  return ((int32_t)(((int32_t)(self->control) >> (((int32_t)(SPEED_SHIFT)) & 31))) & (int32_t)(SPEED_MASK));
+}
+
+static int32_t RPI2C__RP2040_sclLowPeriod_get(RPI2C__RP2040* self) {
+  return ((RPI2C__RP2040_speed_get(self) == I2CSpeed_Standard) ? self->ssClockLowPeriod : self->fsClockLowPeriod);
+}
+
+static int32_t RPI2C__RP2040_sclHighPeriod_get(RPI2C__RP2040* self) {
+  return ((RPI2C__RP2040_speed_get(self) == I2CSpeed_Standard) ? self->ssClockHighPeriod : self->fsClockHighPeriod);
+}
+
+static int32_t RPI2C__RP2040_masterBits_get(RPI2C__RP2040* self) {
+  return (((int32_t)(self->control) & (int32_t)(IC_10BITADDR_MASTER)) ? 10 : 7);
+}
+
+static RPI2C__RP2040* RPI2C__RP2040_new(RP2040* rpchip, const char* name, int32_t irq) {
+  RPI2C__RP2040* self = calloc(1, sizeof(RPI2C__RP2040));
+  {
+    BasePeripheral__RP2040* __super_15 = BasePeripheral__RP2040_new(rpchip, name);
+    self->base = *__super_15;
+    free(__super_15);
+  }
+  (&(self)->base)->__vtable_Peripheral = &RPI2C__RP2040_Peripheral_vtable;
+  self->irq = irq;
+  self->state = I2CState_Idle;
+  self->busy = false;
+  self->stop = false;
+  self->pendingRestart = false;
+  self->firstByte = false;
+  self->rxFIFO = FIFO_new(16);
+  self->txFIFO = FIFO_new(16);
+  self->onStart_fn = RPI2C__RP2040_onStart_default;
+  self->onStart_ctx = self;
+  self->onConnect_fn = RPI2C__RP2040_onConnect_default;
+  self->onConnect_ctx = self;
+  self->onWriteByte_fn = RPI2C__RP2040_onWriteByte_default;
+  self->onWriteByte_ctx = self;
+  self->onReadByte_fn = RPI2C__RP2040_onReadByte_default;
+  self->onReadByte_ctx = self;
+  self->onStop_fn = RPI2C__RP2040_onStop_default;
+  self->onStop_ctx = self;
+  self->enable = 0;
+  self->rxThreshold = 0;
+  self->txThreshold = 0;
+  self->control = ((int32_t)(((int32_t)(((int32_t)(IC_SLAVE_DISABLE) | (int32_t)(IC_RESTART_EN))) | (int32_t)(((int32_t)((uint32_t)(I2CSpeed_FastMode) << (((int32_t)(SPEED_SHIFT)) & 31)))))) | (int32_t)(MASTER_MODE));
+  self->ssClockHighPeriod = 40;
+  self->ssClockLowPeriod = 47;
+  self->fsClockHighPeriod = 6;
+  self->fsClockLowPeriod = 13;
+  self->targetAddress = 85;
+  self->slaveAddress = 85;
+  self->abortSource = 0;
+  self->intRaw = 0;
+  self->intEnable = 0;
+  return self;
+}
+
+static void RPI2C__RP2040_checkInterrupts(RPI2C__RP2040* self) {
+  RP2040_setInterrupt(self->base.rpchip, self->irq, (!(!RPI2C__RP2040_intStatus_get(self))));
+}
+
+static int32_t RPI2C__RP2040_clearInterrupts(RPI2C__RP2040* self, int32_t mask) {
+  if (((int32_t)(self->intRaw) & (int32_t)(mask))) {
+  (self->intRaw &= (~mask));
+  RPI2C__RP2040_checkInterrupts(self);
+  return 1;
+  } else {
+  return 0;
+  }
+  return (int32_t){0};
+}
+
+static void RPI2C__RP2040_setInterrupts(RPI2C__RP2040* self, int32_t mask) {
+  if ((!((int32_t)(self->intRaw) & (int32_t)(mask)))) {
+  (self->intRaw |= mask);
+  RPI2C__RP2040_checkInterrupts(self);
+  }
+}
+
+static void RPI2C__RP2040_abort(RPI2C__RP2040* self, int32_t reason) {
+  (self->abortSource &= (~TX_FLUSH_CNT_MASK));
+  (self->abortSource |= ((int32_t)(reason) | (int32_t)(((int32_t)((uint32_t)(FIFO_itemCount_get(self->txFIFO)) << (((int32_t)(TX_FLUSH_CNT_SHIFT)) & 31))))));
+  FIFO_reset(self->txFIFO);
+  RPI2C__RP2040_setInterrupts(self, R_TX_ABRT);
+}
+
+static void RPI2C__RP2040_nextCommand(RPI2C__RP2040* self) {
+  int32_t enabled = ((int32_t)(self->enable) & (int32_t)(ENABLE));
+  int32_t blocked = ((int32_t)(self->enable) & (int32_t)(TX_CMD_BLOCK));
+  if ((((FIFO_empty_get(self->txFIFO) || self->busy) || blocked) || (!enabled))) {
+  return;
+  }
+  (self->busy = true);
+  int32_t restart = (__extension__({ __typeof__((__extension__({ __typeof__((!(!((int32_t)(FIFO_peek(self->txFIFO)) & (int32_t)(RESTART))))) __lg_16 = ((!(!((int32_t)(FIFO_peek(self->txFIFO)) & (int32_t)(RESTART))))); __lg_16 ? ((!self->pendingRestart)) : __lg_16; }))) __lg_17 = ((__extension__({ __typeof__((!(!((int32_t)(FIFO_peek(self->txFIFO)) & (int32_t)(RESTART))))) __lg_16 = ((!(!((int32_t)(FIFO_peek(self->txFIFO)) & (int32_t)(RESTART))))); __lg_16 ? ((!self->pendingRestart)) : __lg_16; }))); __lg_17 ? ((!self->stop)) : __lg_17; }));
+  if (((self->state == I2CState_Idle) || restart)) {
+  (self->pendingRestart = restart);
+  (self->stop = false);
+  (self->state = I2CState_Start);
+  ((self)->onStart_fn ? (self)->onStart_fn((self)->onStart_ctx, restart) : (void)0);
+  return;
+  }
+  (self->pendingRestart = false);
+  int32_t cmd = FIFO_pull(self->txFIFO);
+  int32_t readMode = (!(!((int32_t)(cmd) & (int32_t)(CMD))));
+  (self->stop = (!(!((int32_t)(cmd) & (int32_t)(STOP)))));
+  if (readMode) {
+  ((self)->onReadByte_fn ? (self)->onReadByte_fn((self)->onReadByte_ctx, (!self->stop)) : (void)0);
+  } else {
+  ((self)->onWriteByte_fn ? (self)->onWriteByte_fn((self)->onWriteByte_ctx, ((int32_t)(cmd) & (int32_t)(255))) : (void)0);
+  }
+  if ((FIFO_itemCount_get(self->txFIFO) <= self->txThreshold)) {
+  RPI2C__RP2040_setInterrupts(self, R_TX_EMPTY);
+  }
+}
+
+static void RPI2C__RP2040_pushRX(RPI2C__RP2040* self, int32_t value) {
+  if (FIFO_full_get(self->rxFIFO)) {
+  RPI2C__RP2040_setInterrupts(self, R_RX_OVER);
+  return;
+  }
+  FIFO_push(self->rxFIFO, value);
+  if ((FIFO_itemCount_get(self->rxFIFO) > self->rxThreshold)) {
+  RPI2C__RP2040_setInterrupts(self, R_RX_FULL);
+  }
+}
+
+static void RPI2C__RP2040_completeStart(RPI2C__RP2040* self) {
+  if (((FIFO_empty_get(self->txFIFO) || (self->state != I2CState_Start)) || self->stop)) {
+  ((self)->onStop_fn ? (self)->onStop_fn((self)->onStop_ctx) : (void)0);
+  return;
+  }
+  int32_t mode = (((int32_t)(FIFO_peek(self->txFIFO)) & (int32_t)(CMD)) ? I2CMode_Read : I2CMode_Write);
+  (self->state = I2CState_Connect);
+  RPI2C__RP2040_setInterrupts(self, R_START_DET);
+  int32_t addressMask = ((RPI2C__RP2040_masterBits_get(self) == 10) ? 1023 : 255);
+  ((self)->onConnect_fn ? (self)->onConnect_fn((self)->onConnect_ctx, ((int32_t)(self->targetAddress) & (int32_t)(addressMask)), mode) : (void)0);
+}
+
+static void RPI2C__RP2040_completeConnect(RPI2C__RP2040* self, bool ack, int32_t nackByte) {
+  if (((!ack) || self->stop)) {
+  if ((!ack)) {
+  if ((!self->targetAddress)) {
+  RPI2C__RP2040_abort(self, ABRT_GCALL_NOACK);
+  } else {
+  if (((int32_t)(self->control) & (int32_t)(IC_10BITADDR_MASTER))) {
+  RPI2C__RP2040_abort(self, ((nackByte == 0) ? ABRT_10ADDR1_NOACK : ABRT_10ADDR2_NOACK));
+  } else {
+  RPI2C__RP2040_abort(self, ABRT_7B_ADDR_NOACK);
+  }
+  }
+  }
+  (self->state = I2CState_Stop);
+  ((self)->onStop_fn ? (self)->onStop_fn((self)->onStop_ctx) : (void)0);
+  return;
+  }
+  (self->state = I2CState_Connected);
+  (self->busy = false);
+  (self->firstByte = true);
+  RPI2C__RP2040_nextCommand(self);
+}
+
+static void RPI2C__RP2040_completeWrite(RPI2C__RP2040* self, bool ack) {
+  if (((!ack) || self->stop)) {
+  if ((!ack)) {
+  RPI2C__RP2040_abort(self, ABRT_TXDATA_NOACK);
+  }
+  (self->state = I2CState_Stop);
+  ((self)->onStop_fn ? (self)->onStop_fn((self)->onStop_ctx) : (void)0);
+  return;
+  }
+  (self->busy = false);
+  RPI2C__RP2040_nextCommand(self);
+}
+
+static void RPI2C__RP2040_completeRead(RPI2C__RP2040* self, int32_t value) {
+  RPI2C__RP2040_pushRX(self, ((int32_t)(value) | (int32_t)((self->firstByte ? FIRST_DATA_BYTE : 0))));
+  if (self->stop) {
+  (self->state = I2CState_Stop);
+  ((self)->onStop_fn ? (self)->onStop_fn((self)->onStop_ctx) : (void)0);
+  return;
+  }
+  (self->firstByte = false);
+  (self->busy = false);
+  RPI2C__RP2040_nextCommand(self);
+}
+
+static void RPI2C__RP2040_completeStop(RPI2C__RP2040* self) {
+  (self->state = I2CState_Idle);
+  RPI2C__RP2040_setInterrupts(self, R_STOP_DET);
+  (self->busy = false);
+  (self->pendingRestart = false);
+  if (((int32_t)(self->enable) & (int32_t)(ABORT))) {
+  (self->enable &= (~ABORT));
+  } else {
+  RPI2C__RP2040_nextCommand(self);
+  }
+}
+
+static void RPI2C__RP2040_arbitrationLost(RPI2C__RP2040* self) {
+  (self->state = I2CState_Idle);
+  (self->busy = false);
+  RPI2C__RP2040_abort(self, ARB_LOST);
+}
+
+static int32_t RPI2C__RP2040_readUint32(RPI2C__RP2040* self, int32_t offset) {
+  switch (offset) {
+  case IC_CON:
+  return self->control;
+  case IC_TAR:
+  return self->targetAddress;
+  case IC_SAR:
+  return self->slaveAddress;
+  case IC_DATA_CMD:
+  if (FIFO_empty_get(self->rxFIFO)) {
+  RPI2C__RP2040_setInterrupts(self, R_RX_UNDER);
+  return 0;
+  }
+  RPI2C__RP2040_clearInterrupts(self, R_RX_FULL);
+  return FIFO_pull(self->rxFIFO);
+  case IC_SS_SCL_HCNT:
+  return self->ssClockHighPeriod;
+  case IC_SS_SCL_LCNT:
+  return self->ssClockLowPeriod;
+  case IC_FS_SCL_HCNT:
+  return self->fsClockHighPeriod;
+  case IC_FS_SCL_LCNT:
+  return self->fsClockLowPeriod;
+  case IC_INTR_STAT:
+  return RPI2C__RP2040_intStatus_get(self);
+  case IC_INTR_MASK:
+  return self->intEnable;
+  case IC_RAW_INTR_STAT:
+  return self->intRaw;
+  case IC_RX_TL:
+  return self->rxThreshold;
+  case IC_TX_TL:
+  return self->txThreshold;
+  case IC_CLR_INTR:
+  (self->abortSource &= ABRT_SBYTE_NORSTRT);
+  return RPI2C__RP2040_clearInterrupts(self, ((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(R_RX_UNDER) | (int32_t)(R_RX_OVER))) | (int32_t)(R_TX_OVER))) | (int32_t)(R_RD_REQ))) | (int32_t)(R_TX_ABRT))) | (int32_t)(R_RX_DONE))) | (int32_t)(R_ACTIVITY))) | (int32_t)(R_STOP_DET))) | (int32_t)(R_START_DET))) | (int32_t)(R_GEN_CALL)));
+  case IC_CLR_RX_UNDER:
+  return RPI2C__RP2040_clearInterrupts(self, R_RX_UNDER);
+  case IC_CLR_RX_OVER:
+  return RPI2C__RP2040_clearInterrupts(self, R_RX_OVER);
+  case IC_CLR_TX_OVER:
+  return RPI2C__RP2040_clearInterrupts(self, R_TX_OVER);
+  case IC_CLR_RD_REQ:
+  return RPI2C__RP2040_clearInterrupts(self, R_RD_REQ);
+  case IC_CLR_TX_ABRT:
+  (self->abortSource &= ABRT_SBYTE_NORSTRT);
+  return RPI2C__RP2040_clearInterrupts(self, R_TX_ABRT);
+  case IC_CLR_RX_DONE:
+  return RPI2C__RP2040_clearInterrupts(self, R_RX_DONE);
+  case IC_CLR_ACTIVITY:
+  return RPI2C__RP2040_clearInterrupts(self, R_ACTIVITY);
+  case IC_CLR_STOP_DET:
+  return RPI2C__RP2040_clearInterrupts(self, R_STOP_DET);
+  case IC_CLR_START_DET:
+  return RPI2C__RP2040_clearInterrupts(self, R_START_DET);
+  case IC_CLR_GEN_CALL:
+  return RPI2C__RP2040_clearInterrupts(self, R_GEN_CALL);
+  case IC_ENABLE:
+  return self->enable;
+  case IC_STATUS:
+  return ((int32_t)(((int32_t)(((int32_t)(((int32_t)(((self->state != I2CState_Idle) ? ((int32_t)(MST_ACTIVITY) | (int32_t)(ACTIVITY)) : 0)) | (int32_t)((FIFO_full_get(self->rxFIFO) ? RFF : 0)))) | (int32_t)(((!FIFO_empty_get(self->rxFIFO)) ? RFNE : 0)))) | (int32_t)((FIFO_empty_get(self->txFIFO) ? TFE : 0)))) | (int32_t)(((!FIFO_full_get(self->txFIFO)) ? TFNF : 0)));
+  case IC_TXFLR:
+  return FIFO_itemCount_get(self->txFIFO);
+  case IC_RXFLR:
+  return FIFO_itemCount_get(self->rxFIFO);
+  case IC_TX_ABRT_SOURCE:
+  {
+  int32_t value = self->abortSource;
+  (self->abortSource &= ABRT_SBYTE_NORSTRT);
+  return value;
+  }
+  case IC_COMP_PARAM_1:
+  return 0;
+  case IC_COMP_VERSION:
+  return 842019114;
+  case IC_COMP_TYPE:
+  return 1146552640;
+  }
+  return BasePeripheral__RP2040_readUint32(&self->base, offset);
+}
+
+static void RPI2C__RP2040_writeUint32(RPI2C__RP2040* self, int32_t offset, int32_t value) {
+  switch (offset) {
+  case IC_CON:
+  if ((((int32_t)(((int32_t)(value) >> (((int32_t)(SPEED_SHIFT)) & 31))) & (int32_t)(SPEED_MASK)) == I2CSpeed_Invalid)) {
+  (value = ((int32_t)(((int32_t)(value) & (int32_t)((~((int32_t)((uint32_t)(SPEED_MASK) << (((int32_t)(SPEED_SHIFT)) & 31))))))) | (int32_t)(((int32_t)((uint32_t)(I2CSpeed_HighSpeedMode) << (((int32_t)(SPEED_SHIFT)) & 31))))));
+  }
+  (self->control = value);
+  return;
+  case IC_TAR:
+  (self->targetAddress = ((int32_t)(value) & (int32_t)(1023)));
+  return;
+  case IC_SAR:
+  (self->slaveAddress = ((int32_t)(value) & (int32_t)(1023)));
+  return;
+  case IC_DATA_CMD:
+  if (FIFO_full_get(self->txFIFO)) {
+  RPI2C__RP2040_setInterrupts(self, R_TX_OVER);
+  } else {
+  FIFO_push(self->txFIFO, value);
+  RPI2C__RP2040_clearInterrupts(self, R_TX_EMPTY);
+  RPI2C__RP2040_nextCommand(self);
+  }
+  return;
+  case IC_SS_SCL_HCNT:
+  (self->ssClockHighPeriod = ((int32_t)(value) & (int32_t)(65535)));
+  return;
+  case IC_SS_SCL_LCNT:
+  (self->ssClockLowPeriod = ((int32_t)(value) & (int32_t)(65535)));
+  return;
+  case IC_FS_SCL_HCNT:
+  (self->fsClockHighPeriod = ((int32_t)(value) & (int32_t)(65535)));
+  return;
+  case IC_FS_SCL_LCNT:
+  (self->fsClockLowPeriod = ((int32_t)(value) & (int32_t)(65535)));
+  return;
+  case IC_RX_TL:
+  (self->rxThreshold = ((int32_t)(value) & (int32_t)(255)));
+  if ((self->rxThreshold > FIFO_size_get(self->rxFIFO))) {
+  (self->rxThreshold = FIFO_size_get(self->rxFIFO));
+  }
+  return;
+  case IC_TX_TL:
+  (self->txThreshold = ((int32_t)(value) & (int32_t)(255)));
+  if ((self->txThreshold > FIFO_size_get(self->txFIFO))) {
+  (self->txThreshold = FIFO_size_get(self->txFIFO));
+  }
+  return;
+  case IC_ENABLE:
+  (value |= ((int32_t)(self->enable) & (int32_t)(ABORT)));
+  if (((int32_t)(value) & (int32_t)(ABORT))) {
+  if ((self->state == I2CState_Idle)) {
+  (value &= (~ABORT));
+  } else {
+  RPI2C__RP2040_abort(self, ABRT_USER_ABRT);
+  (self->stop = true);
+  }
+  }
+  if ((!((int32_t)(value) & (int32_t)(ENABLE)))) {
+  FIFO_reset(self->txFIFO);
+  FIFO_reset(self->rxFIFO);
+  }
+  (self->enable = value);
+  RPI2C__RP2040_nextCommand(self);
+  return;
+  default:
+  BasePeripheral__RP2040_writeUint32(&self->base, offset, value);
+  }
+}
+
 // ─── io_rp2350.ts ───
 enum { GPIO_CTRL_LAST = (380) };
 enum { INTR0 = (560) };
 enum { PROC0_INTE0 = (584) };
 enum { PROC0_INTF0 = (608) };
 enum { PROC0_INTS0 = (632) };
-enum { PROC0_INTS5 = (640) };
-static RPIO* RPIO_new(RP2350* rp2040, const char* name) {
-  RPIO* self = calloc(1, sizeof(RPIO));
+enum { PROC0_INTS5 = (652) };
+static RP2350IO* RP2350IO_new(RP2350* rpchip, const char* name) {
+  RP2350IO* self = calloc(1, sizeof(RP2350IO));
   {
-    BasePeripheral* __super_11 = BasePeripheral_new(rp2040, name);
-    self->base = *__super_11;
-    free(__super_11);
+    BasePeripheral* __super_18 = BasePeripheral_new(rpchip, name);
+    self->base = *__super_18;
+    free(__super_18);
   }
-  (&(self)->base)->__vtable_Peripheral = &RPIO_Peripheral_vtable;
+  (&(self)->base)->__vtable_Peripheral = &RP2350IO_Peripheral_vtable;
   return self;
 }
 
-static int32_t RPIO_readUint32(RPIO* self, int32_t offset) {
+static int32_t RP2350IO_readUint32(RP2350IO* self, int32_t offset) {
   if ((offset <= GPIO_CTRL_LAST)) {
-  GPIOPin* gpio = self->base.rp2040->gpio[((uint32_t)(offset) >> (3))];
+  GPIOPin* gpio = self->base.rpchip->gpio[((uint32_t)(offset) >> (3))];
   int32_t isCtrl = (!(!((int32_t)(offset) & (int32_t)(4))));
   return (isCtrl ? gpio->ctrl : GPIOPin_status_get(gpio));
   }
   if (((offset >= INTR0) && (offset <= PROC0_INTS5))) {
-  int32_t startIndex = (((offset - INTR0) % 24) * 8);
-  int32_t register_ = ((offset % 24) * 24);
-  RP2350* __destruct_tmp_1 = self->base.rp2040;
+  int32_t groupOffset = ((offset - INTR0) % 24);
+  int32_t startIndex = (groupOffset * 2);
+  int32_t register_ = (offset - groupOffset);
+  RP2350* __destruct_tmp_1 = self->base.rpchip;
   GPIOPin** gpio = __destruct_tmp_1->gpio;
   int32_t result = 0;
   for (
@@ -9462,9 +13212,9 @@ int32_t index = 7
   return BasePeripheral_readUint32(&self->base, offset);
 }
 
-static void RPIO_writeUint32(RPIO* self, int32_t offset, int32_t value) {
+static void RP2350IO_writeUint32(RP2350IO* self, int32_t offset, int32_t value) {
   if ((offset <= GPIO_CTRL_LAST)) {
-  GPIOPin* gpio = self->base.rp2040->gpio[((uint32_t)(offset) >> (3))];
+  GPIOPin* gpio = self->base.rpchip->gpio[((uint32_t)(offset) >> (3))];
   int32_t isCtrl = (!(!((int32_t)(offset) & (int32_t)(4))));
   if (isCtrl) {
   (gpio->ctrl = value);
@@ -9473,9 +13223,10 @@ static void RPIO_writeUint32(RPIO* self, int32_t offset, int32_t value) {
   return;
   }
   if (((offset >= INTR0) && (offset <= PROC0_INTS5))) {
-  int32_t startIndex = (((offset - INTR0) % 24) * 8);
-  int32_t register_ = ((offset % 24) * 24);
-  RP2350* __destruct_tmp_1 = self->base.rp2040;
+  int32_t groupOffset = ((offset - INTR0) % 24);
+  int32_t startIndex = (groupOffset * 2);
+  int32_t register_ = (offset - groupOffset);
+  RP2350* __destruct_tmp_1 = self->base.rpchip;
   GPIOPin** gpio = __destruct_tmp_1->gpio;
   for (
 int32_t index = 0
@@ -9493,13 +13244,13 @@ int32_t index = 0
   case PROC0_INTE0:
   if ((pin->irqEnableMask != pinValue)) {
   (pin->irqEnableMask = pinValue);
-  RP2350_updateIOInterrupt(self->base.rp2040);
+  RP2350_updateIOInterrupt(self->base.rpchip);
   }
   break;
   case PROC0_INTF0:
   if ((pin->irqForceMask != pinValue)) {
   (pin->irqForceMask = pinValue);
-  RP2350_updateIOInterrupt(self->base.rp2040);
+  RP2350_updateIOInterrupt(self->base.rpchip);
   }
   break;
   }
@@ -9516,14 +13267,151 @@ enum { PROC0_INTE0__io = (256) };
 enum { PROC0_INTF0__io = (272) };
 enum { PROC0_INTS0__io = (288) };
 enum { PROC0_INTS3 = (300) };
+static RPIO* RPIO_new(RP2040* rpchip, const char* name) {
+  RPIO* self = calloc(1, sizeof(RPIO));
+  {
+    BasePeripheral__RP2040* __super_19 = BasePeripheral__RP2040_new(rpchip, name);
+    self->base = *__super_19;
+    free(__super_19);
+  }
+  (&(self)->base)->__vtable_Peripheral = &RPIO_Peripheral_vtable;
+  return self;
+}
+
+static int32_t RPIO_readUint32(RPIO* self, int32_t offset) {
+  if ((offset <= GPIO_CTRL_LAST__io)) {
+  GPIOPin__RP2040* gpio = self->base.rpchip->gpio[((uint32_t)(offset) >> (3))];
+  int32_t isCtrl = (!(!((int32_t)(offset) & (int32_t)(4))));
+  return (isCtrl ? gpio->ctrl : GPIOPin__RP2040_status_get(gpio));
+  }
+  if (((offset >= INTR0__io) && (offset <= PROC0_INTS3))) {
+  int32_t startIndex = (((int32_t)(offset) & (int32_t)(15)) * 2);
+  int32_t register_ = ((int32_t)(offset) & (int32_t)((~15)));
+  RP2040* __destruct_tmp_1 = self->base.rpchip;
+  GPIOPin__RP2040** gpio = __destruct_tmp_1->gpio;
+  int32_t result = 0;
+  for (
+int32_t index = 7
+; (index >= 0); (index--)) {
+  GPIOPin__RP2040* pin = gpio[(index + startIndex)];
+  if ((!pin)) {
+  continue;
+  }
+  (result = (int32_t)((uint32_t)(result) << (4)));
+  switch (register_) {
+  case INTR0__io:
+  (result |= pin->irqStatus);
+  break;
+  case PROC0_INTE0__io:
+  (result |= pin->irqEnableMask);
+  break;
+  case PROC0_INTF0__io:
+  (result |= pin->irqForceMask);
+  break;
+  case PROC0_INTS0__io:
+  (result |= ((int32_t)(((int32_t)(pin->irqStatus) & (int32_t)(pin->irqEnableMask))) | (int32_t)(pin->irqForceMask)));
+  break;
+  }
+  }
+  return result;
+  }
+  return BasePeripheral__RP2040_readUint32(&self->base, offset);
+}
+
+static void RPIO_writeUint32(RPIO* self, int32_t offset, int32_t value) {
+  if ((offset <= GPIO_CTRL_LAST__io)) {
+  GPIOPin__RP2040* gpio = self->base.rpchip->gpio[((uint32_t)(offset) >> (3))];
+  int32_t isCtrl = (!(!((int32_t)(offset) & (int32_t)(4))));
+  if (isCtrl) {
+  (gpio->ctrl = value);
+  GPIOPin__RP2040_checkForUpdates(gpio);
+  }
+  return;
+  }
+  if (((offset >= INTR0__io) && (offset <= PROC0_INTS3))) {
+  int32_t startIndex = (((int32_t)(offset) & (int32_t)(15)) * 2);
+  int32_t register_ = ((int32_t)(offset) & (int32_t)((~15)));
+  RP2040* __destruct_tmp_1 = self->base.rpchip;
+  GPIOPin__RP2040** gpio = __destruct_tmp_1->gpio;
+  for (
+int32_t index = 0
+; (index < 8); (index++)) {
+  GPIOPin__RP2040* pin = gpio[(index + startIndex)];
+  if ((!pin)) {
+  continue;
+  }
+  int32_t pinValue = ((int32_t)(((int32_t)(value) >> (((int32_t)((index * 4))) & 31))) & (int32_t)(15));
+  int32_t pinRawWriteValue = ((int32_t)(((int32_t)(self->base.rawWriteValue) >> (((int32_t)((index * 4))) & 31))) & (int32_t)(15));
+  switch (register_) {
+  case INTR0__io:
+  GPIOPin__RP2040_updateIRQValue(pin, pinRawWriteValue);
+  break;
+  case PROC0_INTE0__io:
+  if ((pin->irqEnableMask != pinValue)) {
+  (pin->irqEnableMask = pinValue);
+  RP2040_updateIOInterrupt(self->base.rpchip);
+  }
+  break;
+  case PROC0_INTF0__io:
+  if ((pin->irqForceMask != pinValue)) {
+  (pin->irqForceMask = pinValue);
+  RP2040_updateIOInterrupt(self->base.rpchip);
+  }
+  break;
+  }
+  }
+  return;
+  }
+  BasePeripheral__RP2040_writeUint32(&self->base, offset, value);
+}
+
+// ─── io_qspi_rp2350.ts ───
+enum { PIN_REGS_BYTES = (64) };
+static RPIOQSPI* RPIOQSPI_new(RP2350* rpchip, const char* name) {
+  RPIOQSPI* self = calloc(1, sizeof(RPIOQSPI));
+  {
+    BasePeripheral* __super_20 = BasePeripheral_new(rpchip, name);
+    self->base = *__super_20;
+    free(__super_20);
+  }
+  (&(self)->base)->__vtable_Peripheral = &RPIOQSPI_Peripheral_vtable;
+  self->regs = calloc(((uint32_t)(PIN_REGS_BYTES) >> (2)), sizeof(uint32_t));
+  for (
+int32_t i = 0
+; (i < ((uint32_t)(PIN_REGS_BYTES) >> (2))); (i += 2)) {
+  (self->regs[i] = 0);
+  (self->regs[(i + 1)] = 31);
+  }
+  return self;
+}
+
+static int32_t RPIOQSPI_readReg(RPIOQSPI* self, int32_t offset) {
+  return ((offset < PIN_REGS_BYTES) ? self->regs[((uint32_t)(offset) >> (2))] : 0);
+}
+
+static int32_t RPIOQSPI_readUint32(RPIOQSPI* self, int32_t offset) {
+  if ((offset < PIN_REGS_BYTES)) {
+  return self->regs[((uint32_t)(offset) >> (2))];
+  }
+  return BasePeripheral_readUint32(&self->base, offset);
+}
+
+static void RPIOQSPI_writeUint32(RPIOQSPI* self, int32_t offset, int32_t value) {
+  if ((offset < PIN_REGS_BYTES)) {
+  (self->regs[((uint32_t)(offset) >> (2))] = ((uint32_t)(value) >> (0)));
+  return;
+  }
+  BasePeripheral_writeUint32(&self->base, offset, value);
+}
+
 // ─── otp_data_rp2350.ts ───
 enum { OTP_ROWS = (4096) };
-static RP2350OTP* RP2350OTP_new(RP2350* rp2040, const char* name) {
+static RP2350OTP* RP2350OTP_new(RP2350* rpchip, const char* name) {
   RP2350OTP* self = calloc(1, sizeof(RP2350OTP));
   {
-    BasePeripheral* __super_12 = BasePeripheral_new(rp2040, name);
-    self->base = *__super_12;
-    free(__super_12);
+    BasePeripheral* __super_21 = BasePeripheral_new(rpchip, name);
+    self->base = *__super_21;
+    free(__super_21);
   }
   (&(self)->base)->__vtable_Peripheral = &RP2350OTP_Peripheral_vtable;
   self->fuse = calloc(OTP_ROWS, sizeof(uint16_t));
@@ -9546,12 +13434,12 @@ static void RP2350OTP_writeUint32(RP2350OTP* self, int32_t offset, int32_t value
   BasePeripheral_writeUint32(&self->base, offset, value);
 }
 
-static RP2350OTPData* RP2350OTPData_new(RP2350* rp2040, const char* name, RP2350OTP* otp) {
+static RP2350OTPData* RP2350OTPData_new(RP2350* rpchip, const char* name, RP2350OTP* otp) {
   RP2350OTPData* self = calloc(1, sizeof(RP2350OTPData));
   {
-    BasePeripheral* __super_13 = BasePeripheral_new(rp2040, name);
-    self->base = *__super_13;
-    free(__super_13);
+    BasePeripheral* __super_22 = BasePeripheral_new(rpchip, name);
+    self->base = *__super_22;
+    free(__super_22);
   }
   (&(self)->base)->__vtable_Peripheral = &RP2350OTPData_Peripheral_vtable;
   self->otp = otp;
@@ -9575,14 +13463,14 @@ enum { BANK0_FIRST = (4) };
 enum { BANK0_LAST = (192) };
 enum { QSPI_FIRST = (4) };
 enum { QSPI_LAST = (24) };
-static RPPADS* RPPADS_new(RP2350* rp2040, const char* name, const char* bank) {
-  RPPADS* self = calloc(1, sizeof(RPPADS));
+static RP2350PADS* RP2350PADS_new(RP2350* rpchip, const char* name, const char* bank) {
+  RP2350PADS* self = calloc(1, sizeof(RP2350PADS));
   {
-    BasePeripheral* __super_14 = BasePeripheral_new(rp2040, name);
-    self->base = *__super_14;
-    free(__super_14);
+    BasePeripheral* __super_23 = BasePeripheral_new(rpchip, name);
+    self->base = *__super_23;
+    free(__super_23);
   }
-  (&(self)->base)->__vtable_Peripheral = &RPPADS_Peripheral_vtable;
+  (&(self)->base)->__vtable_Peripheral = &RP2350PADS_Peripheral_vtable;
   self->bank = bank;
   self->voltageSelect = 0;
   self->firstPadRegister = ((strcmp(self->bank, "qspi") == 0) ? QSPI_FIRST : BANK0_FIRST);
@@ -9590,19 +13478,19 @@ static RPPADS* RPPADS_new(RP2350* rp2040, const char* name, const char* bank) {
   return self;
 }
 
-static GPIOPin* RPPADS_getPinFromOffset(RPPADS* self, int32_t offset) {
+static GPIOPin* RP2350PADS_getPinFromOffset(RP2350PADS* self, int32_t offset) {
   int32_t gpioIndex = ((uint32_t)((offset - self->firstPadRegister)) >> (2));
   if ((strcmp(self->bank, "qspi") == 0)) {
-  return self->base.rp2040->qspi[gpioIndex];
+  return self->base.rpchip->qspi[gpioIndex];
   } else {
-  return self->base.rp2040->gpio[gpioIndex];
+  return self->base.rpchip->gpio[gpioIndex];
   }
   return (GPIOPin*){0};
 }
 
-static int32_t RPPADS_readUint32(RPPADS* self, int32_t offset) {
+static int32_t RP2350PADS_readUint32(RP2350PADS* self, int32_t offset) {
   if (((offset >= self->firstPadRegister) && (offset <= self->lastPadRegister))) {
-  GPIOPin* gpio = RPPADS_getPinFromOffset(self, offset);
+  GPIOPin* gpio = RP2350PADS_getPinFromOffset(self, offset);
   return gpio->padValue;
   }
   switch (offset) {
@@ -9612,9 +13500,9 @@ static int32_t RPPADS_readUint32(RPPADS* self, int32_t offset) {
   return BasePeripheral_readUint32(&self->base, offset);
 }
 
-static void RPPADS_writeUint32(RPPADS* self, int32_t offset, int32_t value) {
+static void RP2350PADS_writeUint32(RP2350PADS* self, int32_t offset, int32_t value) {
   if (((offset >= self->firstPadRegister) && (offset <= self->lastPadRegister))) {
-  GPIOPin* gpio = RPPADS_getPinFromOffset(self, offset);
+  GPIOPin* gpio = RP2350PADS_getPinFromOffset(self, offset);
   int32_t oldInputEnable = GPIOPin_inputEnable_get(gpio);
   (gpio->padValue = value);
   GPIOPin_checkForUpdates(gpio);
@@ -9635,6 +13523,63 @@ static void RPPADS_writeUint32(RPPADS* self, int32_t offset, int32_t value) {
 // ─── pads.ts ───
 enum { GPIO_FIRST = (4) };
 enum { GPIO_LAST = (120) };
+static RPPADS* RPPADS_new(RP2040* rpchip, const char* name, const char* bank) {
+  RPPADS* self = calloc(1, sizeof(RPPADS));
+  {
+    BasePeripheral__RP2040* __super_24 = BasePeripheral__RP2040_new(rpchip, name);
+    self->base = *__super_24;
+    free(__super_24);
+  }
+  (&(self)->base)->__vtable_Peripheral = &RPPADS_Peripheral_vtable;
+  self->bank = bank;
+  self->voltageSelect = 0;
+  self->firstPadRegister = ((strcmp(self->bank, "qspi") == 0) ? QSPI_FIRST : GPIO_FIRST);
+  self->lastPadRegister = ((strcmp(self->bank, "qspi") == 0) ? QSPI_LAST : GPIO_LAST);
+  return self;
+}
+
+static GPIOPin__RP2040* RPPADS_getPinFromOffset(RPPADS* self, int32_t offset) {
+  int32_t gpioIndex = ((uint32_t)((offset - self->firstPadRegister)) >> (2));
+  if ((strcmp(self->bank, "qspi") == 0)) {
+  return self->base.rpchip->qspi[gpioIndex];
+  } else {
+  return self->base.rpchip->gpio[gpioIndex];
+  }
+  return (GPIOPin__RP2040*){0};
+}
+
+static int32_t RPPADS_readUint32(RPPADS* self, int32_t offset) {
+  if (((offset >= self->firstPadRegister) && (offset <= self->lastPadRegister))) {
+  GPIOPin__RP2040* gpio = RPPADS_getPinFromOffset(self, offset);
+  return gpio->padValue;
+  }
+  switch (offset) {
+  case VOLTAGE_SELECT:
+  return self->voltageSelect;
+  }
+  return BasePeripheral__RP2040_readUint32(&self->base, offset);
+}
+
+static void RPPADS_writeUint32(RPPADS* self, int32_t offset, int32_t value) {
+  if (((offset >= self->firstPadRegister) && (offset <= self->lastPadRegister))) {
+  GPIOPin__RP2040* gpio = RPPADS_getPinFromOffset(self, offset);
+  int32_t oldInputEnable = GPIOPin__RP2040_inputEnable_get(gpio);
+  (gpio->padValue = value);
+  GPIOPin__RP2040_checkForUpdates(gpio);
+  if ((oldInputEnable != GPIOPin__RP2040_inputEnable_get(gpio))) {
+  GPIOPin__RP2040_refreshInput(gpio);
+  }
+  return;
+  }
+  switch (offset) {
+  case VOLTAGE_SELECT:
+  (self->voltageSelect = ((int32_t)(value) & (int32_t)(1)));
+  break;
+  default:
+  BasePeripheral__RP2040_writeUint32(&self->base, offset, value);
+  }
+}
+
 // ─── peripheral.ts ───
 enum { ATOMIC_NORMAL = (0) };
 enum { ATOMIC_XOR = (1) };
@@ -9655,10 +13600,10 @@ static int32_t atomicUpdate(int32_t currentValue, int32_t atomicType, int32_t ne
   return (int32_t){0};
 }
 
-static BasePeripheral* BasePeripheral_new(RP2350* rp2040, const char* name) {
+static BasePeripheral* BasePeripheral_new(RP2350* rpchip, const char* name) {
   BasePeripheral* self = calloc(1, sizeof(BasePeripheral));
   (self)->__vtable_Peripheral = &BasePeripheral_Peripheral_vtable;
-  self->rp2040 = rp2040;
+  self->rpchip = rpchip;
   self->name = name;
   self->rawWriteValue = 0;
   return self;
@@ -9711,15 +13656,71 @@ static void BasePeripheral_error(BasePeripheral* self, const char* msg) {
   fprintf(stderr, "[%s] %s\n", self->name, msg);
 }
 
-static UnimplementedPeripheral* UnimplementedPeripheral_new(RP2350* rp2040, const char* name) {
+static UnimplementedPeripheral* UnimplementedPeripheral_new(RP2350* rpchip, const char* name) {
   UnimplementedPeripheral* self = calloc(1, sizeof(UnimplementedPeripheral));
   {
-    BasePeripheral* __base = BasePeripheral_new(rp2040, name);
+    BasePeripheral* __base = BasePeripheral_new(rpchip, name);
     self->base = *__base;
     free(__base);
   }
   (&(self)->base)->__vtable_Peripheral = &UnimplementedPeripheral_Peripheral_vtable;
   return self;
+}
+
+static BasePeripheral__RP2040* BasePeripheral__RP2040_new(RP2040* rpchip, const char* name) {
+  BasePeripheral__RP2040* self = calloc(1, sizeof(BasePeripheral__RP2040));
+  (self)->__vtable_Peripheral = &BasePeripheral__RP2040_Peripheral_vtable;
+  self->rpchip = rpchip;
+  self->name = name;
+  self->rawWriteValue = 0;
+  return self;
+}
+
+static int32_t BasePeripheral__RP2040_byteAddressable(BasePeripheral__RP2040* self) {
+  return false;
+}
+
+static int32_t BasePeripheral__RP2040_readUint32(BasePeripheral__RP2040* self, int32_t offset) {
+  BasePeripheral__RP2040_warn(self, fmtStr("Unimplemented peripheral read from %x", (unsigned)(offset)));
+  if ((offset > 4096)) {
+  BasePeripheral__RP2040_warn(self, "Unimplemented read from peripheral in the atomic operation region");
+  }
+  return 4294967295u;
+}
+
+static int32_t BasePeripheral__RP2040_readUint32ViaCore(BasePeripheral__RP2040* self, int32_t offset, int32_t core) {
+  BasePeripheral__RP2040_warn(self, fmtStr("Unimplemented peripheral readvia %d from 0x%x", core, (unsigned)(offset)));
+  return 4294967295u;
+}
+
+static void BasePeripheral__RP2040_writeUint32(BasePeripheral__RP2040* self, int32_t offset, int32_t value) {
+  BasePeripheral__RP2040_warn(self, fmtStr("Unimplemented peripheral write to 0x%x: %d", (unsigned)(offset), value));
+}
+
+static void BasePeripheral__RP2040_writeUint32ViaCore(BasePeripheral__RP2040* self, int32_t offset, int32_t value, int32_t core) {
+  BasePeripheral__RP2040_warn(self, fmtStr("Unimplemented peripheral write via %d to 0x%x: %d", core, (unsigned)(offset), value));
+}
+
+static void BasePeripheral__RP2040_writeUint32Atomic(BasePeripheral__RP2040* self, int32_t offset, int32_t value, int32_t atomicType) {
+  (self->rawWriteValue = value);
+  int32_t newValue = ((atomicType != ATOMIC_NORMAL) ? atomicUpdate(Peripheral_readUint32((Peripheral){ .obj = (void*)self, .vtable = (self)->__vtable_Peripheral }, offset), atomicType, value) : value);
+  Peripheral_writeUint32((Peripheral){ .obj = (void*)self, .vtable = (self)->__vtable_Peripheral }, offset, newValue);
+}
+
+static void BasePeripheral__RP2040_debug(BasePeripheral__RP2040* self, const char* msg) {
+  fprintf(stderr, "[%s] %s\n", self->name, msg);
+}
+
+static void BasePeripheral__RP2040_info(BasePeripheral__RP2040* self, const char* msg) {
+  fprintf(stderr, "[%s] %s\n", self->name, msg);
+}
+
+static void BasePeripheral__RP2040_warn(BasePeripheral__RP2040* self, const char* msg) {
+  fprintf(stderr, "[%s] %s\n", self->name, msg);
+}
+
+static void BasePeripheral__RP2040_error(BasePeripheral__RP2040* self, const char* msg) {
+  fprintf(stderr, "[%s] %s\n", self->name, msg);
 }
 
 // ─── pio.ts ───
@@ -9791,9 +13792,9 @@ static int32_t bitReverse(int32_t x) {
   return ((uint32_t)(x) >> (0));
 }
 
-static StateMachine* StateMachine_new(RP2350* rp2040, RPPIO* pio, int32_t index) {
+static StateMachine* StateMachine_new(RP2350* rpchip, RPPIO* pio, int32_t index) {
   StateMachine* self = calloc(1, sizeof(StateMachine));
-  self->rp2040 = rp2040;
+  self->rpchip = rpchip;
   self->pio = pio;
   self->index = index;
   self->_enabled = false;
@@ -9836,18 +13837,18 @@ static StateMachine* StateMachine_new(RP2350* rp2040, RPPIO* pio, int32_t index)
 static void StateMachine_updateDMATx(StateMachine* self) {
   StateMachine_updateFifoStat(self);
   if (FIFO_full_get(self->txFIFO)) {
-  RP2350_dma_clearDREQ(self->rp2040, self->dreqTx);
+  RP2350_dma_clearDREQ(self->rpchip, self->dreqTx);
   } else {
-  RP2350_dma_setDREQ(self->rp2040, self->dreqTx);
+  RP2350_dma_setDREQ(self->rpchip, self->dreqTx);
   }
 }
 
 static void StateMachine_updateDMARx(StateMachine* self) {
   StateMachine_updateFifoStat(self);
   if (FIFO_empty_get(self->rxFIFO)) {
-  RP2350_dma_clearDREQ(self->rp2040, self->dreqRx);
+  RP2350_dma_clearDREQ(self->rpchip, self->dreqRx);
   } else {
-  RP2350_dma_setDREQ(self->rp2040, self->dreqRx);
+  RP2350_dma_setDREQ(self->rpchip, self->dreqRx);
   }
 }
 
@@ -9895,7 +13896,7 @@ static void StateMachine_enabled_set(StateMachine* self, bool value) {
   } else {
   (self->pio->machinesRunning &= (~((int32_t)((uint32_t)(1) << (((int32_t)(self->index)) & 31)))));
   }
-  RP2350_updatePioActiveLists(self->rp2040);
+  RP2350_updatePioActiveLists(self->rpchip);
 }
 
 static int32_t StateMachine_enabled_get(StateMachine* self) {
@@ -9926,7 +13927,7 @@ static int32_t StateMachine_jmpCondition(StateMachine* self, int32_t condition) 
   return (((uint32_t)(self->x) >> (0)) != ((uint32_t)(self->y) >> (0)));
   case 6:
   {
-  RP2350* __destruct_tmp_1 = self->rp2040;
+  RP2350* __destruct_tmp_1 = self->rpchip;
   GPIOPin** gpio = __destruct_tmp_1->gpio;
   StateMachine* __destruct_tmp_2 = self;
   int32_t jmpPin = StateMachine_jmpPin_get(__destruct_tmp_2);
@@ -9948,7 +13949,7 @@ static int32_t StateMachine_inCountMask_get(StateMachine* self) {
 }
 
 static int32_t StateMachine_inPins_get(StateMachine* self) {
-  int32_t gpioValues = RP2350_gpioValues(self->rp2040, self->pio->gpiobase);
+  int32_t gpioValues = RP2350_gpioValues(self->rpchip, self->pio->gpiobase);
   StateMachine* __destruct_tmp_1 = self;
   int32_t inBase = StateMachine_inBase_get(__destruct_tmp_1);
   return (inBase ? ((int32_t)(((int32_t)((uint32_t)(gpioValues) << (((int32_t)((32 - inBase))) & 31)))) | (int32_t)(((uint32_t)(gpioValues) >> (((int32_t)(inBase)) & 31)))) : gpioValues);
@@ -10314,7 +14315,7 @@ static void StateMachine_resolveIrqTarget(StateMachine* self, int32_t irqField, 
   case 1:
   {
   int32_t pioCount = 3;
-  RPPIO* prevPio = self->rp2040->pio[(((pio->index + pioCount) - 1) % pioCount)];
+  RPPIO* prevPio = self->rpchip->pio[(((pio->index + pioCount) - 1) % pioCount)];
   (out->targetPio = prevPio);
   (out->irqBit = irqNum);
   return;
@@ -10325,7 +14326,7 @@ static void StateMachine_resolveIrqTarget(StateMachine* self, int32_t irqField, 
   return;
   case 3:
   {
-  RPPIO* nextPio = self->rp2040->pio[((pio->index + 1) % 3)];
+  RPPIO* nextPio = self->rpchip->pio[((pio->index + 1) % 3)];
   (out->targetPio = nextPio);
   (out->irqBit = irqNum);
   return;
@@ -10545,7 +14546,7 @@ static void StateMachine_checkWait(StateMachine* self) {
   }
   case WaitType_Pin:
   {
-  if (((self->waitIndex < 48) && (GPIOPin_inputValue_get(self->rp2040->gpio[(self->waitIndex + self->pio->gpiobase)]) == self->waitPolarity))) {
+  if (((self->waitIndex < 48) && (GPIOPin_inputValue_get(self->rpchip->gpio[(self->waitIndex + self->pio->gpiobase)]) == self->waitPolarity))) {
   (self->waiting = false);
   }
   break;
@@ -10588,27 +14589,27 @@ static void StateMachine_checkWait(StateMachine* self) {
   }
 }
 
-static RPPIO* RPPIO_new(RP2350* rp2040, const char* name, int32_t firstIrq, int32_t index, int32_t dreqRx_base, int32_t dreqTx_base) {
+static RPPIO* RPPIO_new(RP2350* rpchip, const char* name, int32_t firstIrq, int32_t index, int32_t dreqRx_base, int32_t dreqTx_base) {
   RPPIO* self = calloc(1, sizeof(RPPIO));
   {
-    BasePeripheral* __super_15 = BasePeripheral_new(rp2040, name);
-    self->base = *__super_15;
-    free(__super_15);
+    BasePeripheral* __super_25 = BasePeripheral_new(rpchip, name);
+    self->base = *__super_25;
+    free(__super_25);
   }
   (&(self)->base)->__vtable_Peripheral = &RPPIO_Peripheral_vtable;
   self->firstIrq = firstIrq;
   self->index = index;
   self->dreqRx_base = dreqRx_base;
   self->dreqTx_base = dreqTx_base;
-  self->machines[0] = StateMachine_new(self->base.rp2040, self, 0);
-  self->machines[1] = StateMachine_new(self->base.rp2040, self, 1);
-  self->machines[2] = StateMachine_new(self->base.rp2040, self, 2);
-  self->machines[3] = StateMachine_new(self->base.rp2040, self, 3);
+  self->machines[0] = StateMachine_new(self->base.rpchip, self, 0);
+  self->machines[1] = StateMachine_new(self->base.rpchip, self, 1);
+  self->machines[2] = StateMachine_new(self->base.rpchip, self, 2);
+  self->machines[3] = StateMachine_new(self->base.rpchip, self, 3);
   self->machinesRunning = 0;
   self->fdebug = 0;
   self->inputSyncBypass = 0;
   self->irq = 0;
-  self->isRp2040 = (strcmp(self->base.rp2040->identifier, "rp2040") == 0);
+  self->isRp2040 = (strcmp(self->base.rpchip->identifier, "rp2040") == 0);
   self->gpiobase = 0;
   self->pinValues = 0;
   self->pinDirections = 0;
@@ -10620,11 +14621,11 @@ static RPPIO* RPPIO_new(RP2350* rp2040, const char* name, int32_t firstIrq, int3
   self->irq0IntForce = 0;
   self->irq1IntEnable = 0;
   self->irq1IntForce = 0;
-  do { const char* __switch_tmp_16 = rp2040->identifier;
-  if (strcmp(__switch_tmp_16, "rp2040") == 0) {
+  do { const char* __switch_tmp_26 = rpchip->identifier;
+  if (strcmp(__switch_tmp_26, "rp2040") == 0) {
   break;
   }
-  else if (strcmp(__switch_tmp_16, "rp2350") == 0) {
+  else if (strcmp(__switch_tmp_26, "rp2350") == 0) {
   (self->irq_reg_offset = (RP2350_INTR - INTR__pio));
   break;
   }
@@ -10666,15 +14667,15 @@ static int32_t RPPIO_readUint32(RPPIO* self, int32_t offset) {
   return StateMachine_readUint32(self->machines[3], (offset - SM3_CLKDIV));
   }
   {
-  int32_t __dyncase_17_disc = offset;
-  if (__dyncase_17_disc == ((INTR__pio + self->irq_reg_offset))) goto __dyncase_17_14;
-  if (__dyncase_17_disc == ((IRQ0_INTE + self->irq_reg_offset))) goto __dyncase_17_15;
-  if (__dyncase_17_disc == ((IRQ0_INTF + self->irq_reg_offset))) goto __dyncase_17_16;
-  if (__dyncase_17_disc == ((IRQ0_INTS + self->irq_reg_offset))) goto __dyncase_17_17;
-  if (__dyncase_17_disc == ((IRQ1_INTE + self->irq_reg_offset))) goto __dyncase_17_18;
-  if (__dyncase_17_disc == ((IRQ1_INTF + self->irq_reg_offset))) goto __dyncase_17_19;
-  if (__dyncase_17_disc == ((IRQ1_INTS + self->irq_reg_offset))) goto __dyncase_17_20;
-  switch (__dyncase_17_disc) {
+  int32_t __dyncase_27_disc = offset;
+  if (__dyncase_27_disc == ((INTR__pio + self->irq_reg_offset))) goto __dyncase_27_14;
+  if (__dyncase_27_disc == ((IRQ0_INTE + self->irq_reg_offset))) goto __dyncase_27_15;
+  if (__dyncase_27_disc == ((IRQ0_INTF + self->irq_reg_offset))) goto __dyncase_27_16;
+  if (__dyncase_27_disc == ((IRQ0_INTS + self->irq_reg_offset))) goto __dyncase_27_17;
+  if (__dyncase_27_disc == ((IRQ1_INTE + self->irq_reg_offset))) goto __dyncase_27_18;
+  if (__dyncase_27_disc == ((IRQ1_INTF + self->irq_reg_offset))) goto __dyncase_27_19;
+  if (__dyncase_27_disc == ((IRQ1_INTS + self->irq_reg_offset))) goto __dyncase_27_20;
+  switch (__dyncase_27_disc) {
   case CTRL:
   return self->machinesRunning;
   case FSTAT:
@@ -10703,19 +14704,19 @@ static int32_t RPPIO_readUint32(RPPIO* self, int32_t offset) {
   return self->pinDirections;
   case DBG_CFGINFO:
   return 2098180;
-  __dyncase_17_14: /* dynamic case (INTR__pio + self->irq_reg_offset) [src/peripherals/pio.ts:1155: case INTR + this.irq_reg_offset:] */;
+  __dyncase_27_14: /* dynamic case (INTR__pio + self->irq_reg_offset) [src/peripherals/pio.ts:1155: case INTR + this.irq_reg_offset:] */;
   return RPPIO_intRaw_get(self);
-  __dyncase_17_15: /* dynamic case (IRQ0_INTE + self->irq_reg_offset) [src/peripherals/pio.ts:1157: case IRQ0_INTE + this.irq_reg_offset:] */;
+  __dyncase_27_15: /* dynamic case (IRQ0_INTE + self->irq_reg_offset) [src/peripherals/pio.ts:1157: case IRQ0_INTE + this.irq_reg_offset:] */;
   return self->irq0IntEnable;
-  __dyncase_17_16: /* dynamic case (IRQ0_INTF + self->irq_reg_offset) [src/peripherals/pio.ts:1159: case IRQ0_INTF + this.irq_reg_offset:] */;
+  __dyncase_27_16: /* dynamic case (IRQ0_INTF + self->irq_reg_offset) [src/peripherals/pio.ts:1159: case IRQ0_INTF + this.irq_reg_offset:] */;
   return self->irq0IntForce;
-  __dyncase_17_17: /* dynamic case (IRQ0_INTS + self->irq_reg_offset) [src/peripherals/pio.ts:1161: case IRQ0_INTS + this.irq_reg_offset:] */;
+  __dyncase_27_17: /* dynamic case (IRQ0_INTS + self->irq_reg_offset) [src/peripherals/pio.ts:1161: case IRQ0_INTS + this.irq_reg_offset:] */;
   return RPPIO_irq0IntStatus_get(self);
-  __dyncase_17_18: /* dynamic case (IRQ1_INTE + self->irq_reg_offset) [src/peripherals/pio.ts:1163: case IRQ1_INTE + this.irq_reg_offset:] */;
+  __dyncase_27_18: /* dynamic case (IRQ1_INTE + self->irq_reg_offset) [src/peripherals/pio.ts:1163: case IRQ1_INTE + this.irq_reg_offset:] */;
   return self->irq1IntEnable;
-  __dyncase_17_19: /* dynamic case (IRQ1_INTF + self->irq_reg_offset) [src/peripherals/pio.ts:1165: case IRQ1_INTF + this.irq_reg_offset:] */;
+  __dyncase_27_19: /* dynamic case (IRQ1_INTF + self->irq_reg_offset) [src/peripherals/pio.ts:1165: case IRQ1_INTF + this.irq_reg_offset:] */;
   return self->irq1IntForce;
-  __dyncase_17_20: /* dynamic case (IRQ1_INTS + self->irq_reg_offset) [src/peripherals/pio.ts:1167: case IRQ1_INTS + this.irq_reg_offset:] */;
+  __dyncase_27_20: /* dynamic case (IRQ1_INTS + self->irq_reg_offset) [src/peripherals/pio.ts:1167: case IRQ1_INTS + this.irq_reg_offset:] */;
   return RPPIO_irq1IntStatus_get(self);
   case RP2350_GPIOBASE:
   if ((!self->isRp2040)) {
@@ -10749,12 +14750,12 @@ static void RPPIO_writeUint32(RPPIO* self, int32_t offset, int32_t value) {
   return;
   }
   {
-  int32_t __dyncase_18_disc = offset;
-  if (__dyncase_18_disc == ((IRQ0_INTE + self->irq_reg_offset))) goto __dyncase_18_9;
-  if (__dyncase_18_disc == ((IRQ0_INTF + self->irq_reg_offset))) goto __dyncase_18_10;
-  if (__dyncase_18_disc == ((IRQ1_INTE + self->irq_reg_offset))) goto __dyncase_18_11;
-  if (__dyncase_18_disc == ((IRQ1_INTF + self->irq_reg_offset))) goto __dyncase_18_12;
-  switch (__dyncase_18_disc) {
+  int32_t __dyncase_28_disc = offset;
+  if (__dyncase_28_disc == ((IRQ0_INTE + self->irq_reg_offset))) goto __dyncase_28_9;
+  if (__dyncase_28_disc == ((IRQ0_INTF + self->irq_reg_offset))) goto __dyncase_28_10;
+  if (__dyncase_28_disc == ((IRQ1_INTE + self->irq_reg_offset))) goto __dyncase_28_11;
+  if (__dyncase_28_disc == ((IRQ1_INTF + self->irq_reg_offset))) goto __dyncase_28_12;
+  switch (__dyncase_28_disc) {
   case CTRL:
   {
   for (
@@ -10773,7 +14774,7 @@ int32_t index = 0
   int32_t disableSm = (!(!((int32_t)(value) & (int32_t)(((int32_t)((uint32_t)(1) << (25)))))));
   int32_t clkDivRestart = (!(!((int32_t)(value) & (int32_t)(((int32_t)((uint32_t)(1) << (26)))))));
   int32_t pioCount = 3;
-  RPPIO* affectedPio = self->base.rp2040->pio[(((self->index + pioCount) - 1) % pioCount)];
+  RPPIO* affectedPio = self->base.rpchip->pio[(((self->index + pioCount) - 1) % pioCount)];
   int32_t affectedMachines = ((uint32_t)(value) >> (16));
   for (
 int32_t prevNext = 0
@@ -10793,7 +14794,7 @@ int32_t index = 0
   }
   }
   }
-  (affectedPio = self->base.rp2040->pio[((self->index + 1) % pioCount)]);
+  (affectedPio = self->base.rpchip->pio[((self->index + 1) % pioCount)]);
   (affectedMachines = ((uint32_t)(value) >> (20)));
   }
   }
@@ -10825,24 +14826,24 @@ int32_t index = 0
   (self->irq |= value);
   RPPIO_irqUpdated(self);
   break;
-  __dyncase_18_9: /* dynamic case (IRQ0_INTE + self->irq_reg_offset) [src/peripherals/pio.ts:1261: case IRQ0_INTE + this.irq_reg_offset:] */;
+  __dyncase_28_9: /* dynamic case (IRQ0_INTE + self->irq_reg_offset) [src/peripherals/pio.ts:1261: case IRQ0_INTE + this.irq_reg_offset:] */;
   (self->irq0IntEnable = ((int32_t)(value) & (int32_t)(4095)));
   RPPIO_checkInterrupts(self);
   break;
-  __dyncase_18_10: /* dynamic case (IRQ0_INTF + self->irq_reg_offset) [src/peripherals/pio.ts:1265: case IRQ0_INTF + this.irq_reg_offset:] */;
+  __dyncase_28_10: /* dynamic case (IRQ0_INTF + self->irq_reg_offset) [src/peripherals/pio.ts:1265: case IRQ0_INTF + this.irq_reg_offset:] */;
   (self->irq0IntForce = ((int32_t)(value) & (int32_t)(4095)));
   RPPIO_checkInterrupts(self);
   break;
-  __dyncase_18_11: /* dynamic case (IRQ1_INTE + self->irq_reg_offset) [src/peripherals/pio.ts:1269: case IRQ1_INTE + this.irq_reg_offset:] */;
+  __dyncase_28_11: /* dynamic case (IRQ1_INTE + self->irq_reg_offset) [src/peripherals/pio.ts:1269: case IRQ1_INTE + this.irq_reg_offset:] */;
   (self->irq1IntEnable = ((int32_t)(value) & (int32_t)(4095)));
   RPPIO_checkInterrupts(self);
   break;
-  __dyncase_18_12: /* dynamic case (IRQ1_INTF + self->irq_reg_offset) [src/peripherals/pio.ts:1273: case IRQ1_INTF + this.irq_reg_offset:] */;
+  __dyncase_28_12: /* dynamic case (IRQ1_INTF + self->irq_reg_offset) [src/peripherals/pio.ts:1273: case IRQ1_INTF + this.irq_reg_offset:] */;
   (self->irq1IntForce = ((int32_t)(value) & (int32_t)(4095)));
   RPPIO_checkInterrupts(self);
   break;
   case RP2350_GPIOBASE:
-  if ((strcmp(self->base.rp2040->identifier, "rp2040") != 0)) {
+  if ((strcmp(self->base.rpchip->identifier, "rp2040") != 0)) {
   (self->gpiobase = ((int32_t)(value) & (int32_t)(16)));
   } else {
   BasePeripheral_writeUint32(&self->base, offset, value);
@@ -10885,8 +14886,8 @@ static void RPPIO_pinDirectionsChanged(RPPIO* self, int32_t value, int32_t first
 static void RPPIO_checkInterrupts(RPPIO* self) {
   RPPIO* __destruct_tmp_1 = self;
   int32_t firstIrq = __destruct_tmp_1->firstIrq;
-  RP2350_setInterrupt(self->base.rp2040, firstIrq, (!(!RPPIO_irq0IntStatus_get(self))));
-  RP2350_setInterrupt(self->base.rp2040, (firstIrq + 1), (!(!RPPIO_irq1IntStatus_get(self))));
+  RP2350_setInterrupt(self->base.rpchip, firstIrq, (!(!RPPIO_irq0IntStatus_get(self))));
+  RP2350_setInterrupt(self->base.rpchip, (firstIrq + 1), (!(!RPPIO_irq1IntStatus_get(self))));
 }
 
 static void RPPIO_irqUpdated(RPPIO* self) {
@@ -10905,7 +14906,7 @@ static void RPPIO_checkChangedPins(RPPIO* self) {
   if (changedPins) {
   (self->oldPinDirections = self->pinDirections);
   (self->oldPinValues = self->pinValues);
-  RP2350* __destruct_tmp_1 = self->base.rp2040;
+  RP2350* __destruct_tmp_1 = self->base.rpchip;
   GPIOPin** gpio = __destruct_tmp_1->gpio;
   int32_t remaining = changedPins;
   while (remaining) {
@@ -10944,12 +14945,1165 @@ static void RPPIO_stop(RPPIO* self) {
   }
 }
 
+static StateMachine__RP2040* StateMachine__RP2040_new(RP2040* rpchip, RPPIO__RP2040* pio, int32_t index) {
+  StateMachine__RP2040* self = calloc(1, sizeof(StateMachine__RP2040));
+  self->rpchip = rpchip;
+  self->pio = pio;
+  self->index = index;
+  self->_enabled = false;
+  self->x = 0;
+  self->y = 0;
+  self->pc = 0;
+  self->inputShiftReg = 0;
+  self->inputShiftCount = 0;
+  self->outputShiftReg = 0;
+  self->outputShiftCount = 0;
+  self->cycles = 0;
+  self->execOpcode = 0;
+  self->execValid = false;
+  self->nextPC = 0;
+  self->clockDiv = 256;
+  self->curClockPhase = 0;
+  self->remainingDelay = 0;
+  self->execCtrl = ((int32_t)((uint32_t)(31) << (12)));
+  self->shiftCtrl = ((int32_t)((uint32_t)(3) << (18)));
+  self->pinCtrl = ((int32_t)((uint32_t)(5) << (26)));
+  self->rxFIFO = FIFO_new(4);
+  self->txFIFO = FIFO_new(4);
+  self->outPinValues = 0;
+  self->outPinDirection = 0;
+  self->waiting = false;
+  self->waitType = WaitType_None;
+  self->waitIndex = 0;
+  self->waitPolarity = false;
+  self->waitDelay = (-1);
+  self->waitTargetPio = self->pio;
+  self->dreqRx = (self->pio->dreqRx_base + self->index);
+  self->dreqTx = (self->pio->dreqTx_base + self->index);
+  self->fifoStat = 0;
+  self->irqTargetScratch = memcpy(malloc(sizeof(IrqTarget__RP2040)), &(IrqTarget__RP2040){ .targetPio = pio, .irqBit = 0 }, sizeof(IrqTarget__RP2040));
+  StateMachine__RP2040_updateDMARx(self);
+  StateMachine__RP2040_updateDMATx(self);
+  return self;
+}
+
+static void StateMachine__RP2040_updateDMATx(StateMachine__RP2040* self) {
+  StateMachine__RP2040_updateFifoStat(self);
+  if (FIFO_full_get(self->txFIFO)) {
+  RP2040_dma_clearDREQ(self->rpchip, self->dreqTx);
+  } else {
+  RP2040_dma_setDREQ(self->rpchip, self->dreqTx);
+  }
+}
+
+static void StateMachine__RP2040_updateDMARx(StateMachine__RP2040* self) {
+  StateMachine__RP2040_updateFifoStat(self);
+  if (FIFO_empty_get(self->rxFIFO)) {
+  RP2040_dma_clearDREQ(self->rpchip, self->dreqRx);
+  } else {
+  RP2040_dma_setDREQ(self->rpchip, self->dreqRx);
+  }
+}
+
+static void StateMachine__RP2040_writeFIFO(StateMachine__RP2040* self, int32_t value) {
+  if (FIFO_full_get(self->txFIFO)) {
+  (self->pio->fdebug |= ((int32_t)((uint32_t)(FDEBUG_TXOVER) << (((int32_t)(self->index)) & 31))));
+  return;
+  }
+  FIFO_push(self->txFIFO, value);
+  StateMachine__RP2040_updateDMATx(self);
+  StateMachine__RP2040_checkWait(self);
+  if (FIFO_full_get(self->txFIFO)) {
+  RPPIO__RP2040_checkInterrupts(self->pio);
+  }
+}
+
+static int32_t StateMachine__RP2040_readFIFO(StateMachine__RP2040* self) {
+  if (FIFO_empty_get(self->rxFIFO)) {
+  (self->pio->fdebug |= ((int32_t)((uint32_t)(FDEBUG_RXUNDER) << (((int32_t)(self->index)) & 31))));
+  return 0;
+  }
+  int32_t result = FIFO_pull(self->rxFIFO);
+  StateMachine__RP2040_updateDMARx(self);
+  StateMachine__RP2040_checkWait(self);
+  if (FIFO_empty_get(self->rxFIFO)) {
+  RPPIO__RP2040_checkInterrupts(self->pio);
+  }
+  return result;
+}
+
+static int32_t StateMachine__RP2040_status_get(StateMachine__RP2040* self) {
+  int32_t statusN = ((int32_t)(self->execCtrl) & (int32_t)(15));
+  if (((int32_t)(self->execCtrl) & (int32_t)(EXECCTRL_STATUS_SEL))) {
+  return ((FIFO_itemCount_get(self->rxFIFO) < statusN) ? 4294967295u : 0);
+  } else {
+  return ((FIFO_itemCount_get(self->txFIFO) < statusN) ? 4294967295u : 0);
+  }
+  return (int32_t){0};
+}
+
+static void StateMachine__RP2040_enabled_set(StateMachine__RP2040* self, bool value) {
+  (self->_enabled = value);
+  if (value) {
+  (self->pio->machinesRunning |= ((int32_t)((uint32_t)(1) << (((int32_t)(self->index)) & 31))));
+  } else {
+  (self->pio->machinesRunning &= (~((int32_t)((uint32_t)(1) << (((int32_t)(self->index)) & 31)))));
+  }
+  RP2040_updatePioActiveLists(self->rpchip);
+}
+
+static int32_t StateMachine__RP2040_enabled_get(StateMachine__RP2040* self) {
+  return self->_enabled;
+}
+
+static int32_t StateMachine__RP2040_jmpCondition(StateMachine__RP2040* self, int32_t condition) {
+  switch (condition) {
+  case 0:
+  return true;
+  case 1:
+  return (self->x == 0);
+  case 2:
+  {
+  int32_t oldX = self->x;
+  (self->x = ((uint32_t)((self->x - 1)) >> (0)));
+  return (oldX != 0);
+  }
+  case 3:
+  return (self->y == 0);
+  case 4:
+  {
+  int32_t oldY = self->y;
+  (self->y = ((uint32_t)((self->y - 1)) >> (0)));
+  return (oldY != 0);
+  }
+  case 5:
+  return (((uint32_t)(self->x) >> (0)) != ((uint32_t)(self->y) >> (0)));
+  case 6:
+  {
+  RP2040* __destruct_tmp_1 = self->rpchip;
+  GPIOPin__RP2040** gpio = __destruct_tmp_1->gpio;
+  StateMachine__RP2040* __destruct_tmp_2 = self;
+  int32_t jmpPin = StateMachine__RP2040_jmpPin_get(__destruct_tmp_2);
+  return ((jmpPin < 30) ? GPIOPin__RP2040_inputValue_get(gpio[jmpPin]) : false);
+  }
+  case 7:
+  return (self->outputShiftCount < StateMachine__RP2040_pullThreshold_get(self));
+  }
+  BasePeripheral__RP2040_error(&(self->pio)->base, fmtStr("jmpCondition with unsupported condition: %d", condition));
+  return false;
+}
+
+static int32_t StateMachine__RP2040_inCountMask_get(StateMachine__RP2040* self) {
+  if ((!self->pio->isRp2040)) {
+  int32_t value = ((int32_t)(self->shiftCtrl) & (int32_t)(31));
+  return (value ? (((uint32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(value)) & 31)))) >> (0)) - 1) : 4294967295u);
+  }
+  return 4294967295u;
+}
+
+static int32_t StateMachine__RP2040_inPins_get(StateMachine__RP2040* self) {
+  int32_t gpioValues = RP2040_gpioValues(self->rpchip, self->pio->gpiobase);
+  StateMachine__RP2040* __destruct_tmp_1 = self;
+  int32_t inBase = StateMachine__RP2040_inBase_get(__destruct_tmp_1);
+  return (inBase ? ((int32_t)(((int32_t)((uint32_t)(gpioValues) << (((int32_t)((32 - inBase))) & 31)))) | (int32_t)(((uint32_t)(gpioValues) >> (((int32_t)(inBase)) & 31)))) : gpioValues);
+}
+
+static int32_t StateMachine__RP2040_inSourceValue(StateMachine__RP2040* self, int32_t source) {
+  switch (source) {
+  case 0:
+  return ((int32_t)(StateMachine__RP2040_inPins_get(self)) & (int32_t)(StateMachine__RP2040_inCountMask_get(self)));
+  case 1:
+  return self->x;
+  case 2:
+  return self->y;
+  case 3:
+  return 0;
+  case 4:
+  return 0;
+  case 5:
+  return StateMachine__RP2040_status_get(self);
+  case 6:
+  return self->inputShiftReg;
+  case 7:
+  return self->outputShiftReg;
+  }
+  BasePeripheral__RP2040_error(&(self->pio)->base, fmtStr("inSourceValue with unsupported source: %d", source));
+  return 0;
+}
+
+static void StateMachine__RP2040_writeOutValue(StateMachine__RP2040* self, int32_t destination, int32_t value, int32_t bitCount) {
+  switch (destination) {
+  case 0:
+  StateMachine__RP2040_setOutPins(self, value);
+  break;
+  case 1:
+  (self->x = value);
+  break;
+  case 2:
+  (self->y = value);
+  break;
+  case 3:
+  break;
+  case 4:
+  StateMachine__RP2040_setOutPinDirs(self, value);
+  break;
+  case 5:
+  (self->nextPC = ((int32_t)(value) & (int32_t)(31)));
+  break;
+  case 6:
+  (self->inputShiftReg = value);
+  (self->inputShiftCount = bitCount);
+  break;
+  case 7:
+  (self->execOpcode = value);
+  (self->execValid = true);
+  break;
+  }
+}
+
+static int32_t StateMachine__RP2040_pushThreshold_get(StateMachine__RP2040* self) {
+  int32_t value = ((int32_t)(((int32_t)(self->shiftCtrl) >> (20))) & (int32_t)(31));
+  return (value ? value : 32);
+}
+
+static int32_t StateMachine__RP2040_pullThreshold_get(StateMachine__RP2040* self) {
+  int32_t value = ((int32_t)(((int32_t)(self->shiftCtrl) >> (25))) & (int32_t)(31));
+  return (value ? value : 32);
+}
+
+static int32_t StateMachine__RP2040_sidesetCount_get(StateMachine__RP2040* self) {
+  return ((int32_t)(((int32_t)(self->pinCtrl) >> (29))) & (int32_t)(7));
+}
+
+static int32_t StateMachine__RP2040_setCount_get(StateMachine__RP2040* self) {
+  return ((int32_t)(((int32_t)(self->pinCtrl) >> (26))) & (int32_t)(7));
+}
+
+static int32_t StateMachine__RP2040_outCount_get(StateMachine__RP2040* self) {
+  return ((int32_t)(((int32_t)(self->pinCtrl) >> (20))) & (int32_t)(63));
+}
+
+static int32_t StateMachine__RP2040_inBase_get(StateMachine__RP2040* self) {
+  return ((int32_t)(((int32_t)(self->pinCtrl) >> (15))) & (int32_t)(31));
+}
+
+static int32_t StateMachine__RP2040_sidesetBase_get(StateMachine__RP2040* self) {
+  return ((int32_t)(((int32_t)(self->pinCtrl) >> (10))) & (int32_t)(31));
+}
+
+static int32_t StateMachine__RP2040_setBase_get(StateMachine__RP2040* self) {
+  return ((int32_t)(((int32_t)(self->pinCtrl) >> (5))) & (int32_t)(31));
+}
+
+static int32_t StateMachine__RP2040_outBase_get(StateMachine__RP2040* self) {
+  return ((int32_t)(((int32_t)(self->pinCtrl) >> (0))) & (int32_t)(31));
+}
+
+static int32_t StateMachine__RP2040_jmpPin_get(StateMachine__RP2040* self) {
+  return ((int32_t)(((int32_t)(self->execCtrl) >> (24))) & (int32_t)(31));
+}
+
+static int32_t StateMachine__RP2040_wrapTop_get(StateMachine__RP2040* self) {
+  return ((int32_t)(((int32_t)(self->execCtrl) >> (12))) & (int32_t)(31));
+}
+
+static int32_t StateMachine__RP2040_wrapBottom_get(StateMachine__RP2040* self) {
+  return ((int32_t)(((int32_t)(self->execCtrl) >> (7))) & (int32_t)(31));
+}
+
+static void StateMachine__RP2040_setOutPinDirs(StateMachine__RP2040* self, int32_t value) {
+  (self->outPinDirection = value);
+  RPPIO__RP2040_pinDirectionsChanged(self->pio, value, StateMachine__RP2040_outBase_get(self), StateMachine__RP2040_outCount_get(self));
+}
+
+static void StateMachine__RP2040_setOutPins(StateMachine__RP2040* self, int32_t value) {
+  (self->outPinValues = value);
+  RPPIO__RP2040_pinValuesChanged(self->pio, value, StateMachine__RP2040_outBase_get(self), StateMachine__RP2040_outCount_get(self));
+}
+
+static void StateMachine__RP2040_outInstruction(StateMachine__RP2040* self, int32_t arg) {
+  int32_t bitCount = ((int32_t)(arg) & (int32_t)(31));
+  int32_t destination = ((int32_t)(arg) >> (5));
+  if ((bitCount == 0)) {
+  StateMachine__RP2040_writeOutValue(self, destination, self->outputShiftReg, 32);
+  (self->outputShiftCount = 32);
+  } else {
+  if (((int32_t)(self->shiftCtrl) & (int32_t)(SHIFTCTRL_OUT_SHIFTDIR))) {
+  int32_t value = ((int32_t)(self->outputShiftReg) & (int32_t)((((int32_t)((uint32_t)(1) << (((int32_t)(bitCount)) & 31))) - 1)));
+  (self->outputShiftReg = (uint32_t)(self->outputShiftReg) >> (((int32_t)(bitCount)) & 31));
+  StateMachine__RP2040_writeOutValue(self, destination, value, bitCount);
+  } else {
+  int32_t value = ((uint32_t)(self->outputShiftReg) >> (((int32_t)((32 - bitCount))) & 31));
+  (self->outputShiftReg = (int32_t)((uint32_t)(self->outputShiftReg) << (((int32_t)(bitCount)) & 31)));
+  StateMachine__RP2040_writeOutValue(self, destination, value, bitCount);
+  }
+  (self->outputShiftCount += bitCount);
+  if ((self->outputShiftCount > 32)) {
+  (self->outputShiftCount = 32);
+  }
+  }
+}
+
+static void StateMachine__RP2040_executeInstruction(StateMachine__RP2040* self, int32_t opcode) {
+  int32_t arg = ((int32_t)(opcode) & (int32_t)(255));
+  switch (((int32_t)(((uint32_t)(opcode) >> (13))) & (int32_t)(7))) {
+  case 0:
+  if (StateMachine__RP2040_jmpCondition(self, ((int32_t)(arg) >> (5)))) {
+  (self->nextPC = ((int32_t)(arg) & (int32_t)(31)));
+  }
+  break;
+  case 1:
+  {
+  int32_t polarity = (!(!((int32_t)(arg) & (int32_t)(128))));
+  int32_t source = ((int32_t)(((int32_t)(arg) >> (5))) & (int32_t)(3));
+  int32_t index = ((int32_t)(arg) & (int32_t)(31));
+  switch (source) {
+  case 0:
+  StateMachine__RP2040_wait(self, WaitType_Pin, polarity, index, 0);
+  break;
+  case 1:
+  StateMachine__RP2040_wait(self, WaitType_Pin, polarity, ((index + StateMachine__RP2040_inBase_get(self)) % 32), 0);
+  break;
+  case 2:
+  {
+  StateMachine__RP2040_resolveIrqTarget(self, index, self->irqTargetScratch);
+  StateMachine__RP2040_wait(self, WaitType_IRQ, polarity, self->irqTargetScratch->irqBit, self->irqTargetScratch->targetPio);
+  break;
+  }
+  }
+  break;
+  }
+  case 2:
+  {
+  int32_t bitCount = ((int32_t)(arg) & (int32_t)(31));
+  int32_t sourceValue = StateMachine__RP2040_inSourceValue(self, ((int32_t)(arg) >> (5)));
+  if ((bitCount == 0)) {
+  (self->inputShiftReg = sourceValue);
+  (self->inputShiftCount = 32);
+  } else {
+  (sourceValue &= (((int32_t)((uint32_t)(1) << (((int32_t)(bitCount)) & 31))) - 1));
+  if (((int32_t)(self->shiftCtrl) & (int32_t)(SHIFTCTRL_IN_SHIFTDIR))) {
+  (self->inputShiftReg = (uint32_t)(self->inputShiftReg) >> (((int32_t)(bitCount)) & 31));
+  (self->inputShiftReg |= ((int32_t)((uint32_t)(sourceValue) << (((int32_t)((32 - bitCount))) & 31))));
+  } else {
+  (self->inputShiftReg = (int32_t)((uint32_t)(self->inputShiftReg) << (((int32_t)(bitCount)) & 31)));
+  (self->inputShiftReg |= sourceValue);
+  }
+  (self->inputShiftCount += bitCount);
+  if ((self->inputShiftCount > 32)) {
+  (self->inputShiftCount = 32);
+  }
+  }
+  if ((((int32_t)(self->shiftCtrl) & (int32_t)(SHIFTCTRL_AUTOPUSH)) && (self->inputShiftCount >= StateMachine__RP2040_pushThreshold_get(self)))) {
+  if ((!FIFO_full_get(self->rxFIFO))) {
+  FIFO_push(self->rxFIFO, self->inputShiftReg);
+  StateMachine__RP2040_updateDMARx(self);
+  RPPIO__RP2040_checkInterrupts(self->pio);
+  } else {
+  (self->pio->fdebug |= ((int32_t)((uint32_t)(FDEBUG_RXSTALL) << (((int32_t)(self->index)) & 31))));
+  StateMachine__RP2040_wait(self, WaitType_rxFIFO, false, self->inputShiftReg, 0);
+  }
+  (self->inputShiftCount = 0);
+  (self->inputShiftReg = 0);
+  }
+  break;
+  }
+  case 3:
+  {
+  if ((((int32_t)(self->shiftCtrl) & (int32_t)(SHIFTCTRL_AUTOPULL)) && (self->outputShiftCount >= StateMachine__RP2040_pullThreshold_get(self)))) {
+  (self->outputShiftCount = 0);
+  if ((!FIFO_empty_get(self->txFIFO))) {
+  (self->outputShiftReg = FIFO_pull(self->txFIFO));
+  StateMachine__RP2040_updateDMATx(self);
+  RPPIO__RP2040_checkInterrupts(self->pio);
+  } else {
+  (self->pio->fdebug |= ((int32_t)((uint32_t)(FDEBUG_TXSTALL) << (((int32_t)(self->index)) & 31))));
+  StateMachine__RP2040_wait(self, WaitType_Out, false, arg, 0);
+  }
+  }
+  if ((!self->waiting)) {
+  StateMachine__RP2040_outInstruction(self, arg);
+  }
+  break;
+  }
+  case 4:
+  {
+  int32_t block = (!(!((int32_t)(arg) & (int32_t)(((int32_t)((uint32_t)(1) << (5)))))));
+  int32_t ifFullOrEmpty = (!(!((int32_t)(arg) & (int32_t)(((int32_t)((uint32_t)(1) << (6)))))));
+  if (((int32_t)(arg) & (int32_t)(31))) {
+  break;
+  }
+  if (((int32_t)(arg) & (int32_t)(128))) {
+  if (((ifFullOrEmpty && ((int32_t)(self->shiftCtrl) & (int32_t)(SHIFTCTRL_AUTOPULL))) && (self->outputShiftCount < StateMachine__RP2040_pullThreshold_get(self)))) {
+  break;
+  }
+  if ((!FIFO_empty_get(self->txFIFO))) {
+  (self->outputShiftReg = FIFO_pull(self->txFIFO));
+  StateMachine__RP2040_updateDMATx(self);
+  RPPIO__RP2040_checkInterrupts(self->pio);
+  } else {
+  (self->pio->fdebug |= ((int32_t)((uint32_t)(FDEBUG_TXSTALL) << (((int32_t)(self->index)) & 31))));
+  if (block) {
+  StateMachine__RP2040_wait(self, WaitType_txFIFO, false, 0, 0);
+  } else {
+  (self->outputShiftReg = self->x);
+  }
+  }
+  (self->outputShiftCount = 0);
+  } else {
+  if (((ifFullOrEmpty && ((int32_t)(self->shiftCtrl) & (int32_t)(SHIFTCTRL_AUTOPUSH))) && (self->inputShiftCount < StateMachine__RP2040_pushThreshold_get(self)))) {
+  break;
+  }
+  if ((!FIFO_full_get(self->rxFIFO))) {
+  FIFO_push(self->rxFIFO, self->inputShiftReg);
+  StateMachine__RP2040_updateDMARx(self);
+  RPPIO__RP2040_checkInterrupts(self->pio);
+  } else {
+  (self->pio->fdebug |= ((int32_t)((uint32_t)(FDEBUG_RXSTALL) << (((int32_t)(self->index)) & 31))));
+  if (block) {
+  StateMachine__RP2040_wait(self, WaitType_rxFIFO, false, self->inputShiftReg, 0);
+  }
+  }
+  (self->inputShiftReg = 0);
+  (self->inputShiftCount = 0);
+  }
+  break;
+  }
+  case 5:
+  {
+  int32_t source = ((int32_t)(arg) & (int32_t)(7));
+  int32_t op = ((int32_t)(((int32_t)(arg) >> (3))) & (int32_t)(3));
+  int32_t destination = ((int32_t)(((int32_t)(arg) >> (5))) & (int32_t)(7));
+  int32_t value = StateMachine__RP2040_inSourceValue(self, source);
+  int32_t transformedValue = ((uint32_t)(StateMachine__RP2040_transformMovValue(self, value, op)) >> (0));
+  StateMachine__RP2040_setMovDestination(self, destination, transformedValue);
+  break;
+  }
+  case 6:
+  {
+  if (((int32_t)(arg) & (int32_t)(128))) {
+  break;
+  }
+  int32_t clear = (!(!((int32_t)(arg) & (int32_t)(64))));
+  int32_t wait = (!(!((int32_t)(arg) & (int32_t)(32))));
+  StateMachine__RP2040_resolveIrqTarget(self, ((int32_t)(arg) & (int32_t)(31)), self->irqTargetScratch);
+  IrqTarget__RP2040* __destruct_tmp_1 = self->irqTargetScratch;
+  RPPIO__RP2040* targetPio = __destruct_tmp_1->targetPio;
+  int32_t irqBit = __destruct_tmp_1->irqBit;
+  if (clear) {
+  (targetPio->irq &= (~((int32_t)((uint32_t)(1) << (((int32_t)(irqBit)) & 31)))));
+  RPPIO__RP2040_irqUpdated(targetPio);
+  } else {
+  (targetPio->irq |= ((int32_t)((uint32_t)(1) << (((int32_t)(irqBit)) & 31))));
+  RPPIO__RP2040_irqUpdated(targetPio);
+  if (wait) {
+  StateMachine__RP2040_wait(self, WaitType_IRQ, false, irqBit, targetPio);
+  }
+  }
+  break;
+  }
+  case 7:
+  {
+  int32_t data = ((int32_t)(arg) & (int32_t)(31));
+  int32_t destination = ((int32_t)(arg) >> (5));
+  switch (destination) {
+  case 0:
+  StateMachine__RP2040_setSetPins(self, data);
+  break;
+  case 1:
+  (self->x = data);
+  break;
+  case 2:
+  (self->y = data);
+  break;
+  case 4:
+  StateMachine__RP2040_setSetPinDirs(self, data);
+  break;
+  }
+  break;
+  }
+  }
+  StateMachine__RP2040* __destruct_tmp_2 = self;
+  int32_t sidesetCount = StateMachine__RP2040_sidesetCount_get(__destruct_tmp_2);
+  int32_t execCtrl = __destruct_tmp_2->execCtrl;
+  int32_t delaySideset = ((int32_t)(((int32_t)(opcode) >> (8))) & (int32_t)(31));
+  int32_t sideEn = (!(!((int32_t)(execCtrl) & (int32_t)(EXECCTRL_SIDE_EN))));
+  int32_t delay = ((int32_t)(delaySideset) & (int32_t)((((int32_t)((uint32_t)(1) << (((int32_t)((5 - sidesetCount))) & 31))) - 1)));
+  if ((sidesetCount && ((!sideEn) || ((int32_t)(delaySideset) & (int32_t)(16))))) {
+  int32_t sideset = ((int32_t)(delaySideset) >> (((int32_t)((5 - sidesetCount))) & 31));
+  StateMachine__RP2040_setSideset(self, sideset, (sideEn ? (sidesetCount - 1) : sidesetCount));
+  }
+  if (self->execValid) {
+  (self->execValid = false);
+  (self->remainingDelay += 1);
+  StateMachine__RP2040_executeInstruction(self, self->execOpcode);
+  } else {
+  if (self->waiting) {
+  if ((self->waitDelay < 0)) {
+  (self->waitDelay = delay);
+  }
+  StateMachine__RP2040_checkWait(self);
+  } else {
+  (self->remainingDelay += delay);
+  }
+  }
+}
+
+static void StateMachine__RP2040_resolveIrqTarget(StateMachine__RP2040* self, int32_t irqField, IrqTarget__RP2040* out) {
+  RPPIO__RP2040* pio = self->pio;
+  if (pio->isRp2040) {
+  int32_t rel = (!(!((int32_t)(irqField) & (int32_t)(16))));
+  int32_t irqBit = (rel ? ((int32_t)(((int32_t)(irqField) & (int32_t)(4))) | (int32_t)(((int32_t)((((int32_t)(irqField) & (int32_t)(3)) + self->index)) & (int32_t)(3)))) : ((int32_t)(irqField) & (int32_t)(7)));
+  (out->targetPio = pio);
+  (out->irqBit = irqBit);
+  return;
+  }
+  int32_t idxMode = ((int32_t)(((int32_t)(irqField) >> (3))) & (int32_t)(3));
+  int32_t irqNum = ((int32_t)(irqField) & (int32_t)(7));
+  switch (idxMode) {
+  case 0:
+  (out->targetPio = pio);
+  (out->irqBit = irqNum);
+  return;
+  case 1:
+  {
+  int32_t pioCount = 2;
+  RPPIO__RP2040* prevPio = self->rpchip->pio[(((pio->index + pioCount) - 1) % pioCount)];
+  (out->targetPio = prevPio);
+  (out->irqBit = irqNum);
+  return;
+  }
+  case 2:
+  (out->targetPio = pio);
+  (out->irqBit = ((int32_t)(((int32_t)(irqNum) & (int32_t)(4))) | (int32_t)(((int32_t)((irqNum + self->index)) & (int32_t)(3)))));
+  return;
+  case 3:
+  {
+  RPPIO__RP2040* nextPio = self->rpchip->pio[((pio->index + 1) % 2)];
+  (out->targetPio = nextPio);
+  (out->irqBit = irqNum);
+  return;
+  }
+  default:
+  (out->targetPio = pio);
+  (out->irqBit = irqNum);
+  }
+}
+
+static void StateMachine__RP2040_wait(StateMachine__RP2040* self, WaitType type, bool polarity, int32_t index, RPPIO__RP2040* targetPio) {
+  (self->waiting = true);
+  (self->waitType = type);
+  (self->waitPolarity = polarity);
+  (self->waitIndex = index);
+  (self->waitDelay = (-1));
+  (self->waitTargetPio = (targetPio ? targetPio : self->pio));
+}
+
+static void StateMachine__RP2040_step(StateMachine__RP2040* self) {
+  if (self->_enabled) {
+  StateMachine__RP2040_stepUnchecked(self);
+  }
+}
+
+static void StateMachine__RP2040_stepUnchecked(StateMachine__RP2040* self) {
+  if ((self->clockDiv != 256)) {
+  (self->curClockPhase += 256);
+  if ((self->curClockPhase < self->clockDiv)) {
+  return;
+  }
+  (self->curClockPhase -= self->clockDiv);
+  }
+  (self->cycles++);
+  if ((self->remainingDelay > 0)) {
+  (self->remainingDelay--);
+  return;
+  }
+  if (self->waiting) {
+  StateMachine__RP2040_checkWait(self);
+  if (self->waiting) {
+  (self->cycles++);
+  return;
+  }
+  if ((self->remainingDelay > 0)) {
+  (self->remainingDelay--);
+  return;
+  }
+  }
+  (self->pc = ((int32_t)(self->nextPC) & (int32_t)(31)));
+  (self->nextPC = ((self->pc == StateMachine__RP2040_wrapTop_get(self)) ? StateMachine__RP2040_wrapBottom_get(self) : (self->pc + 1)));
+  StateMachine__RP2040_executeInstruction(self, self->pio->instructions[self->pc]);
+}
+
+static void StateMachine__RP2040_setSetPinDirs(StateMachine__RP2040* self, int32_t value) {
+  RPPIO__RP2040_pinDirectionsChanged(self->pio, value, StateMachine__RP2040_setBase_get(self), StateMachine__RP2040_setCount_get(self));
+}
+
+static void StateMachine__RP2040_setSetPins(StateMachine__RP2040* self, int32_t value) {
+  RPPIO__RP2040_pinValuesChanged(self->pio, value, StateMachine__RP2040_setBase_get(self), StateMachine__RP2040_setCount_get(self));
+}
+
+static void StateMachine__RP2040_setSideset(StateMachine__RP2040* self, int32_t value, int32_t count) {
+  if (((int32_t)(self->execCtrl) & (int32_t)(EXECCTRL_SIDE_PINDIR))) {
+  RPPIO__RP2040_pinDirectionsChanged(self->pio, value, StateMachine__RP2040_sidesetBase_get(self), count);
+  } else {
+  RPPIO__RP2040_pinValuesChanged(self->pio, value, StateMachine__RP2040_sidesetBase_get(self), count);
+  }
+}
+
+static int32_t StateMachine__RP2040_transformMovValue(StateMachine__RP2040* self, int32_t value, int32_t op) {
+  switch (op) {
+  case 0:
+  return value;
+  case 1:
+  return (~value);
+  case 2:
+  return bitReverse(value);
+  case 3:
+  default:
+  return value;
+  }
+  return (int32_t){0};
+}
+
+static void StateMachine__RP2040_setMovDestination(StateMachine__RP2040* self, int32_t destination, int32_t value) {
+  switch (destination) {
+  case 0:
+  StateMachine__RP2040_setOutPins(self, value);
+  break;
+  case 1:
+  (self->x = value);
+  break;
+  case 2:
+  (self->y = value);
+  break;
+  case 3:
+  break;
+  case 4:
+  (self->execOpcode = value);
+  (self->execValid = true);
+  break;
+  case 5:
+  (self->nextPC = ((int32_t)(value) & (int32_t)(31)));
+  break;
+  case 6:
+  (self->inputShiftReg = value);
+  (self->inputShiftCount = 0);
+  break;
+  case 7:
+  (self->outputShiftReg = value);
+  (self->outputShiftCount = 0);
+  break;
+  }
+}
+
+static int32_t StateMachine__RP2040_readUint32(StateMachine__RP2040* self, int32_t offset) {
+  switch ((offset + SM0_CLKDIV)) {
+  case SM0_CLKDIV:
+  return ((int32_t)(((int32_t)((uint32_t)((self->clockDiv / 256)) << (16)))) | (int32_t)(((uint32_t)(((int32_t)((uint32_t)(((int32_t)(self->clockDiv) & (int32_t)(255))) << (8)))) >> (0))));
+  case SM0_EXECCTRL:
+  return self->execCtrl;
+  case SM0_SHIFTCTRL:
+  return self->shiftCtrl;
+  case SM0_ADDR:
+  return self->pc;
+  case SM0_INSTR:
+  return self->pio->instructions[self->pc];
+  case SM0_PINCTRL:
+  return self->pinCtrl;
+  }
+  BasePeripheral__RP2040_error(&(self->pio)->base, fmtStr("Read from invalid state machine register: %d", offset));
+  return 0;
+}
+
+static void StateMachine__RP2040_writeUint32(StateMachine__RP2040* self, int32_t offset, int32_t value) {
+  switch ((offset + SM0_CLKDIV)) {
+  case SM0_CLKDIV:
+  (self->clockDiv = ((((uint32_t)(value) >> (16)) * 256) + ((int32_t)(((uint32_t)(value) >> (8))) & (int32_t)(255))));
+  break;
+  case SM0_EXECCTRL:
+  (self->execCtrl = ((uint32_t)(((int32_t)(((int32_t)(value) & (int32_t)(2147483647))) | (int32_t)(((int32_t)(self->execCtrl) & (int32_t)(2147483648u))))) >> (0)));
+  break;
+  case SM0_SHIFTCTRL:
+  if (((int32_t)(((uint32_t)(value) >> (30))) ^ (int32_t)(((uint32_t)(self->shiftCtrl) >> (30))))) {
+  if (((int32_t)(value) & (int32_t)(SHIFTCTRL_FJOIN_RX))) {
+  (self->rxFIFO = FIFO_new(8));
+  (self->txFIFO = FIFO_new(0));
+  } else {
+  if (((int32_t)(value) & (int32_t)(SHIFTCTRL_FJOIN_TX))) {
+  (self->rxFIFO = FIFO_new(0));
+  (self->txFIFO = FIFO_new(8));
+  } else {
+  (self->rxFIFO = FIFO_new(4));
+  (self->txFIFO = FIFO_new(4));
+  }
+  }
+  StateMachine__RP2040_updateDMATx(self);
+  StateMachine__RP2040_updateDMARx(self);
+  }
+  (self->shiftCtrl = value);
+  break;
+  case SM0_ADDR:
+  break;
+  case SM0_INSTR:
+  StateMachine__RP2040_executeInstruction(self, ((int32_t)(value) & (int32_t)(65535)));
+  if (self->waiting) {
+  (self->execCtrl |= EXECCTRL_EXEC_STALLED);
+  }
+  break;
+  case SM0_PINCTRL:
+  (self->pinCtrl = value);
+  break;
+  default:
+  BasePeripheral__RP2040_error(&(self->pio)->base, fmtStr("Write to invalid state machine register: %d", offset));
+  }
+}
+
+static void StateMachine__RP2040_updateFifoStat(StateMachine__RP2040* self) {
+  int32_t result = ((int32_t)(((int32_t)(((int32_t)((FIFO_empty_get(self->txFIFO) ? FSTAT_TXEMPTY : 0)) | (int32_t)((FIFO_full_get(self->txFIFO) ? FSTAT_TXFULL : 0)))) | (int32_t)((FIFO_empty_get(self->rxFIFO) ? FSTAT_RXEMPTY : 0)))) | (int32_t)((FIFO_full_get(self->rxFIFO) ? FSTAT_RXFULL : 0)));
+  (self->fifoStat = ((int32_t)((uint32_t)(result) << (((int32_t)(self->index)) & 31))));
+}
+
+static void StateMachine__RP2040_restart(StateMachine__RP2040* self) {
+  (self->cycles = 0);
+  (self->curClockPhase = 0);
+  (self->remainingDelay = 0);
+  (self->inputShiftCount = 0);
+  (self->outputShiftCount = 32);
+  (self->inputShiftReg = 0);
+  (self->waiting = false);
+}
+
+static void StateMachine__RP2040_clkDivRestart(StateMachine__RP2040* self) {
+  (self->curClockPhase = 0);
+}
+
+static void StateMachine__RP2040_checkWait(StateMachine__RP2040* self) {
+  if ((!self->waiting)) {
+  return;
+  }
+  switch (self->waitType) {
+  case WaitType_IRQ:
+  {
+  RPPIO__RP2040* targetPio = self->waitTargetPio;
+  int32_t irqValue = (!(!((int32_t)(targetPio->irq) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(self->waitIndex)) & 31)))))));
+  if ((irqValue == self->waitPolarity)) {
+  (self->waiting = false);
+  if (irqValue) {
+  (targetPio->irq &= (~((int32_t)((uint32_t)(1) << (((int32_t)(self->waitIndex)) & 31)))));
+  }
+  if ((targetPio != self->pio)) {
+  RPPIO__RP2040_irqUpdated(targetPio);
+  }
+  }
+  break;
+  }
+  case WaitType_Pin:
+  {
+  if (((self->waitIndex < 30) && (GPIOPin__RP2040_inputValue_get(self->rpchip->gpio[(self->waitIndex + self->pio->gpiobase)]) == self->waitPolarity))) {
+  (self->waiting = false);
+  }
+  break;
+  }
+  case WaitType_rxFIFO:
+  {
+  if ((!FIFO_full_get(self->rxFIFO))) {
+  FIFO_push(self->rxFIFO, self->waitIndex);
+  (self->waiting = false);
+  StateMachine__RP2040_updateDMARx(self);
+  RPPIO__RP2040_checkInterrupts(self->pio);
+  }
+  break;
+  }
+  case WaitType_txFIFO:
+  {
+  if ((!FIFO_empty_get(self->txFIFO))) {
+  (self->outputShiftReg = FIFO_pull(self->txFIFO));
+  (self->waiting = false);
+  StateMachine__RP2040_updateDMATx(self);
+  RPPIO__RP2040_checkInterrupts(self->pio);
+  }
+  break;
+  }
+  case WaitType_Out:
+  {
+  if ((!FIFO_empty_get(self->txFIFO))) {
+  (self->outputShiftReg = FIFO_pull(self->txFIFO));
+  StateMachine__RP2040_outInstruction(self, self->waitIndex);
+  (self->waiting = false);
+  StateMachine__RP2040_updateDMATx(self);
+  RPPIO__RP2040_checkInterrupts(self->pio);
+  }
+  break;
+  }
+  }
+  if ((!self->waiting)) {
+  (self->remainingDelay += self->waitDelay);
+  (self->execCtrl &= (~EXECCTRL_EXEC_STALLED));
+  }
+}
+
+static RPPIO__RP2040* RPPIO__RP2040_new(RP2040* rpchip, const char* name, int32_t firstIrq, int32_t index, int32_t dreqRx_base, int32_t dreqTx_base) {
+  RPPIO__RP2040* self = calloc(1, sizeof(RPPIO__RP2040));
+  {
+    BasePeripheral__RP2040* __super_29 = BasePeripheral__RP2040_new(rpchip, name);
+    self->base = *__super_29;
+    free(__super_29);
+  }
+  (&(self)->base)->__vtable_Peripheral = &RPPIO__RP2040_Peripheral_vtable;
+  self->firstIrq = firstIrq;
+  self->index = index;
+  self->dreqRx_base = dreqRx_base;
+  self->dreqTx_base = dreqTx_base;
+  self->machines[0] = StateMachine__RP2040_new(self->base.rpchip, self, 0);
+  self->machines[1] = StateMachine__RP2040_new(self->base.rpchip, self, 1);
+  self->machines[2] = StateMachine__RP2040_new(self->base.rpchip, self, 2);
+  self->machines[3] = StateMachine__RP2040_new(self->base.rpchip, self, 3);
+  self->machinesRunning = 0;
+  self->fdebug = 0;
+  self->inputSyncBypass = 0;
+  self->irq = 0;
+  self->isRp2040 = (strcmp(self->base.rpchip->identifier, "rp2040") == 0);
+  self->gpiobase = 0;
+  self->pinValues = 0;
+  self->pinDirections = 0;
+  self->oldPinValues = 0;
+  self->oldPinDirections = 0;
+  self->runTimer = 0;
+  self->irq_reg_offset = 0;
+  self->irq0IntEnable = 0;
+  self->irq0IntForce = 0;
+  self->irq1IntEnable = 0;
+  self->irq1IntForce = 0;
+  do { const char* __switch_tmp_30 = rpchip->identifier;
+  if (strcmp(__switch_tmp_30, "rp2040") == 0) {
+  break;
+  }
+  else if (strcmp(__switch_tmp_30, "rp2350") == 0) {
+  (self->irq_reg_offset = (RP2350_INTR - INTR__pio));
+  break;
+  }
+  else {
+  fprintf(stderr, "Error: %s\n", "Unknown chip id");
+  abort();
+  }
+  } while (0);
+  return self;
+}
+
+static int32_t RPPIO__RP2040_stopped_get(RPPIO__RP2040* self) {
+  return (!self->machinesRunning);
+}
+
+static int32_t RPPIO__RP2040_intRaw_get(RPPIO__RP2040* self) {
+  return ((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)((uint32_t)(((int32_t)(self->irq) & (int32_t)(15))) << (8)))) | (int32_t)(((!FIFO_full_get(self->machines[3]->txFIFO)) ? 128 : 0)))) | (int32_t)(((!FIFO_full_get(self->machines[2]->txFIFO)) ? 64 : 0)))) | (int32_t)(((!FIFO_full_get(self->machines[1]->txFIFO)) ? 32 : 0)))) | (int32_t)(((!FIFO_full_get(self->machines[0]->txFIFO)) ? 16 : 0)))) | (int32_t)(((!FIFO_empty_get(self->machines[3]->rxFIFO)) ? 8 : 0)))) | (int32_t)(((!FIFO_empty_get(self->machines[2]->rxFIFO)) ? 4 : 0)))) | (int32_t)(((!FIFO_empty_get(self->machines[1]->rxFIFO)) ? 2 : 0)))) | (int32_t)(((!FIFO_empty_get(self->machines[0]->rxFIFO)) ? 1 : 0)));
+}
+
+static int32_t RPPIO__RP2040_irq0IntStatus_get(RPPIO__RP2040* self) {
+  return ((int32_t)(((int32_t)(RPPIO__RP2040_intRaw_get(self)) & (int32_t)(self->irq0IntEnable))) | (int32_t)(self->irq0IntForce));
+}
+
+static int32_t RPPIO__RP2040_irq1IntStatus_get(RPPIO__RP2040* self) {
+  return ((int32_t)(((int32_t)(RPPIO__RP2040_intRaw_get(self)) & (int32_t)(self->irq1IntEnable))) | (int32_t)(self->irq1IntForce));
+}
+
+static int32_t RPPIO__RP2040_readUint32(RPPIO__RP2040* self, int32_t offset) {
+  if (((offset >= SM0_CLKDIV) && (offset <= SM0_PINCTRL))) {
+  return StateMachine__RP2040_readUint32(self->machines[0], (offset - SM0_CLKDIV));
+  }
+  if (((offset >= SM1_CLKDIV) && (offset <= SM1_PINCTRL))) {
+  return StateMachine__RP2040_readUint32(self->machines[1], (offset - SM1_CLKDIV));
+  }
+  if (((offset >= SM2_CLKDIV) && (offset <= SM2_PINCTRL))) {
+  return StateMachine__RP2040_readUint32(self->machines[2], (offset - SM2_CLKDIV));
+  }
+  if (((offset >= SM3_CLKDIV) && (offset <= SM3_PINCTRL))) {
+  return StateMachine__RP2040_readUint32(self->machines[3], (offset - SM3_CLKDIV));
+  }
+  {
+  int32_t __dyncase_31_disc = offset;
+  if (__dyncase_31_disc == ((INTR__pio + self->irq_reg_offset))) goto __dyncase_31_14;
+  if (__dyncase_31_disc == ((IRQ0_INTE + self->irq_reg_offset))) goto __dyncase_31_15;
+  if (__dyncase_31_disc == ((IRQ0_INTF + self->irq_reg_offset))) goto __dyncase_31_16;
+  if (__dyncase_31_disc == ((IRQ0_INTS + self->irq_reg_offset))) goto __dyncase_31_17;
+  if (__dyncase_31_disc == ((IRQ1_INTE + self->irq_reg_offset))) goto __dyncase_31_18;
+  if (__dyncase_31_disc == ((IRQ1_INTF + self->irq_reg_offset))) goto __dyncase_31_19;
+  if (__dyncase_31_disc == ((IRQ1_INTS + self->irq_reg_offset))) goto __dyncase_31_20;
+  switch (__dyncase_31_disc) {
+  case CTRL:
+  return self->machinesRunning;
+  case FSTAT:
+  return ((int32_t)(((int32_t)(((int32_t)(self->machines[0]->fifoStat) | (int32_t)(self->machines[1]->fifoStat))) | (int32_t)(self->machines[2]->fifoStat))) | (int32_t)(self->machines[3]->fifoStat));
+  case FDEBUG:
+  return self->fdebug;
+  case FLEVEL:
+  return ((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(FIFO_itemCount_get(self->machines[0]->txFIFO)) & (int32_t)(15))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(FIFO_itemCount_get(self->machines[0]->rxFIFO)) & (int32_t)(15))) << (4)))))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(FIFO_itemCount_get(self->machines[1]->txFIFO)) & (int32_t)(15))) << (8)))))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(FIFO_itemCount_get(self->machines[1]->rxFIFO)) & (int32_t)(15))) << (12)))))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(FIFO_itemCount_get(self->machines[2]->txFIFO)) & (int32_t)(15))) << (16)))))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(FIFO_itemCount_get(self->machines[2]->rxFIFO)) & (int32_t)(15))) << (20)))))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(FIFO_itemCount_get(self->machines[3]->txFIFO)) & (int32_t)(15))) << (24)))))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(FIFO_itemCount_get(self->machines[3]->rxFIFO)) & (int32_t)(15))) << (28)))));
+  case RXF0:
+  return StateMachine__RP2040_readFIFO(self->machines[0]);
+  case RXF1:
+  return StateMachine__RP2040_readFIFO(self->machines[1]);
+  case RXF2:
+  return StateMachine__RP2040_readFIFO(self->machines[2]);
+  case RXF3:
+  return StateMachine__RP2040_readFIFO(self->machines[3]);
+  case IRQ_REG:
+  return self->irq;
+  case IRQ_FORCE:
+  return 0;
+  case INPUT_SYNC_BYPASS:
+  return self->inputSyncBypass;
+  case DBG_PADOUT:
+  return self->pinValues;
+  case DBG_PADOE:
+  return self->pinDirections;
+  case DBG_CFGINFO:
+  return 2098180;
+  __dyncase_31_14: /* dynamic case (INTR__pio + self->irq_reg_offset) [src/peripherals/pio.ts:2434: case INTR + this.irq_reg_offset:] */;
+  return RPPIO__RP2040_intRaw_get(self);
+  __dyncase_31_15: /* dynamic case (IRQ0_INTE + self->irq_reg_offset) [src/peripherals/pio.ts:2436: case IRQ0_INTE + this.irq_reg_offset:] */;
+  return self->irq0IntEnable;
+  __dyncase_31_16: /* dynamic case (IRQ0_INTF + self->irq_reg_offset) [src/peripherals/pio.ts:2438: case IRQ0_INTF + this.irq_reg_offset:] */;
+  return self->irq0IntForce;
+  __dyncase_31_17: /* dynamic case (IRQ0_INTS + self->irq_reg_offset) [src/peripherals/pio.ts:2440: case IRQ0_INTS + this.irq_reg_offset:] */;
+  return RPPIO__RP2040_irq0IntStatus_get(self);
+  __dyncase_31_18: /* dynamic case (IRQ1_INTE + self->irq_reg_offset) [src/peripherals/pio.ts:2442: case IRQ1_INTE + this.irq_reg_offset:] */;
+  return self->irq1IntEnable;
+  __dyncase_31_19: /* dynamic case (IRQ1_INTF + self->irq_reg_offset) [src/peripherals/pio.ts:2444: case IRQ1_INTF + this.irq_reg_offset:] */;
+  return self->irq1IntForce;
+  __dyncase_31_20: /* dynamic case (IRQ1_INTS + self->irq_reg_offset) [src/peripherals/pio.ts:2446: case IRQ1_INTS + this.irq_reg_offset:] */;
+  return RPPIO__RP2040_irq1IntStatus_get(self);
+  case RP2350_GPIOBASE:
+  if ((!self->isRp2040)) {
+  return self->gpiobase;
+  }
+  }
+  }
+  return BasePeripheral__RP2040_readUint32(&self->base, offset);
+}
+
+static void RPPIO__RP2040_writeUint32(RPPIO__RP2040* self, int32_t offset, int32_t value) {
+  if (((offset >= INSTR_MEM0) && (offset <= INSTR_MEM31))) {
+  int32_t index = ((int32_t)((offset - INSTR_MEM0)) >> (2));
+  (self->instructions[index] = ((int32_t)(value) & (int32_t)(65535)));
+  return;
+  }
+  if (((offset >= SM0_CLKDIV) && (offset <= SM0_PINCTRL))) {
+  StateMachine__RP2040_writeUint32(self->machines[0], (offset - SM0_CLKDIV), value);
+  return;
+  }
+  if (((offset >= SM1_CLKDIV) && (offset <= SM1_PINCTRL))) {
+  StateMachine__RP2040_writeUint32(self->machines[1], (offset - SM1_CLKDIV), value);
+  return;
+  }
+  if (((offset >= SM2_CLKDIV) && (offset <= SM2_PINCTRL))) {
+  StateMachine__RP2040_writeUint32(self->machines[2], (offset - SM2_CLKDIV), value);
+  return;
+  }
+  if (((offset >= SM3_CLKDIV) && (offset <= SM3_PINCTRL))) {
+  StateMachine__RP2040_writeUint32(self->machines[3], (offset - SM3_CLKDIV), value);
+  return;
+  }
+  {
+  int32_t __dyncase_32_disc = offset;
+  if (__dyncase_32_disc == ((IRQ0_INTE + self->irq_reg_offset))) goto __dyncase_32_9;
+  if (__dyncase_32_disc == ((IRQ0_INTF + self->irq_reg_offset))) goto __dyncase_32_10;
+  if (__dyncase_32_disc == ((IRQ1_INTE + self->irq_reg_offset))) goto __dyncase_32_11;
+  if (__dyncase_32_disc == ((IRQ1_INTF + self->irq_reg_offset))) goto __dyncase_32_12;
+  switch (__dyncase_32_disc) {
+  case CTRL:
+  {
+  for (
+int32_t index = 0
+; (index < 4); (index++)) {
+  StateMachine__RP2040_enabled_set(self->machines[index], (((int32_t)(value) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(index)) & 31))))) ? true : false));
+  if (((int32_t)(value) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)((4 + index))) & 31)))))) {
+  StateMachine__RP2040_restart(self->machines[index]);
+  }
+  if (((int32_t)(value) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)((8 + index))) & 31)))))) {
+  StateMachine__RP2040_clkDivRestart(self->machines[index]);
+  }
+  }
+  if ((!self->isRp2040)) {
+  int32_t enableSm = (!(!((int32_t)(value) & (int32_t)(((int32_t)((uint32_t)(1) << (24)))))));
+  int32_t disableSm = (!(!((int32_t)(value) & (int32_t)(((int32_t)((uint32_t)(1) << (25)))))));
+  int32_t clkDivRestart = (!(!((int32_t)(value) & (int32_t)(((int32_t)((uint32_t)(1) << (26)))))));
+  int32_t pioCount = 2;
+  RPPIO__RP2040* affectedPio = self->base.rpchip->pio[(((self->index + pioCount) - 1) % pioCount)];
+  int32_t affectedMachines = ((uint32_t)(value) >> (16));
+  for (
+int32_t prevNext = 0
+; (prevNext <= 1); (prevNext++)) {
+  for (
+int32_t index = 0
+; (index < 4); (index++)) {
+  if (((int32_t)(affectedMachines) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(index)) & 31)))))) {
+  if (enableSm) {
+  StateMachine__RP2040_enabled_set(affectedPio->machines[index], true);
+  }
+  if (disableSm) {
+  StateMachine__RP2040_enabled_set(affectedPio->machines[index], false);
+  }
+  if (clkDivRestart) {
+  StateMachine__RP2040_clkDivRestart(affectedPio->machines[index]);
+  }
+  }
+  }
+  (affectedPio = self->base.rpchip->pio[((self->index + 1) % pioCount)]);
+  (affectedMachines = ((uint32_t)(value) >> (20)));
+  }
+  }
+  break;
+  }
+  case FDEBUG:
+  (self->fdebug &= (~self->base.rawWriteValue));
+  break;
+  case TXF0:
+  StateMachine__RP2040_writeFIFO(self->machines[0], value);
+  break;
+  case TXF1:
+  StateMachine__RP2040_writeFIFO(self->machines[1], value);
+  break;
+  case TXF2:
+  StateMachine__RP2040_writeFIFO(self->machines[2], value);
+  break;
+  case TXF3:
+  StateMachine__RP2040_writeFIFO(self->machines[3], value);
+  break;
+  case IRQ_REG:
+  (self->irq &= (~self->base.rawWriteValue));
+  RPPIO__RP2040_irqUpdated(self);
+  break;
+  case INPUT_SYNC_BYPASS:
+  (self->inputSyncBypass = value);
+  break;
+  case IRQ_FORCE:
+  (self->irq |= value);
+  RPPIO__RP2040_irqUpdated(self);
+  break;
+  __dyncase_32_9: /* dynamic case (IRQ0_INTE + self->irq_reg_offset) [src/peripherals/pio.ts:2540: case IRQ0_INTE + this.irq_reg_offset:] */;
+  (self->irq0IntEnable = ((int32_t)(value) & (int32_t)(4095)));
+  RPPIO__RP2040_checkInterrupts(self);
+  break;
+  __dyncase_32_10: /* dynamic case (IRQ0_INTF + self->irq_reg_offset) [src/peripherals/pio.ts:2544: case IRQ0_INTF + this.irq_reg_offset:] */;
+  (self->irq0IntForce = ((int32_t)(value) & (int32_t)(4095)));
+  RPPIO__RP2040_checkInterrupts(self);
+  break;
+  __dyncase_32_11: /* dynamic case (IRQ1_INTE + self->irq_reg_offset) [src/peripherals/pio.ts:2548: case IRQ1_INTE + this.irq_reg_offset:] */;
+  (self->irq1IntEnable = ((int32_t)(value) & (int32_t)(4095)));
+  RPPIO__RP2040_checkInterrupts(self);
+  break;
+  __dyncase_32_12: /* dynamic case (IRQ1_INTF + self->irq_reg_offset) [src/peripherals/pio.ts:2552: case IRQ1_INTF + this.irq_reg_offset:] */;
+  (self->irq1IntForce = ((int32_t)(value) & (int32_t)(4095)));
+  RPPIO__RP2040_checkInterrupts(self);
+  break;
+  case RP2350_GPIOBASE:
+  if ((strcmp(self->base.rpchip->identifier, "rp2040") != 0)) {
+  (self->gpiobase = ((int32_t)(value) & (int32_t)(16)));
+  } else {
+  BasePeripheral__RP2040_writeUint32(&self->base, offset, value);
+  }
+  break;
+  default:
+  BasePeripheral__RP2040_writeUint32(&self->base, offset, value);
+  }
+  }
+}
+
+static int32_t RPPIO__RP2040_getPinValue(RPPIO__RP2040* self, int32_t chip_gpio_index) {
+  int32_t index = (chip_gpio_index - self->gpiobase);
+  if (((index < 0) || (index > 31))) {
+  return false;
+  }
+  return (!(!((int32_t)(self->pinValues) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(index)) & 31)))))));
+}
+
+static int32_t RPPIO__RP2040_getPinOutputEnabled(RPPIO__RP2040* self, int32_t chip_gpio_index) {
+  int32_t index = (chip_gpio_index - self->gpiobase);
+  if (((index < 0) || (index > 31))) {
+  return false;
+  }
+  return (!(!((int32_t)(self->pinDirections) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(index)) & 31)))))));
+}
+
+static void RPPIO__RP2040_pinValuesChanged(RPPIO__RP2040* self, int32_t value, int32_t firstPin, int32_t count) {
+  int32_t mask = ((count > 31) ? 4294967295u : ((int32_t)((uint32_t)((((int32_t)((uint32_t)(1) << (((int32_t)(count)) & 31))) - 1)) << (((int32_t)(firstPin)) & 31))));
+  int32_t newValue = ((int32_t)(((int32_t)(((int32_t)(self->pinValues) & (int32_t)((~mask)))) | (int32_t)(((int32_t)(((int32_t)((uint32_t)(value) << (((int32_t)(firstPin)) & 31)))) & (int32_t)(mask))))) & (int32_t)((self->isRp2040 ? 1073741823 : 4294967295u)));
+  (self->pinValues = newValue);
+}
+
+static void RPPIO__RP2040_pinDirectionsChanged(RPPIO__RP2040* self, int32_t value, int32_t firstPin, int32_t count) {
+  int32_t mask = ((count > 31) ? 4294967295u : ((int32_t)((uint32_t)((((int32_t)((uint32_t)(1) << (((int32_t)(count)) & 31))) - 1)) << (((int32_t)(firstPin)) & 31))));
+  int32_t newValue = ((int32_t)(((int32_t)(((int32_t)(self->pinDirections) & (int32_t)((~mask)))) | (int32_t)(((int32_t)(((int32_t)((uint32_t)(value) << (((int32_t)(firstPin)) & 31)))) & (int32_t)(mask))))) & (int32_t)((self->isRp2040 ? 1073741823 : 4294967295u)));
+  (self->pinDirections = newValue);
+}
+
+static void RPPIO__RP2040_checkInterrupts(RPPIO__RP2040* self) {
+  RPPIO__RP2040* __destruct_tmp_1 = self;
+  int32_t firstIrq = __destruct_tmp_1->firstIrq;
+  RP2040_setInterrupt(self->base.rpchip, firstIrq, (!(!RPPIO__RP2040_irq0IntStatus_get(self))));
+  RP2040_setInterrupt(self->base.rpchip, (firstIrq + 1), (!(!RPPIO__RP2040_irq1IntStatus_get(self))));
+}
+
+static void RPPIO__RP2040_irqUpdated(RPPIO__RP2040* self) {
+  {
+    int32_t __forof_n = 4;
+    for (int32_t __forof_i = 0; __forof_i < __forof_n; __forof_i++) {
+      StateMachine__RP2040* machine = self->machines[__forof_i];
+  StateMachine__RP2040_checkWait(machine);
+    }
+  }
+  RPPIO__RP2040_checkInterrupts(self);
+}
+
+static void RPPIO__RP2040_checkChangedPins(RPPIO__RP2040* self) {
+  int32_t changedPins = ((int32_t)(((int32_t)(self->oldPinDirections) ^ (int32_t)(self->pinDirections))) | (int32_t)(((int32_t)(self->oldPinValues) ^ (int32_t)(self->pinValues))));
+  if (changedPins) {
+  (self->oldPinDirections = self->pinDirections);
+  (self->oldPinValues = self->pinValues);
+  RP2040* __destruct_tmp_1 = self->base.rpchip;
+  GPIOPin__RP2040** gpio = __destruct_tmp_1->gpio;
+  int32_t remaining = changedPins;
+  while (remaining) {
+  int32_t lowest = ((int32_t)(remaining) & (int32_t)((-remaining)));
+  GPIOPin__RP2040_checkForUpdates(gpio[((31 - clz32(lowest)) + self->gpiobase)]);
+  (remaining ^= lowest);
+  }
+  }
+}
+
+static void RPPIO__RP2040_step(RPPIO__RP2040* self) {
+  if (RPPIO__RP2040_stopped_get(self)) {
+  return;
+  }
+  for (
+int32_t i = 0
+; (i < 4); (i++)) {
+  if (((int32_t)(self->machinesRunning) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(i)) & 31)))))) {
+  StateMachine__RP2040_stepUnchecked(self->machines[i]);
+  }
+  }
+  RPPIO__RP2040_checkChangedPins(self);
+}
+
+static void RPPIO__RP2040_stop(RPPIO__RP2040* self) {
+  {
+    int32_t __forof_n = 4;
+    for (int32_t __forof_i = 0; __forof_i < __forof_n; __forof_i++) {
+      StateMachine__RP2040* machine = self->machines[__forof_i];
+  StateMachine__RP2040_enabled_set(machine, false);
+    }
+  }
+  if (self->runTimer) {
+  /* TODO: clearTimeout() [src/peripherals/pio.ts:2651: clearTimeout(this.runTimer);] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "clearTimeout() [src/peripherals/pio.ts:2651: clearTimeout(this.runTimer);]"); abort(); 0; }));
+  (self->runTimer = 0);
+  }
+}
+
 // ─── pll_rp2350.ts ───
 enum { FREF = (12000000) };
-static RP2350PLL* RP2350PLL_new(RP2350* rp2040, const char* name) {
+static RP2350PLL* RP2350PLL_new(RP2350* rpchip, const char* name) {
   RP2350PLL* self = calloc(1, sizeof(RP2350PLL));
   {
-    BasePeripheral* __base = BasePeripheral_new(rp2040, name);
+    BasePeripheral* __base = BasePeripheral_new(rpchip, name);
     self->base = *__base;
     free(__base);
   }
@@ -10999,7 +16153,7 @@ static void RP2350PLL_writeUint32(RP2350PLL* self, int32_t offset, int32_t value
   int32_t postdiv1 = ((int32_t)(((int32_t)(self->reg[12]) >> (16))) & (int32_t)(7));
   (self->foutpostdiv = ((double)((((double)(FREF) / (double)(refdiv)) * fbdiv)) / (double)((postdiv1 * postdiv2))));
   if (handled) {
-  /* TODO: log [src/peripherals/pll_rp2350.ts:35: this.rp2040.logger.info(] */ 0;
+  /* TODO: log [src/peripherals/pll_rp2350.ts:35: this.rpchip.logger.info(] */ 0;
   return;
   }
   return BasePeripheral_writeUint32(&self->base, offset, value);
@@ -11020,10 +16174,10 @@ enum { TIMER_CLEAR = (4) }; /* ((int32_t)((uint32_t)(1) << (2))) */
 enum { TIMER_USING_LPOSC = (131072) }; /* ((int32_t)((uint32_t)(1) << (17))) */
 static const uint64_t TWO32 = 4294967296ull;
 enum { REG_WORDS = (64) }; /* ((int32_t)(256) >> (2)) */
-static RP2350POWMAN* RP2350POWMAN_new(RP2350* rp2040, const char* name) {
+static RP2350POWMAN* RP2350POWMAN_new(RP2350* rpchip, const char* name) {
   RP2350POWMAN* self = calloc(1, sizeof(RP2350POWMAN));
   {
-    BasePeripheral* __base = BasePeripheral_new(rp2040, name);
+    BasePeripheral* __base = BasePeripheral_new(rpchip, name);
     self->base = *__base;
     free(__base);
   }
@@ -11040,7 +16194,7 @@ static int32_t RP2350POWMAN_nowMs(RP2350POWMAN* self) {
   if ((!self->running)) {
   return self->baseMs;
   }
-  return (self->baseMs + ((double)((SimulationClock_getNanos(self->base.rp2040->clock) - self->runStartNanos)) / (double)(1000000)));
+  return (self->baseMs + ((double)((SimulationClock_getNanos(self->base.rpchip->clock) - self->runStartNanos)) / (double)(1e6)));
 }
 
 static int32_t RP2350POWMAN_readUint32(RP2350POWMAN* self, int32_t offset) {
@@ -11086,12 +16240,12 @@ static void RP2350POWMAN_writeUint32(RP2350POWMAN* self, int32_t offset, int32_t
   if (((int32_t)(data) & (int32_t)(TIMER_CLEAR))) {
   (self->baseMs = 0);
   /* memset */ memset(self->setWords, 0, (4) * sizeof(uint16_t));
-  (self->runStartNanos = SimulationClock_getNanos(self->base.rp2040->clock));
+  (self->runStartNanos = SimulationClock_getNanos(self->base.rpchip->clock));
   }
   if (((int32_t)(data) & (int32_t)(TIMER_RUN))) {
   if ((!self->running)) {
   (self->baseMs = RP2350POWMAN_nowMs(self));
-  (self->runStartNanos = SimulationClock_getNanos(self->base.rp2040->clock));
+  (self->runStartNanos = SimulationClock_getNanos(self->base.rpchip->clock));
   (self->running = true);
   }
   } else {
@@ -11114,15 +16268,15 @@ static void RP2350POWMAN_applySet(RP2350POWMAN* self, int32_t index, int32_t dat
   int32_t hi = ((uint32_t)(((int32_t)(self->setWords[2]) | (int32_t)(((int32_t)((uint32_t)(self->setWords[3]) << (16)))))) >> (0));
   (self->baseMs = ((hi * TWO32) + lo));
   if (self->running) {
-  (self->runStartNanos = SimulationClock_getNanos(self->base.rp2040->clock));
+  (self->runStartNanos = SimulationClock_getNanos(self->base.rpchip->clock));
   }
 }
 
 // ─── powman.ts ───
-static RPPOWMAN* RPPOWMAN_new(RP2350* rp2040, const char* name) {
+static RPPOWMAN* RPPOWMAN_new(RP2350* rpchip, const char* name) {
   RPPOWMAN* self = calloc(1, sizeof(RPPOWMAN));
   {
-    BasePeripheral* __base = BasePeripheral_new(rp2040, name);
+    BasePeripheral* __base = BasePeripheral_new(rpchip, name);
     self->base = *__base;
     free(__base);
   }
@@ -11176,11 +16330,11 @@ enum { M33_CPUID = (1091555859) };
 enum { NUM_EXTERNAL_IRQS = (52) };
 enum { NUM_PRIORITY_LEVELS = (16) };
 enum { PRIORITY_MASK = (15) }; /* (NUM_PRIORITY_LEVELS - 1) */
-static SystickAlarmCallback* SystickAlarmCallback_new(RPPPB2350* ppb, RP2350* rp2040, Timer32* systickTimer, int32_t coreIndex) {
+static SystickAlarmCallback* SystickAlarmCallback_new(RPPPB2350* ppb, RP2350* rpchip, Timer32* systickTimer, int32_t coreIndex) {
   SystickAlarmCallback* self = calloc(1, sizeof(SystickAlarmCallback));
   (self)->__vtable_AlarmCallback = &SystickAlarmCallback_AlarmCallback_vtable;
   self->ppb = ppb;
-  self->rp2040 = rp2040;
+  self->rpchip = rpchip;
   self->systickTimer = systickTimer;
   self->coreIndex = coreIndex;
   return self;
@@ -11191,7 +16345,7 @@ static void SystickAlarmCallback_fire(SystickAlarmCallback* self) {
   (st->systickCountFlag = true);
   if (st->systickIntEnable) {
   (st->pendingSystick = true);
-  ICpuCore core = self->rp2040->core[self->coreIndex];
+  ICpuCore core = self->rpchip->core[self->coreIndex];
   (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "iface assign [src/peripherals/ppb_rp2350.ts:223: core.interruptsUpdated = true;]"); abort(); 0; }));
   }
   Timer32_set(self->systickTimer, st->systickReload, false);
@@ -11200,9 +16354,9 @@ static void SystickAlarmCallback_fire(SystickAlarmCallback* self) {
 static RPPPB2350* RPPPB2350_new(RP2350* rp2350, const char* name) {
   RPPPB2350* self = calloc(1, sizeof(RPPPB2350));
   {
-    BasePeripheral* __super_19 = BasePeripheral_new(rp2350, name);
-    self->base = *__super_19;
-    free(__super_19);
+    BasePeripheral* __super_33 = BasePeripheral_new(rp2350, name);
+    self->base = *__super_33;
+    free(__super_33);
   }
   (&(self)->base)->__vtable_Peripheral = &RPPPB2350_Peripheral_vtable;
   self->coreState[0] = RPPPB2350_makeCoreState(self, 0);
@@ -11211,11 +16365,11 @@ static RPPPB2350* RPPPB2350_new(RP2350* rp2350, const char* name) {
 }
 
 static M33CoreState* RPPPB2350_makeCoreState(RPPPB2350* self, int32_t coreIndex) {
-  Timer32* systickTimer = Timer32_new("M33_SysTick", self->base.rp2040->clock, self->base.rp2040->clkSys);
+  Timer32* systickTimer = Timer32_new("M33_SysTick", self->base.rpchip->clock, self->base.rpchip->clkSys);
   Timer32_top_set(systickTimer, 16777215);
   Timer32_mode_set(systickTimer, TimerMode_Decrement);
   Timer32_enable_set(systickTimer, false);
-  Timer32PeriodicAlarm* systickAlarm = Timer32PeriodicAlarm_new("M33_SysTick_Alarm", systickTimer, (AlarmCallback){ .obj = (void*)(SystickAlarmCallback_new(self, self->base.rp2040, systickTimer, coreIndex)), .vtable = &SystickAlarmCallback_AlarmCallback_vtable });
+  Timer32PeriodicAlarm* systickAlarm = Timer32PeriodicAlarm_new("M33_SysTick_Alarm", systickTimer, (AlarmCallback){ .obj = (void*)(SystickAlarmCallback_new(self, self->base.rpchip, systickTimer, coreIndex)), .vtable = &SystickAlarmCallback_AlarmCallback_vtable });
   Timer32PeriodicAlarm_target_set(systickAlarm, 0);
   Timer32PeriodicAlarm_enable_set(systickAlarm, true);
   return memcpy(malloc(sizeof(M33CoreState)), &(M33CoreState){ .nvicPending = memcpy(malloc(2 * sizeof(int32_t)), (int32_t[]){ 0, 0 }, 2 * sizeof(int32_t)), .nvicEnabled = memcpy(malloc(2 * sizeof(int32_t)), (int32_t[]){ 0, 0 }, 2 * sizeof(int32_t)), .nvicActive = memcpy(malloc(2 * sizeof(int32_t)), (int32_t[]){ 0, 0 }, 2 * sizeof(int32_t)), .nvicPriority = calloc(NUM_EXTERNAL_IRQS, sizeof(uint8_t)), .pendingNMI = false, .pendingPendSV = false, .pendingSystick = false, .vtor = 0, .aircr = 0, .scr = 0, .ccr = 0, .shcsr = 0, .cfsr = 0, .hfsr = 0, .cpacr = 0, .shpr2 = 0, .shpr3 = 0, .fpccr = 0, .fpcar = 0, .fpdscr = 0, .dcpHalves = calloc(16, sizeof(uint32_t)), .dcpStatus = 0, .rcpSalt = 0, .rcpSaltValid = false, .rcpCount = 0, .mpuCtrl = 0, .mpuRnr = 0, .mpuRegions = (__extension__({ RegionPair** __af_arr = calloc(8, sizeof(RegionPair*)); for (int32_t __af_i = 0; __af_i < 8; __af_i++) { __af_arr[__af_i] = memcpy(malloc(sizeof(RegionPair)), &(RegionPair){ .rbar = 0, .rlar = 0 }, sizeof(RegionPair)); } __af_arr; })), .mpuMair = memcpy(malloc(2 * sizeof(int32_t)), (int32_t[]){ 0, 0 }, 2 * sizeof(int32_t)), .sauCtrl = 0, .sauRnr = 0, .sauRegions = (__extension__({ RegionPair** __af_arr = calloc(8, sizeof(RegionPair*)); for (int32_t __af_i = 0; __af_i < 8; __af_i++) { __af_arr[__af_i] = memcpy(malloc(sizeof(RegionPair)), &(RegionPair){ .rbar = 0, .rlar = 0 }, sizeof(RegionPair)); } __af_arr; })), .sfsr = 0, .sfar = 0, .systickCountFlag = false, .systickClkSource = false, .systickIntEnable = false, .systickReload = 0, .systickTimer = systickTimer, .systickAlarm = systickAlarm }, sizeof(M33CoreState));
@@ -11568,12 +16722,12 @@ int32_t byteIndex = 0
 }
 
 static M33Registers* RPPPB2350_coreRegs(RPPPB2350* self, int32_t core) {
-  CortexM33Core* coreObj = ((CortexM33Core*)((self->base.rp2040->core[core]).obj));
+  CortexM33Core* coreObj = ((CortexM33Core*)((self->base.rpchip->core[core]).obj));
   return coreObj->regs;
 }
 
 static void RPPPB2350_markInterruptsUpdated(RPPPB2350* self, int32_t core) {
-  CortexM33Core* coreObj = ((CortexM33Core*)((self->base.rp2040->core[core]).obj));
+  CortexM33Core* coreObj = ((CortexM33Core*)((self->base.rpchip->core[core]).obj));
   (coreObj->interruptsUpdated = true);
 }
 
@@ -11601,16 +16755,237 @@ int32_t bit = 0
   return 0;
 }
 
+// ─── ppb.ts ───
+enum { NVIC_ISER = (256) };
+enum { NVIC_ICER = (384) };
+enum { NVIC_ISPR = (512) };
+enum { NVIC_ICPR = (640) };
+enum { NVIC_IPR1 = (1028) };
+enum { NVIC_IPR2 = (1032) };
+enum { NVIC_IPR3 = (1036) };
+enum { NVIC_IPR4 = (1040) };
+enum { NVIC_IPR5 = (1044) };
+enum { NVIC_IPR6 = (1048) };
+enum { NVIC_IPR7 = (1052) };
+enum { NMIPENDSET = (-2147483648) }; /* ((int32_t)((uint32_t)(1) << (31))) */
+enum { PENDSVSET = (268435456) }; /* ((int32_t)((uint32_t)(1) << (28))) */
+enum { PENDSVCLR = (134217728) }; /* ((int32_t)((uint32_t)(1) << (27))) */
+enum { PENDSTSET = (67108864) }; /* ((int32_t)((uint32_t)(1) << (26))) */
+enum { PENDSTCLR = (33554432) }; /* ((int32_t)((uint32_t)(1) << (25))) */
+enum { ISRPREEMPT = (8388608) }; /* ((int32_t)((uint32_t)(1) << (23))) */
+enum { ISRPENDING = (4194304) }; /* ((int32_t)((uint32_t)(1) << (22))) */
+enum { VECTPENDING_MASK = (511) };
+enum { VECTPENDING_SHIFT = (12) };
+enum { VECTACTIVE_MASK = (511) };
+enum { VECTACTIVE_SHIFT = (0) };
+static RPPPB* RPPPB_new(RP2040* rpchip, const char* name) {
+  RPPPB* self = calloc(1, sizeof(RPPPB));
+  {
+    BasePeripheral__RP2040* __super_34 = BasePeripheral__RP2040_new(rpchip, name);
+    self->base = *__super_34;
+    free(__super_34);
+  }
+  (&(self)->base)->__vtable_Peripheral = &RPPPB_Peripheral_vtable;
+  (self)->__vtable_AlarmCallback = &RPPPB_AlarmCallback_vtable;
+  self->systickCountFlag = false;
+  self->systickClkSource = false;
+  self->systickIntEnable = false;
+  self->systickReload = 0;
+  self->systickTimer = Timer32_new("PPB_systick_timer", self->base.rpchip->clock, self->base.rpchip->clkSys);
+  self->systickAlarm = Timer32PeriodicAlarm_new("PPB_systick_alarm", self->systickTimer, (AlarmCallback){ .obj = (void*)(self), .vtable = &RPPPB_AlarmCallback_vtable });
+  Timer32_top_set(self->systickTimer, 16777215);
+  Timer32_mode_set(self->systickTimer, TimerMode_Decrement);
+  Timer32PeriodicAlarm_target_set(self->systickAlarm, 0);
+  Timer32PeriodicAlarm_enable_set(self->systickAlarm, true);
+  RPPPB_reset(self);
+  return self;
+}
+
+static void RPPPB_fire(RPPPB* self) {
+  (self->systickCountFlag = true);
+  if (self->systickIntEnable) {
+  RP2040* rpchip = self->base.rpchip;
+  (RP2040_core0_get(rpchip)->pendingSystick = true);
+  (RP2040_core0_get(rpchip)->interruptsUpdated = true);
+  }
+  Timer32_set(self->systickTimer, self->systickReload, false);
+}
+
+static void RPPPB_reset(RPPPB* self) {
+  RPPPB_writeUint32ViaCore(self, SYST_CSR, 0, 0);
+  RPPPB_writeUint32ViaCore(self, SYST_RVR, 16777215, 0);
+  Timer32_set(self->systickTimer, 16777215, false);
+}
+
+static int32_t RPPPB_readUint32ViaCore(RPPPB* self, int32_t offset, int32_t _core) {
+  RP2040* rpchip = self->base.rpchip;
+  CortexM0Core* core = rpchip->core[_core];
+  switch (offset) {
+  case CPUID:
+  return 1091356161;
+  case ICSR:
+  {
+  int32_t pendingInterrupts = (((core->pendingInterrupts ? core->pendingInterrupts : core->pendingPendSV) ? (core->pendingInterrupts ? core->pendingInterrupts : core->pendingPendSV) : core->pendingSystick) ? ((core->pendingInterrupts ? core->pendingInterrupts : core->pendingPendSV) ? (core->pendingInterrupts ? core->pendingInterrupts : core->pendingPendSV) : core->pendingSystick) : core->pendingSVCall);
+  int32_t vectPending = CortexM0Core_vectPending_get(core);
+  return ((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)((core->pendingNMI ? NMIPENDSET : 0)) | (int32_t)((core->pendingPendSV ? PENDSVSET : 0)))) | (int32_t)((core->pendingSystick ? PENDSTSET : 0)))) | (int32_t)((pendingInterrupts ? ISRPENDING : 0)))) | (int32_t)(((int32_t)((uint32_t)(vectPending) << (((int32_t)(VECTPENDING_SHIFT)) & 31)))))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(core->IPSR) & (int32_t)(VECTACTIVE_MASK))) << (((int32_t)(VECTACTIVE_SHIFT)) & 31)))));
+  }
+  case VTOR:
+  return core->VTOR;
+  case NVIC_ISPR:
+  return ((uint32_t)(core->pendingInterrupts) >> (0));
+  case NVIC_ICPR:
+  return ((uint32_t)(core->pendingInterrupts) >> (0));
+  case NVIC_ISER:
+  return ((uint32_t)(core->enabledInterrupts) >> (0));
+  case NVIC_ICER:
+  return ((uint32_t)(core->enabledInterrupts) >> (0));
+  case NVIC_IPR0:
+  case NVIC_IPR1:
+  case NVIC_IPR2:
+  case NVIC_IPR3:
+  case NVIC_IPR4:
+  case NVIC_IPR5:
+  case NVIC_IPR6:
+  case NVIC_IPR7:
+  {
+  int32_t regIndex = ((int32_t)((offset - NVIC_IPR0)) >> (2));
+  int32_t result = 0;
+  for (
+int32_t byteIndex = 0
+; (byteIndex < 4); (byteIndex++)) {
+  int32_t interruptNumber = ((regIndex * 4) + byteIndex);
+  for (
+int32_t priority = 0
+; (priority < 4); (priority++)) {
+  if (((int32_t)(core->interruptPriorities[priority]) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(interruptNumber)) & 31)))))) {
+  (result |= ((int32_t)((uint32_t)(priority) << (((int32_t)(((8 * byteIndex) + 6))) & 31))));
+  }
+  }
+  }
+  return result;
+  }
+  case SHPR2:
+  return core->SHPR2;
+  case SHPR3:
+  return core->SHPR3;
+  case SYST_CSR:
+  {
+  int32_t countFlagValue = (self->systickCountFlag ? ((int32_t)((uint32_t)(1) << (16))) : 0);
+  int32_t clkSourceValue = (self->systickClkSource ? ((int32_t)((uint32_t)(1) << (2))) : 0);
+  int32_t tickIntValue = (self->systickIntEnable ? ((int32_t)((uint32_t)(1) << (1))) : 0);
+  int32_t enableFlagValue = (Timer32_enable_get(self->systickTimer) ? ((int32_t)((uint32_t)(1) << (0))) : 0);
+  (self->systickCountFlag = false);
+  return ((int32_t)(((int32_t)(((int32_t)(countFlagValue) | (int32_t)(clkSourceValue))) | (int32_t)(tickIntValue))) | (int32_t)(enableFlagValue));
+  }
+  case SYST_CVR:
+  return Timer32_counter_get(self->systickTimer);
+  case SYST_RVR:
+  return self->systickReload;
+  case SYST_CALIB:
+  return 9999;
+  }
+  return BasePeripheral__RP2040_readUint32ViaCore(&self->base, offset, _core);
+}
+
+static void RPPPB_writeUint32ViaCore(RPPPB* self, int32_t offset, int32_t value, int32_t _core) {
+  RP2040* rpchip = self->base.rpchip;
+  CortexM0Core* core = rpchip->core[_core];
+  int32_t hardwareInterruptMask = (((int32_t)((uint32_t)(1) << (((int32_t)(MAX_HARDWARE_IRQ)) & 31))) - 1);
+  switch (offset) {
+  case ICSR:
+  if (((int32_t)(value) & (int32_t)(NMIPENDSET))) {
+  (core->pendingNMI = true);
+  (core->interruptsUpdated = true);
+  }
+  if (((int32_t)(value) & (int32_t)(PENDSVSET))) {
+  (core->pendingPendSV = true);
+  (core->interruptsUpdated = true);
+  }
+  if (((int32_t)(value) & (int32_t)(PENDSVCLR))) {
+  (core->pendingPendSV = false);
+  }
+  if (((int32_t)(value) & (int32_t)(PENDSTSET))) {
+  (core->pendingSystick = true);
+  (core->interruptsUpdated = true);
+  }
+  if (((int32_t)(value) & (int32_t)(PENDSTCLR))) {
+  (core->pendingSystick = false);
+  }
+  return;
+  case VTOR:
+  (core->VTOR = value);
+  return;
+  case NVIC_ISPR:
+  (core->pendingInterrupts |= value);
+  (core->interruptsUpdated = true);
+  return;
+  case NVIC_ICPR:
+  (core->pendingInterrupts &= ((int32_t)((~value)) | (int32_t)(hardwareInterruptMask)));
+  return;
+  case NVIC_ISER:
+  (core->enabledInterrupts |= value);
+  (core->interruptsUpdated = true);
+  return;
+  case NVIC_ICER:
+  (core->enabledInterrupts &= (~value));
+  return;
+  case NVIC_IPR0:
+  case NVIC_IPR1:
+  case NVIC_IPR2:
+  case NVIC_IPR3:
+  case NVIC_IPR4:
+  case NVIC_IPR5:
+  case NVIC_IPR6:
+  case NVIC_IPR7:
+  {
+  int32_t regIndex = ((int32_t)((offset - NVIC_IPR0)) >> (2));
+  for (
+int32_t byteIndex = 0
+; (byteIndex < 4); (byteIndex++)) {
+  int32_t interruptNumber = ((regIndex * 4) + byteIndex);
+  int32_t newPriority = ((int32_t)(((int32_t)(value) >> (((int32_t)(((8 * byteIndex) + 6))) & 31))) & (int32_t)(3));
+  for (
+int32_t priority = 0
+; (priority < 4); (priority++)) {
+  (core->interruptPriorities[priority] &= (~((int32_t)((uint32_t)(1) << (((int32_t)(interruptNumber)) & 31)))));
+  }
+  (core->interruptPriorities[newPriority] |= ((int32_t)((uint32_t)(1) << (((int32_t)(interruptNumber)) & 31))));
+  }
+  (core->interruptsUpdated = true);
+  return;
+  }
+  case SHPR2:
+  (core->SHPR2 = value);
+  return;
+  case SHPR3:
+  (core->SHPR3 = value);
+  return;
+  case SYST_CSR:
+  (self->systickClkSource = (((int32_t)(value) & (int32_t)(((int32_t)((uint32_t)(1) << (2))))) ? true : false));
+  (self->systickIntEnable = (((int32_t)(value) & (int32_t)(((int32_t)((uint32_t)(1) << (1))))) ? true : false));
+  Timer32_enable_set(self->systickTimer, (((int32_t)(value) & (int32_t)(((int32_t)((uint32_t)(1) << (0))))) ? true : false));
+  return;
+  case SYST_CVR:
+  Timer32_set(self->systickTimer, 0, false);
+  return;
+  case SYST_RVR:
+  (self->systickReload = value);
+  return;
+  default:
+  BasePeripheral__RP2040_writeUint32ViaCore(&self->base, offset, value, _core);
+  }
+}
+
 // ─── psm_rp2350.ts ───
 enum { FRCE_ON = (0) };
 enum { FRCE_OFF = (4) };
 enum { WDSEL = (8) };
 enum { DONE = (12) };
 enum { PSM_BITS_MASK = (131071) };
-static RP2350PSM* RP2350PSM_new(RP2350* rp2040, const char* name) {
+static RP2350PSM* RP2350PSM_new(RP2350* rpchip, const char* name) {
   RP2350PSM* self = calloc(1, sizeof(RP2350PSM));
   {
-    BasePeripheral* __base = BasePeripheral_new(rp2040, name);
+    BasePeripheral* __base = BasePeripheral_new(rpchip, name);
     self->base = *__base;
     free(__base);
   }
@@ -11841,7 +17216,7 @@ static void PWMChannel_setB(PWMChannel* self, bool value) {
 }
 
 static int32_t PWMChannel_gpioBValue_get(PWMChannel* self) {
-  return (__extension__({ __typeof__(RPPWM_gpioRead(self->pwm, self->pinB1)) __lg_20 = (RPPWM_gpioRead(self->pwm, self->pinB1)); __lg_20 ? __lg_20 : (((self->pinB2 > 0) ? RPPWM_gpioRead(self->pwm, self->pinB2) : false)); }));
+  return (__extension__({ __typeof__(RPPWM_gpioRead(self->pwm, self->pinB1)) __lg_35 = (RPPWM_gpioRead(self->pwm, self->pinB1)); __lg_35 ? __lg_35 : (((self->pinB2 > 0) ? RPPWM_gpioRead(self->pwm, self->pinB2) : false)); }));
 }
 
 static void PWMChannel_setBDirection(PWMChannel* self, bool value) {
@@ -11898,25 +17273,25 @@ static void PWMChannel_en_set(PWMChannel* self, int32_t value) {
   PWMChannel_updateEnable(self);
 }
 
-static RPPWM* RPPWM_new(RP2350* rp2040, const char* name, int32_t pwm_wrap_irq, int32_t pwm_dreq_base) {
+static RPPWM* RPPWM_new(RP2350* rpchip, const char* name, int32_t pwm_wrap_irq, int32_t pwm_dreq_base) {
   RPPWM* self = calloc(1, sizeof(RPPWM));
   {
-    BasePeripheral* __super_21 = BasePeripheral_new(rp2040, name);
-    self->base = *__super_21;
-    free(__super_21);
+    BasePeripheral* __super_36 = BasePeripheral_new(rpchip, name);
+    self->base = *__super_36;
+    free(__super_36);
   }
   (&(self)->base)->__vtable_Peripheral = &RPPWM_Peripheral_vtable;
-  self->rp2040 = rp2040;
+  self->rpchip = rpchip;
   self->pwm_wrap_irq = pwm_wrap_irq;
   self->pwm_dreq_base = pwm_dreq_base;
-  self->channels[0] = PWMChannel_new(self, self->rp2040->clock, 0);
-  self->channels[1] = PWMChannel_new(self, self->rp2040->clock, 1);
-  self->channels[2] = PWMChannel_new(self, self->rp2040->clock, 2);
-  self->channels[3] = PWMChannel_new(self, self->rp2040->clock, 3);
-  self->channels[4] = PWMChannel_new(self, self->rp2040->clock, 4);
-  self->channels[5] = PWMChannel_new(self, self->rp2040->clock, 5);
-  self->channels[6] = PWMChannel_new(self, self->rp2040->clock, 6);
-  self->channels[7] = PWMChannel_new(self, self->rp2040->clock, 7);
+  self->channels[0] = PWMChannel_new(self, self->rpchip->clock, 0);
+  self->channels[1] = PWMChannel_new(self, self->rpchip->clock, 1);
+  self->channels[2] = PWMChannel_new(self, self->rpchip->clock, 2);
+  self->channels[3] = PWMChannel_new(self, self->rpchip->clock, 3);
+  self->channels[4] = PWMChannel_new(self, self->rpchip->clock, 4);
+  self->channels[5] = PWMChannel_new(self, self->rpchip->clock, 5);
+  self->channels[6] = PWMChannel_new(self, self->rpchip->clock, 6);
+  self->channels[7] = PWMChannel_new(self, self->rpchip->clock, 7);
   self->intRaw = 0;
   self->intEnable = 0;
   self->intForce = 0;
@@ -11985,17 +17360,17 @@ static int32_t RPPWM_writeUint32(RPPWM* self, int32_t offset, int32_t value) {
 }
 
 static int32_t RPPWM_clockFreq_get(RPPWM* self) {
-  return self->rp2040->clkSys;
+  return self->rpchip->clkSys;
 }
 
 static void RPPWM_channelInterrupt(RPPWM* self, int32_t index) {
   (self->intRaw |= ((int32_t)((uint32_t)(1) << (((int32_t)(index)) & 31))));
   RPPWM_checkInterrupts(self);
-  RP2350_dma_setDREQ(self->rp2040, (self->pwm_dreq_base + index));
+  RP2350_dma_setDREQ(self->rpchip, (self->pwm_dreq_base + index));
 }
 
 static void RPPWM_checkInterrupts(RPPWM* self) {
-  RP2350_setInterrupt(self->rp2040, self->pwm_wrap_irq, (!(!RPPWM_intStatus_get(self))));
+  RP2350_setInterrupt(self->rpchip, self->pwm_wrap_irq, (!(!RPPWM_intStatus_get(self))));
 }
 
 static void RPPWM_gpioSet(RPPWM* self, int32_t index, bool value) {
@@ -12003,7 +17378,7 @@ static void RPPWM_gpioSet(RPPWM* self, int32_t index, bool value) {
   int32_t newGpioValue = (value ? ((int32_t)(self->gpioValue) | (int32_t)(bit)) : ((int32_t)(self->gpioValue) & (int32_t)((~bit))));
   if ((self->gpioValue != newGpioValue)) {
   (self->gpioValue = newGpioValue);
-  GPIOPin_checkForUpdates(self->rp2040->gpio[index]);
+  GPIOPin_checkForUpdates(self->rpchip->gpio[index]);
   }
 }
 
@@ -12012,12 +17387,12 @@ static void RPPWM_gpioSetDir(RPPWM* self, int32_t index, bool output) {
   uint32_t newGpioDirection = ((uint32_t)((output ? ((int32_t)(self->gpioDirection) | (int32_t)(bit)) : ((int32_t)(self->gpioDirection) & (int32_t)((~bit))))) >> (0));
   if ((self->gpioDirection != newGpioDirection)) {
   (self->gpioDirection = newGpioDirection);
-  GPIOPin_checkForUpdates(self->rp2040->gpio[index]);
+  GPIOPin_checkForUpdates(self->rpchip->gpio[index]);
   }
 }
 
 static int32_t RPPWM_gpioRead(RPPWM* self, int32_t index) {
-  return GPIOPin_inputValue_get(self->rp2040->gpio[index]);
+  return GPIOPin_inputValue_get(self->rpchip->gpio[index]);
 }
 
 static void RPPWM_gpioOnInput(RPPWM* self, int32_t index) {
@@ -12046,19 +17421,396 @@ static void RPPWM_reset(RPPWM* self) {
   }
 }
 
+static PWMChannelAAlarmCallback__RP2040* PWMChannelAAlarmCallback__RP2040_new(PWMChannel__RP2040* channel) {
+  PWMChannelAAlarmCallback__RP2040* self = calloc(1, sizeof(PWMChannelAAlarmCallback__RP2040));
+  (self)->__vtable_AlarmCallback = &PWMChannelAAlarmCallback__RP2040_AlarmCallback_vtable;
+  self->channel = channel;
+  return self;
+}
+
+static void PWMChannelAAlarmCallback__RP2040_fire(PWMChannelAAlarmCallback__RP2040* self) {
+  PWMChannel__RP2040_setA(self->channel, false);
+}
+
+static PWMChannelBAlarmCallback__RP2040* PWMChannelBAlarmCallback__RP2040_new(PWMChannel__RP2040* channel) {
+  PWMChannelBAlarmCallback__RP2040* self = calloc(1, sizeof(PWMChannelBAlarmCallback__RP2040));
+  (self)->__vtable_AlarmCallback = &PWMChannelBAlarmCallback__RP2040_AlarmCallback_vtable;
+  self->channel = channel;
+  return self;
+}
+
+static void PWMChannelBAlarmCallback__RP2040_fire(PWMChannelBAlarmCallback__RP2040* self) {
+  PWMChannel__RP2040_setB(self->channel, false);
+}
+
+static PWMChannelBottomAlarmCallback__RP2040* PWMChannelBottomAlarmCallback__RP2040_new(PWMChannel__RP2040* channel) {
+  PWMChannelBottomAlarmCallback__RP2040* self = calloc(1, sizeof(PWMChannelBottomAlarmCallback__RP2040));
+  (self)->__vtable_AlarmCallback = &PWMChannelBottomAlarmCallback__RP2040_AlarmCallback_vtable;
+  self->channel = channel;
+  return self;
+}
+
+static void PWMChannelBottomAlarmCallback__RP2040_fire(PWMChannelBottomAlarmCallback__RP2040* self) {
+  PWMChannel__RP2040_wrap(self->channel);
+}
+
+static PWMChannel__RP2040* PWMChannel__RP2040_new(RPPWM__RP2040* pwm, SimulationClock* clock, int32_t index) {
+  PWMChannel__RP2040* self = calloc(1, sizeof(PWMChannel__RP2040));
+  self->pwm = pwm;
+  self->clock = clock;
+  self->index = index;
+  self->timer = Timer32_new(fmtStr("PWM_Ch%d_timer", self->index), self->clock, RPPWM__RP2040_clockFreq_get(self->pwm));
+  self->alarmA = Timer32PeriodicAlarm_new(fmtStr("PWM_Ch%d_alarmA", self->index), self->timer, (AlarmCallback){ .obj = (void*)(PWMChannelAAlarmCallback__RP2040_new(self)), .vtable = &PWMChannelAAlarmCallback__RP2040_AlarmCallback_vtable });
+  self->alarmB = Timer32PeriodicAlarm_new(fmtStr("PWM_Ch%d_alarmB", self->index), self->timer, (AlarmCallback){ .obj = (void*)(PWMChannelBAlarmCallback__RP2040_new(self)), .vtable = &PWMChannelBAlarmCallback__RP2040_AlarmCallback_vtable });
+  self->alarmBottom = Timer32PeriodicAlarm_new(fmtStr("PWM_Ch%d_alarmBottom", self->index), self->timer, (AlarmCallback){ .obj = (void*)(PWMChannelBottomAlarmCallback__RP2040_new(self)), .vtable = &PWMChannelBottomAlarmCallback__RP2040_AlarmCallback_vtable });
+  self->csr = 0;
+  self->div = 0;
+  self->cc = 0;
+  self->top = 0;
+  self->lastBValue = false;
+  self->countingUp = true;
+  self->ccUpdated = false;
+  self->topUpdated = false;
+  self->tickCounter = 0;
+  self->divMode = PWMDivMode_FreeRunning;
+  self->pinA1 = (self->index * 2);
+  self->pinB1 = ((self->index * 2) + 1);
+  self->pinA2 = ((self->index < 7) ? (16 + (self->index * 2)) : (-1));
+  self->pinB2 = ((self->index < 7) ? ((16 + (self->index * 2)) + 1) : (-1));
+  Timer32PeriodicAlarm_enable_set(self->alarmA, true);
+  Timer32PeriodicAlarm_enable_set(self->alarmB, true);
+  Timer32PeriodicAlarm_enable_set(self->alarmBottom, true);
+  return self;
+}
+
+static int32_t PWMChannel__RP2040_readRegister(PWMChannel__RP2040* self, int32_t offset) {
+  switch (offset) {
+  case CHn_CSR:
+  return self->csr;
+  case CHn_DIV:
+  return self->div;
+  case CHn_CTR:
+  return Timer32_counter_get(self->timer);
+  case CHn_CC:
+  return self->cc;
+  case CHn_TOP:
+  return self->top;
+  }
+  return 0;
+}
+
+static void PWMChannel__RP2040_writeRegister(PWMChannel__RP2040* self, int32_t offset, int32_t value) {
+  switch (offset) {
+  case CHn_CSR:
+  if ((((int32_t)(value) & (int32_t)(CSR_EN)) && (!((int32_t)(self->csr) & (int32_t)(CSR_EN))))) {
+  PWMChannel__RP2040_updateDoubleBuffered(self);
+  }
+  (self->csr = ((int32_t)(value) & (int32_t)((~((int32_t)(CSR_PH_ADV) | (int32_t)(CSR_PH_RET))))));
+  if (((int32_t)(self->csr) & (int32_t)(CSR_PH_ADV))) {
+  Timer32_advance(self->timer, 1);
+  }
+  if (((int32_t)(self->csr) & (int32_t)(CSR_PH_RET))) {
+  Timer32_advance(self->timer, (-1));
+  }
+  (self->divMode = ((int32_t)(((int32_t)(self->csr) >> (((int32_t)(CSR_DIVMODE_SHIFT)) & 31))) & (int32_t)(CSR_DIVMODE_MASK)));
+  PWMChannel__RP2040_setBDirection(self, (self->divMode == PWMDivMode_FreeRunning));
+  PWMChannel__RP2040_updateEnable(self);
+  (self->lastBValue = PWMChannel__RP2040_gpioBValue_get(self));
+  Timer32_mode_set(self->timer, (((int32_t)(value) & (int32_t)(CSR_PH_CORRECT)) ? TimerMode_ZigZag : TimerMode_Increment));
+  break;
+  case CHn_DIV:
+  {
+  (self->div = ((int32_t)(value) & (int32_t)(1048575)));
+  int32_t intValue = ((int32_t)(((int32_t)(value) >> (4))) & (int32_t)(255));
+  int32_t fracValue = ((int32_t)(value) & (int32_t)(15));
+  Timer32_prescaler_set(self->timer, ((intValue ? intValue : 256) + ((double)(fracValue) / (double)(16))));
+  break;
+  }
+  case CHn_CTR:
+  Timer32_set(self->timer, ((int32_t)(value) & (int32_t)(65535)), false);
+  break;
+  case CHn_CC:
+  (self->cc = value);
+  (self->ccUpdated = true);
+  break;
+  case CHn_TOP:
+  (self->top = ((int32_t)(value) & (int32_t)(65535)));
+  (self->topUpdated = true);
+  break;
+  }
+}
+
+static void PWMChannel__RP2040_reset(PWMChannel__RP2040* self) {
+  PWMChannel__RP2040_writeRegister(self, CHn_CSR, 0);
+  PWMChannel__RP2040_writeRegister(self, CHn_DIV, ((int32_t)((uint32_t)(1) << (4))));
+  PWMChannel__RP2040_writeRegister(self, CHn_CTR, 0);
+  PWMChannel__RP2040_writeRegister(self, CHn_CC, 0);
+  PWMChannel__RP2040_writeRegister(self, CHn_TOP, 65535);
+  (self->countingUp = true);
+  Timer32_enable_set(self->timer, false);
+  Timer32_reset(self->timer);
+}
+
+static void PWMChannel__RP2040_updateDoubleBuffered(PWMChannel__RP2040* self) {
+  if (self->ccUpdated) {
+  Timer32PeriodicAlarm_target_set(self->alarmB, ((uint32_t)(self->cc) >> (16)));
+  Timer32PeriodicAlarm_target_set(self->alarmA, ((int32_t)(self->cc) & (int32_t)(65535)));
+  (self->ccUpdated = false);
+  }
+  if (self->topUpdated) {
+  Timer32_top_set(self->timer, self->top);
+  (self->topUpdated = false);
+  }
+}
+
+static void PWMChannel__RP2040_wrap(PWMChannel__RP2040* self) {
+  RPPWM__RP2040_channelInterrupt(self->pwm, self->index);
+  PWMChannel__RP2040_updateDoubleBuffered(self);
+  if ((!((int32_t)(self->csr) & (int32_t)(CSR_PH_CORRECT)))) {
+  PWMChannel__RP2040_setA(self, (Timer32PeriodicAlarm_target_get(self->alarmA) > 0));
+  PWMChannel__RP2040_setB(self, (Timer32PeriodicAlarm_target_get(self->alarmB) > 0));
+  }
+}
+
+static void PWMChannel__RP2040_setA(PWMChannel__RP2040* self, bool value) {
+  if (((int32_t)(self->csr) & (int32_t)(CSR_A_INV))) {
+  (value = (!value));
+  }
+  RPPWM__RP2040_gpioSet(self->pwm, self->pinA1, value);
+  if ((self->pinA2 >= 0)) {
+  RPPWM__RP2040_gpioSet(self->pwm, self->pinA2, value);
+  }
+}
+
+static void PWMChannel__RP2040_setB(PWMChannel__RP2040* self, bool value) {
+  if (((int32_t)(self->csr) & (int32_t)(CSR_B_INV))) {
+  (value = (!value));
+  }
+  RPPWM__RP2040_gpioSet(self->pwm, self->pinB1, value);
+  if ((self->pinB2 >= 0)) {
+  RPPWM__RP2040_gpioSet(self->pwm, self->pinB2, value);
+  }
+}
+
+static int32_t PWMChannel__RP2040_gpioBValue_get(PWMChannel__RP2040* self) {
+  return (__extension__({ __typeof__(RPPWM__RP2040_gpioRead(self->pwm, self->pinB1)) __lg_37 = (RPPWM__RP2040_gpioRead(self->pwm, self->pinB1)); __lg_37 ? __lg_37 : (((self->pinB2 > 0) ? RPPWM__RP2040_gpioRead(self->pwm, self->pinB2) : false)); }));
+}
+
+static void PWMChannel__RP2040_setBDirection(PWMChannel__RP2040* self, bool value) {
+  RPPWM__RP2040_gpioSetDir(self->pwm, self->pinB1, value);
+  if ((self->pinB2 >= 0)) {
+  RPPWM__RP2040_gpioSetDir(self->pwm, self->pinB2, value);
+  }
+}
+
+static void PWMChannel__RP2040_gpioBChanged(PWMChannel__RP2040* self) {
+  int32_t value = PWMChannel__RP2040_gpioBValue_get(self);
+  if ((value == self->lastBValue)) {
+  return;
+  }
+  (self->lastBValue = value);
+  switch (self->divMode) {
+  case PWMDivMode_BGated:
+  PWMChannel__RP2040_updateEnable(self);
+  break;
+  case PWMDivMode_BRisingEdge:
+  if (value) {
+  (self->tickCounter++);
+  }
+  break;
+  case PWMDivMode_BFallingEdge:
+  if ((!value)) {
+  (self->tickCounter++);
+  }
+  break;
+  }
+  if ((self->tickCounter >= Timer32_prescaler_get(self->timer))) {
+  Timer32_advance(self->timer, 1);
+  (self->tickCounter -= Timer32_prescaler_get(self->timer));
+  }
+}
+
+static void PWMChannel__RP2040_updateEnable(PWMChannel__RP2040* self) {
+  PWMChannel__RP2040* __destruct_tmp_1 = self;
+  int32_t csr = __destruct_tmp_1->csr;
+  PWMDivMode divMode = __destruct_tmp_1->divMode;
+  int32_t enable = (!(!((int32_t)(csr) & (int32_t)(CSR_EN))));
+  Timer32_enable_set(self->timer, (enable ? ((divMode == PWMDivMode_FreeRunning) ? (divMode == PWMDivMode_FreeRunning) : ((divMode == PWMDivMode_BGated) ? PWMChannel__RP2040_gpioBValue_get(self) : (divMode == PWMDivMode_BGated))) : enable));
+}
+
+static void PWMChannel__RP2040_en_set(PWMChannel__RP2040* self, int32_t value) {
+  if ((value && (!((int32_t)(self->csr) & (int32_t)(CSR_EN))))) {
+  PWMChannel__RP2040_updateDoubleBuffered(self);
+  }
+  if (value) {
+  (self->csr |= CSR_EN);
+  } else {
+  (self->csr &= (~CSR_EN));
+  }
+  PWMChannel__RP2040_updateEnable(self);
+}
+
+static RPPWM__RP2040* RPPWM__RP2040_new(RP2040* rpchip, const char* name, int32_t pwm_wrap_irq, int32_t pwm_dreq_base) {
+  RPPWM__RP2040* self = calloc(1, sizeof(RPPWM__RP2040));
+  {
+    BasePeripheral__RP2040* __super_38 = BasePeripheral__RP2040_new(rpchip, name);
+    self->base = *__super_38;
+    free(__super_38);
+  }
+  (&(self)->base)->__vtable_Peripheral = &RPPWM__RP2040_Peripheral_vtable;
+  self->rpchip = rpchip;
+  self->pwm_wrap_irq = pwm_wrap_irq;
+  self->pwm_dreq_base = pwm_dreq_base;
+  self->channels[0] = PWMChannel__RP2040_new(self, self->rpchip->clock, 0);
+  self->channels[1] = PWMChannel__RP2040_new(self, self->rpchip->clock, 1);
+  self->channels[2] = PWMChannel__RP2040_new(self, self->rpchip->clock, 2);
+  self->channels[3] = PWMChannel__RP2040_new(self, self->rpchip->clock, 3);
+  self->channels[4] = PWMChannel__RP2040_new(self, self->rpchip->clock, 4);
+  self->channels[5] = PWMChannel__RP2040_new(self, self->rpchip->clock, 5);
+  self->channels[6] = PWMChannel__RP2040_new(self, self->rpchip->clock, 6);
+  self->channels[7] = PWMChannel__RP2040_new(self, self->rpchip->clock, 7);
+  self->intRaw = 0;
+  self->intEnable = 0;
+  self->intForce = 0;
+  self->gpioValue = 0;
+  self->gpioDirection = 0;
+  return self;
+}
+
+static int32_t RPPWM__RP2040_intStatus_get(RPPWM__RP2040* self) {
+  return ((int32_t)(((int32_t)(self->intRaw) & (int32_t)(self->intEnable))) | (int32_t)(self->intForce));
+}
+
+static int32_t RPPWM__RP2040_readUint32(RPPWM__RP2040* self, int32_t offset) {
+  if ((offset < EN__pwm)) {
+  int32_t channel = floor(((double)(offset) / (double)(20)));
+  return PWMChannel__RP2040_readRegister(self->channels[channel], (offset % 20));
+  }
+  switch (offset) {
+  case EN__pwm:
+  return ((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)((uint32_t)(self->channels[7]->en) << (7)))) | (int32_t)(((int32_t)((uint32_t)(self->channels[6]->en) << (6)))))) | (int32_t)(((int32_t)((uint32_t)(self->channels[5]->en) << (5)))))) | (int32_t)(((int32_t)((uint32_t)(self->channels[4]->en) << (4)))))) | (int32_t)(((int32_t)((uint32_t)(self->channels[3]->en) << (3)))))) | (int32_t)(((int32_t)((uint32_t)(self->channels[2]->en) << (2)))))) | (int32_t)(((int32_t)((uint32_t)(self->channels[1]->en) << (1)))))) | (int32_t)(((int32_t)((uint32_t)(self->channels[0]->en) << (0)))));
+  case INTR__pwm:
+  return self->intRaw;
+  case INTE__pwm:
+  return self->intEnable;
+  case INTF__pwm:
+  return self->intForce;
+  case INTS__pwm:
+  return RPPWM__RP2040_intStatus_get(self);
+  }
+  return BasePeripheral__RP2040_readUint32(&self->base, offset);
+}
+
+static int32_t RPPWM__RP2040_writeUint32(RPPWM__RP2040* self, int32_t offset, int32_t value) {
+  if ((offset < EN__pwm)) {
+  int32_t channel = floor(((double)(offset) / (double)(20)));
+  PWMChannel__RP2040_writeRegister(self->channels[channel], (offset % 20), value);
+  return 0;
+  }
+  switch (offset) {
+  case EN__pwm:
+  PWMChannel__RP2040_en_set(self->channels[7], ((int32_t)(value) & (int32_t)(((int32_t)((uint32_t)(1) << (7))))));
+  PWMChannel__RP2040_en_set(self->channels[6], ((int32_t)(value) & (int32_t)(((int32_t)((uint32_t)(1) << (6))))));
+  PWMChannel__RP2040_en_set(self->channels[5], ((int32_t)(value) & (int32_t)(((int32_t)((uint32_t)(1) << (5))))));
+  PWMChannel__RP2040_en_set(self->channels[4], ((int32_t)(value) & (int32_t)(((int32_t)((uint32_t)(1) << (4))))));
+  PWMChannel__RP2040_en_set(self->channels[3], ((int32_t)(value) & (int32_t)(((int32_t)((uint32_t)(1) << (3))))));
+  PWMChannel__RP2040_en_set(self->channels[2], ((int32_t)(value) & (int32_t)(((int32_t)((uint32_t)(1) << (2))))));
+  PWMChannel__RP2040_en_set(self->channels[1], ((int32_t)(value) & (int32_t)(((int32_t)((uint32_t)(1) << (1))))));
+  PWMChannel__RP2040_en_set(self->channels[0], ((int32_t)(value) & (int32_t)(((int32_t)((uint32_t)(1) << (0))))));
+  break;
+  case INTR__pwm:
+  (self->intRaw &= (~((int32_t)(value) & (int32_t)(INT_MASK))));
+  RPPWM__RP2040_checkInterrupts(self);
+  break;
+  case INTE__pwm:
+  (self->intEnable = ((int32_t)(value) & (int32_t)(INT_MASK)));
+  RPPWM__RP2040_checkInterrupts(self);
+  break;
+  case INTF__pwm:
+  (self->intForce = ((int32_t)(value) & (int32_t)(INT_MASK)));
+  RPPWM__RP2040_checkInterrupts(self);
+  break;
+  default:
+  BasePeripheral__RP2040_writeUint32(&self->base, offset, value);
+  }
+  return (int32_t){0};
+}
+
+static int32_t RPPWM__RP2040_clockFreq_get(RPPWM__RP2040* self) {
+  return self->rpchip->clkSys;
+}
+
+static void RPPWM__RP2040_channelInterrupt(RPPWM__RP2040* self, int32_t index) {
+  (self->intRaw |= ((int32_t)((uint32_t)(1) << (((int32_t)(index)) & 31))));
+  RPPWM__RP2040_checkInterrupts(self);
+  RP2040_dma_setDREQ(self->rpchip, (self->pwm_dreq_base + index));
+}
+
+static void RPPWM__RP2040_checkInterrupts(RPPWM__RP2040* self) {
+  RP2040_setInterrupt(self->rpchip, self->pwm_wrap_irq, (!(!RPPWM__RP2040_intStatus_get(self))));
+}
+
+static void RPPWM__RP2040_gpioSet(RPPWM__RP2040* self, int32_t index, bool value) {
+  int32_t bit = ((int32_t)((uint32_t)(1) << (((int32_t)(index)) & 31)));
+  int32_t newGpioValue = (value ? ((int32_t)(self->gpioValue) | (int32_t)(bit)) : ((int32_t)(self->gpioValue) & (int32_t)((~bit))));
+  if ((self->gpioValue != newGpioValue)) {
+  (self->gpioValue = newGpioValue);
+  GPIOPin__RP2040_checkForUpdates(self->rpchip->gpio[index]);
+  }
+}
+
+static void RPPWM__RP2040_gpioSetDir(RPPWM__RP2040* self, int32_t index, bool output) {
+  int32_t bit = ((int32_t)((uint32_t)(1) << (((int32_t)(index)) & 31)));
+  uint32_t newGpioDirection = ((uint32_t)((output ? ((int32_t)(self->gpioDirection) | (int32_t)(bit)) : ((int32_t)(self->gpioDirection) & (int32_t)((~bit))))) >> (0));
+  if ((self->gpioDirection != newGpioDirection)) {
+  (self->gpioDirection = newGpioDirection);
+  GPIOPin__RP2040_checkForUpdates(self->rpchip->gpio[index]);
+  }
+}
+
+static int32_t RPPWM__RP2040_gpioRead(RPPWM__RP2040* self, int32_t index) {
+  return GPIOPin__RP2040_inputValue_get(self->rpchip->gpio[index]);
+}
+
+static void RPPWM__RP2040_gpioOnInput(RPPWM__RP2040* self, int32_t index) {
+  if (((int32_t)(self->gpioDirection) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(index)) & 31)))))) {
+  return;
+  }
+  {
+    int32_t __forof_n = 8;
+    for (int32_t __forof_i = 0; __forof_i < __forof_n; __forof_i++) {
+      PWMChannel__RP2040* channel = self->channels[__forof_i];
+  if (((channel->pinB1 == index) || (channel->pinB2 == index))) {
+  PWMChannel__RP2040_gpioBChanged(channel);
+  }
+    }
+  }
+}
+
+static void RPPWM__RP2040_reset(RPPWM__RP2040* self) {
+  (self->gpioDirection = 4294967295u);
+  {
+    int32_t __forof_n = 8;
+    for (int32_t __forof_i = 0; __forof_i < __forof_n; __forof_i++) {
+      PWMChannel__RP2040* channel = self->channels[__forof_i];
+  PWMChannel__RP2040_reset(channel);
+    }
+  }
+}
+
 // ─── reset.ts ───
 enum { RESET = (0) };
 enum { WDSEL__reset = (4) };
 enum { RESET_DONE = (8) };
-static RPReset* RPReset_new(RP2350* rp2040, const char* name) {
+static RPReset* RPReset_new(RP2350* rpchip, const char* name) {
   RPReset* self = calloc(1, sizeof(RPReset));
   {
-    BasePeripheral* __super_22 = BasePeripheral_new(rp2040, name);
-    self->base = *__super_22;
-    free(__super_22);
+    BasePeripheral* __super_39 = BasePeripheral_new(rpchip, name);
+    self->base = *__super_39;
+    free(__super_39);
   }
   (&(self)->base)->__vtable_Peripheral = &RPReset_Peripheral_vtable;
-  self->rp2040 = rp2040;
+  self->rpchip = rpchip;
   self->name = name;
   self->reset = 0;
   self->wdsel = 0;
@@ -12092,6 +17844,52 @@ static void RPReset_writeUint32(RPReset* self, int32_t offset, int32_t value) {
   break;
   default:
   BasePeripheral_writeUint32(&self->base, offset, value);
+  break;
+  }
+}
+
+static RPReset__RP2040* RPReset__RP2040_new(RP2040* rpchip, const char* name) {
+  RPReset__RP2040* self = calloc(1, sizeof(RPReset__RP2040));
+  {
+    BasePeripheral__RP2040* __super_40 = BasePeripheral__RP2040_new(rpchip, name);
+    self->base = *__super_40;
+    free(__super_40);
+  }
+  (&(self)->base)->__vtable_Peripheral = &RPReset__RP2040_Peripheral_vtable;
+  self->rpchip = rpchip;
+  self->name = name;
+  self->reset = 0;
+  self->wdsel = 0;
+  self->reset_done = 33554431;
+  self->reset_mask = 33554431;
+  if (0) {
+  (self->reset_done = (self->reset_mask = 536870911));
+  }
+  return self;
+}
+
+static int32_t RPReset__RP2040_readUint32(RPReset__RP2040* self, int32_t offset) {
+  switch (offset) {
+  case RESET:
+  return self->reset;
+  case WDSEL__reset:
+  return self->wdsel;
+  case RESET_DONE:
+  return self->reset_done;
+  }
+  return BasePeripheral__RP2040_readUint32(&self->base, offset);
+}
+
+static void RPReset__RP2040_writeUint32(RPReset__RP2040* self, int32_t offset, int32_t value) {
+  switch (offset) {
+  case RESET:
+  (self->reset = ((int32_t)(value) & (int32_t)(self->reset_mask)));
+  break;
+  case WDSEL__reset:
+  (self->wdsel = ((int32_t)(value) & (int32_t)(self->reset_mask)));
+  break;
+  default:
+  BasePeripheral__RP2040_writeUint32(&self->base, offset, value);
   break;
   }
 }
@@ -12134,10 +17932,10 @@ enum { RTC_1_MIN_SHIFT = (8) };
 enum { RTC_1_MIN_MASK = (63) };
 enum { RTC_1_SEC_SHIFT = (0) };
 enum { RTC_1_SEC_MASK = (63) };
-static RP2040RTC* RP2040RTC_new(RP2350* rp2040, const char* name) {
+static RP2040RTC* RP2040RTC_new(RP2040* rpchip, const char* name) {
   RP2040RTC* self = calloc(1, sizeof(RP2040RTC));
   {
-    BasePeripheral* __base = BasePeripheral_new(rp2040, name);
+    BasePeripheral__RP2040* __base = BasePeripheral__RP2040_new(rpchip, name);
     self->base = *__base;
     free(__base);
   }
@@ -12147,65 +17945,46 @@ static RP2040RTC* RP2040RTC_new(RP2350* rp2040, const char* name) {
   self->rtc1 = 0;
   self->rtc0 = 0;
   self->ctrl = 0;
-  self->baseline = ((void*)(/* TODO: new Date() [src/peripherals/rtc.ts:57: baseline = new Date(2021, 0, 1);] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "new Date() [src/peripherals/rtc.ts:57: baseline = new Date(2021, 0, 1);]"); abort(); 0; }))));
   self->baselineNanos = 0;
   return self;
 }
 
 static int32_t RP2040RTC_readUint32(RP2040RTC* self, int32_t offset) {
-  int32_t date = ((int32_t)(/* TODO: new Date() [src/peripherals/rtc.ts:61: const date = new Date(] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "new Date() [src/peripherals/rtc.ts:61: const date = new Date(]"); abort(); 0; }))));
   switch (offset) {
-  case RTC_SETUP0:
-  return self->setup0;
-  case RTC_SETUP1:
-  return self->setup1;
-  case RTC_CTRL:
-  return self->ctrl;
-  case IRQ_SETUP_0:
-  return 0;
+  case RTC_SETUP0: return self->setup0;
+  case RTC_SETUP1: return self->setup1;
+  case RTC_CTRL: return self->ctrl;
+  case IRQ_SETUP_0: return 0;
   case RTC_RTC1:
-  return ((int32_t)(((int32_t)(((int32_t)(((int32_t)((uint32_t)(((int32_t)(/* TODO: dispatch getFullYear [src/peripherals/rtc.ts:75: ((date.getFullYear() & RTC_0_YEAR_MASK) << RTC_0_YEAR_SHIFT) |] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "dispatch getFullYear [src/peripherals/rtc.ts:75: ((date.getFullYear() & RTC_0_YEAR_MASK) << RTC_0_YEAR_SHIFT) |]"); abort(); 0; }))) & (int32_t)(RTC_0_YEAR_MASK))) << (((int32_t)(RTC_0_YEAR_SHIFT)) & 31)))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)((/* TODO: dispatch getMonth [src/peripherals/rtc.ts:76: (((date.getMonth() + 1) & RTC_0_MONTH_MASK) << RTC_0_MONTH_SHIFT) |] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "dispatch getMonth [src/peripherals/rtc.ts:76: (((date.getMonth() + 1) & RTC_0_MONTH_MASK) << RTC_0_MONTH_SHIFT) |]"); abort(); 0; })) + 1)) & (int32_t)(RTC_0_MONTH_MASK))) << (((int32_t)(RTC_0_MONTH_SHIFT)) & 31)))))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(/* TODO: dispatch getDate [src/peripherals/rtc.ts:77: ((date.getDate() & RTC_0_DAY_MASK) << RTC_0_DAY_SHIFT)] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "dispatch getDate [src/peripherals/rtc.ts:77: ((date.getDate() & RTC_0_DAY_MASK) << RTC_0_DAY_SHIFT)]"); abort(); 0; }))) & (int32_t)(RTC_0_DAY_MASK))) << (((int32_t)(RTC_0_DAY_SHIFT)) & 31)))))));
   case RTC_RTC0:
-  return ((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)((uint32_t)(((int32_t)(/* TODO: dispatch getDay [src/peripherals/rtc.ts:81: ((date.getDay() & RTC_1_DOTW_MASK) << RTC_1_DOTW_SHIFT) |] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "dispatch getDay [src/peripherals/rtc.ts:81: ((date.getDay() & RTC_1_DOTW_MASK) << RTC_1_DOTW_SHIFT) |]"); abort(); 0; }))) & (int32_t)(RTC_1_DOTW_MASK))) << (((int32_t)(RTC_1_DOTW_SHIFT)) & 31)))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(/* TODO: dispatch getHours [src/peripherals/rtc.ts:82: ((date.getHours() & RTC_1_HOUR_MASK) << RTC_1_HOUR_SHIFT) |] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "dispatch getHours [src/peripherals/rtc.ts:82: ((date.getHours() & RTC_1_HOUR_MASK) << RTC_1_HOUR_SHIFT) |]"); abort(); 0; }))) & (int32_t)(RTC_1_HOUR_MASK))) << (((int32_t)(RTC_1_HOUR_SHIFT)) & 31)))))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(/* TODO: dispatch getMinutes [src/peripherals/rtc.ts:83: ((date.getMinutes() & RTC_1_MIN_MASK) << RTC_1_MIN_SHIFT) |] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "dispatch getMinutes [src/peripherals/rtc.ts:83: ((date.getMinutes() & RTC_1_MIN_MASK) << RTC_1_MIN_SHIFT) |]"); abort(); 0; }))) & (int32_t)(RTC_1_MIN_MASK))) << (((int32_t)(RTC_1_MIN_SHIFT)) & 31)))))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(/* TODO: dispatch getSeconds [src/peripherals/rtc.ts:84: ((date.getSeconds() & RTC_1_SEC_MASK) << RTC_1_SEC_SHIFT)] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "dispatch getSeconds [src/peripherals/rtc.ts:84: ((date.getSeconds() & RTC_1_SEC_MASK) << RTC_1_SEC_SHIFT)]"); abort(); 0; }))) & (int32_t)(RTC_1_SEC_MASK))) << (((int32_t)(RTC_1_SEC_SHIFT)) & 31)))))));
-  default:
-  break;
+    fprintf(stderr, "[%s] RTC wall-clock read (offset 0x%x) is stubbed in the C build (no Date support in cts2c) -- returning 0\n", self->base.name, offset);
+    return 0;
+  default: break;
   }
-  return BasePeripheral_readUint32(&self->base, offset);
+  return BasePeripheral__RP2040_readUint32(&self->base, offset);
 }
 
 static void RP2040RTC_writeUint32(RP2040RTC* self, int32_t offset, int32_t value) {
   switch (offset) {
-  case RTC_SETUP0:
-  (self->setup0 = value);
-  break;
-  case RTC_SETUP1:
-  (self->setup1 = value);
-  break;
+  case RTC_SETUP0: self->setup0 = value; break;
+  case RTC_SETUP1: self->setup1 = value; break;
   case RTC_CTRL:
-  if (((int32_t)(value) & (int32_t)(RTC_LOAD_BITS))) {
-  (self->ctrl |= RTC_LOAD_BITS);
-  }
-  if (((int32_t)(value) & (int32_t)(RTC_ENABLE_BITS))) {
-  (self->ctrl |= RTC_ENABLE_BITS);
-  (self->ctrl |= RTC_ACTIVE_BITS);
-  if (((int32_t)(self->ctrl) & (int32_t)(RTC_LOAD_BITS))) {
-  int32_t year = ((int32_t)(((int32_t)(self->setup0) >> (((int32_t)(SETUP_0_YEAR_SHIFT)) & 31))) & (int32_t)(SETUP_0_YEAR_MASK));
-  int32_t month = ((int32_t)(((int32_t)(self->setup0) >> (((int32_t)(SETUP_0_MONTH_SHIFT)) & 31))) & (int32_t)(SETUP_0_MONTH_MASK));
-  int32_t day = ((int32_t)(((int32_t)(self->setup0) >> (((int32_t)(SETUP_0_DAY_SHIFT)) & 31))) & (int32_t)(SETUP_0_DAY_MASK));
-  int32_t hour = ((int32_t)(((int32_t)(self->setup1) >> (((int32_t)(SETUP_1_HOUR_SHIFT)) & 31))) & (int32_t)(SETUP_1_HOUR_MASK));
-  int32_t min = ((int32_t)(((int32_t)(self->setup1) >> (((int32_t)(SETUP_1_MIN_SHIFT)) & 31))) & (int32_t)(SETUP_1_MIN_MASK));
-  int32_t sec = ((int32_t)(((int32_t)(self->setup1) >> (((int32_t)(SETUP_1_SEC_SHIFT)) & 31))) & (int32_t)(SETUP_1_SEC_MASK));
-  (self->baseline = ((void*)(/* TODO: new Date() [src/peripherals/rtc.ts:117: this.baseline = new Date(year, month - 1, day, hour, min, sec);] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "new Date() [src/peripherals/rtc.ts:117: this.baseline = new Date(year, month - 1, day, hour, min, sec);]"); abort(); 0; })))));
-  (self->baselineNanos = SimulationClock_getNanos(self->base.rp2040->clock));
-  (self->ctrl &= (~RTC_LOAD_BITS));
-  }
-  } else {
-  (self->ctrl &= (~RTC_ENABLE_BITS));
-  (self->ctrl &= (~RTC_ACTIVE_BITS));
-  }
-  break;
+    if (value & RTC_LOAD_BITS) self->ctrl |= RTC_LOAD_BITS;
+    if (value & RTC_ENABLE_BITS) {
+      self->ctrl |= RTC_ENABLE_BITS;
+      self->ctrl |= RTC_ACTIVE_BITS;
+      if (self->ctrl & RTC_LOAD_BITS) {
+        fprintf(stderr, "[%s] RTC_LOAD (offset 0x%x) is stubbed in the C build (no Date support in cts2c) -- setup0/setup1 recorded but not applied to wall clock\n", self->base.name, offset);
+        self->baselineNanos = SimulationClock_getNanos(self->base.rpchip->clock);
+        self->ctrl &= ~RTC_LOAD_BITS;
+      }
+    } else {
+      self->ctrl &= ~RTC_ENABLE_BITS;
+      self->ctrl &= ~RTC_ACTIVE_BITS;
+    }
+    break;
   default:
-  BasePeripheral_writeUint32(&self->base, offset, value);
+    BasePeripheral__RP2040_writeUint32(&self->base, offset, value);
   }
 }
 
@@ -12278,10 +18057,10 @@ int32_t i = 0
   (state[7] = ((uint32_t)((state[7] + h)) >> (0)));
 }
 
-static RP2350SHA256* RP2350SHA256_new(RP2350* rp2040, const char* name) {
+static RP2350SHA256* RP2350SHA256_new(RP2350* rpchip, const char* name) {
   RP2350SHA256* self = calloc(1, sizeof(RP2350SHA256));
   {
-    BasePeripheral* __base = BasePeripheral_new(rp2040, name);
+    BasePeripheral* __base = BasePeripheral_new(rpchip, name);
     self->base = *__base;
     free(__base);
   }
@@ -12413,31 +18192,31 @@ static int32_t RPSPI_clockFrequency_get(RPSPI* self) {
   return 0;
   }
   int32_t scr = ((int32_t)(((int32_t)(self->control0) >> (((int32_t)(SCR_SHIFT)) & 31))) & (int32_t)(SCR_MASK));
-  return ((double)(self->base.rp2040->clkPeri) / (double)((self->clockDivisor * (1 + scr))));
+  return ((double)(self->base.rpchip->clkPeri) / (double)((self->clockDivisor * (1 + scr))));
 }
 
 static void RPSPI_updateDMATx(RPSPI* self) {
   if (FIFO_full_get(self->txFIFO)) {
-  RP2350_dma_clearDREQ(self->base.rp2040, self->dreq->tx);
+  RP2350_dma_clearDREQ(self->base.rpchip, self->dreq->tx);
   } else {
-  RP2350_dma_setDREQ(self->base.rp2040, self->dreq->tx);
+  RP2350_dma_setDREQ(self->base.rpchip, self->dreq->tx);
   }
 }
 
 static void RPSPI_updateDMARx(RPSPI* self) {
   if (FIFO_empty_get(self->rxFIFO)) {
-  RP2350_dma_clearDREQ(self->base.rp2040, self->dreq->rx);
+  RP2350_dma_clearDREQ(self->base.rpchip, self->dreq->rx);
   } else {
-  RP2350_dma_setDREQ(self->base.rp2040, self->dreq->rx);
+  RP2350_dma_setDREQ(self->base.rpchip, self->dreq->rx);
   }
 }
 
-static RPSPI* RPSPI_new(RP2350* rp2040, const char* name, int32_t irq, ISPIDMAChannels* dreq) {
+static RPSPI* RPSPI_new(RP2350* rpchip, const char* name, int32_t irq, ISPIDMAChannels* dreq) {
   RPSPI* self = calloc(1, sizeof(RPSPI));
   {
-    BasePeripheral* __super_23 = BasePeripheral_new(rp2040, name);
-    self->base = *__super_23;
-    free(__super_23);
+    BasePeripheral* __super_41 = BasePeripheral_new(rpchip, name);
+    self->base = *__super_41;
+    free(__super_41);
   }
   (&(self)->base)->__vtable_Peripheral = &RPSPI_Peripheral_vtable;
   self->irq = irq;
@@ -12479,7 +18258,7 @@ static void RPSPI_completeTransmit(RPSPI* self, int32_t rxValue) {
 }
 
 static void RPSPI_checkInterrupts(RPSPI* self) {
-  RP2350_setInterrupt(self->base.rp2040, self->irq, (!(!RPSPI_intStatus_get(self))));
+  RP2350_setInterrupt(self->base.rpchip, self->irq, (!(!RPSPI_intStatus_get(self))));
 }
 
 static void RPSPI_fifosUpdated(RPSPI* self) {
@@ -12580,27 +18359,332 @@ static void RPSPI_writeUint32(RPSPI* self, int32_t offset, int32_t value) {
   }
 }
 
+static void RPSPI__RP2040_onTransmit_default(void* __ctx, int32_t __arg0) {
+  RPSPI__RP2040* self = (RPSPI__RP2040*)__ctx;
+  return RPSPI__RP2040_completeTransmit(self, 0);
+}
+
+static int32_t RPSPI__RP2040_intStatus_get(RPSPI__RP2040* self) {
+  return ((int32_t)(self->intRaw) & (int32_t)(self->intEnable));
+}
+
+static int32_t RPSPI__RP2040_enabled_get(RPSPI__RP2040* self) {
+  return (!(!((int32_t)(self->control1) & (int32_t)(SSE))));
+}
+
+static int32_t RPSPI__RP2040_dataBits_get(RPSPI__RP2040* self) {
+  return (((int32_t)(((int32_t)(self->control0) >> (((int32_t)(DSS_SHIFT)) & 31))) & (int32_t)(DSS_MASK)) + 1);
+}
+
+static int32_t RPSPI__RP2040_masterMode_get(RPSPI__RP2040* self) {
+  return (!((int32_t)(self->control0) & (int32_t)(MS)));
+}
+
+static int32_t RPSPI__RP2040_spiMode_get(RPSPI__RP2040* self) {
+  int32_t cpol = ((int32_t)(self->control0) & (int32_t)(SPO));
+  int32_t cpha = ((int32_t)(self->control0) & (int32_t)(SPH));
+  return (cpol ? (cpha ? 2 : 3) : (cpha ? 1 : 0));
+}
+
+static int32_t RPSPI__RP2040_clockFrequency_get(RPSPI__RP2040* self) {
+  if ((!self->clockDivisor)) {
+  return 0;
+  }
+  int32_t scr = ((int32_t)(((int32_t)(self->control0) >> (((int32_t)(SCR_SHIFT)) & 31))) & (int32_t)(SCR_MASK));
+  return ((double)(self->base.rpchip->clkPeri) / (double)((self->clockDivisor * (1 + scr))));
+}
+
+static void RPSPI__RP2040_updateDMATx(RPSPI__RP2040* self) {
+  if (FIFO_full_get(self->txFIFO)) {
+  RP2040_dma_clearDREQ(self->base.rpchip, self->dreq->tx);
+  } else {
+  RP2040_dma_setDREQ(self->base.rpchip, self->dreq->tx);
+  }
+}
+
+static void RPSPI__RP2040_updateDMARx(RPSPI__RP2040* self) {
+  if (FIFO_empty_get(self->rxFIFO)) {
+  RP2040_dma_clearDREQ(self->base.rpchip, self->dreq->rx);
+  } else {
+  RP2040_dma_setDREQ(self->base.rpchip, self->dreq->rx);
+  }
+}
+
+static RPSPI__RP2040* RPSPI__RP2040_new(RP2040* rpchip, const char* name, int32_t irq, ISPIDMAChannels* dreq) {
+  RPSPI__RP2040* self = calloc(1, sizeof(RPSPI__RP2040));
+  {
+    BasePeripheral__RP2040* __super_42 = BasePeripheral__RP2040_new(rpchip, name);
+    self->base = *__super_42;
+    free(__super_42);
+  }
+  (&(self)->base)->__vtable_Peripheral = &RPSPI__RP2040_Peripheral_vtable;
+  self->irq = irq;
+  self->dreq = dreq;
+  self->rxFIFO = FIFO_new(8);
+  self->txFIFO = FIFO_new(8);
+  self->onTransmit_fn = RPSPI__RP2040_onTransmit_default;
+  self->onTransmit_ctx = self;
+  self->busy = false;
+  self->control0 = 0;
+  self->control1 = 0;
+  self->dmaControl = 0;
+  self->clockDivisor = 0;
+  self->intRaw = 0;
+  self->intEnable = 0;
+  RPSPI__RP2040_updateDMATx(self);
+  RPSPI__RP2040_updateDMARx(self);
+  return self;
+}
+
+static void RPSPI__RP2040_doTX(RPSPI__RP2040* self) {
+  if (((!self->busy) && (!FIFO_empty_get(self->txFIFO)))) {
+  int32_t value = FIFO_pull(self->txFIFO);
+  (self->busy = true);
+  ((self)->onTransmit_fn ? (self)->onTransmit_fn((self)->onTransmit_ctx, value) : (void)0);
+  RPSPI__RP2040_fifosUpdated(self);
+  }
+}
+
+static void RPSPI__RP2040_completeTransmit(RPSPI__RP2040* self, int32_t rxValue) {
+  (self->busy = false);
+  if ((!FIFO_full_get(self->rxFIFO))) {
+  FIFO_push(self->rxFIFO, rxValue);
+  } else {
+  (self->intRaw |= SSPRORINTR);
+  }
+  RPSPI__RP2040_fifosUpdated(self);
+  RPSPI__RP2040_doTX(self);
+}
+
+static void RPSPI__RP2040_checkInterrupts(RPSPI__RP2040* self) {
+  RP2040_setInterrupt(self->base.rpchip, self->irq, (!(!RPSPI__RP2040_intStatus_get(self))));
+}
+
+static void RPSPI__RP2040_fifosUpdated(RPSPI__RP2040* self) {
+  int32_t prevStatus = RPSPI__RP2040_intStatus_get(self);
+  if ((FIFO_itemCount_get(self->txFIFO) <= ((double)(FIFO_size_get(self->txFIFO)) / (double)(2)))) {
+  (self->intRaw |= SSPTXINTR);
+  } else {
+  (self->intRaw &= (~SSPTXINTR));
+  }
+  if ((FIFO_itemCount_get(self->rxFIFO) >= ((double)(FIFO_size_get(self->rxFIFO)) / (double)(2)))) {
+  (self->intRaw |= SSPRXINTR);
+  } else {
+  (self->intRaw &= (~SSPRXINTR));
+  }
+  if ((RPSPI__RP2040_intStatus_get(self) != prevStatus)) {
+  RPSPI__RP2040_checkInterrupts(self);
+  }
+  RPSPI__RP2040_updateDMATx(self);
+  RPSPI__RP2040_updateDMARx(self);
+}
+
+static int32_t RPSPI__RP2040_readUint32(RPSPI__RP2040* self, int32_t offset) {
+  switch (offset) {
+  case SSPCR0:
+  return self->control0;
+  case SSPCR1:
+  return self->control1;
+  case SSPDR:
+  if ((!FIFO_empty_get(self->rxFIFO))) {
+  int32_t value = FIFO_pull(self->rxFIFO);
+  RPSPI__RP2040_fifosUpdated(self);
+  return value;
+  }
+  return 0;
+  case SSPSR:
+  return ((int32_t)(((int32_t)(((int32_t)(((int32_t)(((self->busy || (!FIFO_empty_get(self->txFIFO))) ? BSY : 0)) | (int32_t)((FIFO_full_get(self->rxFIFO) ? RFF__spi : 0)))) | (int32_t)(((!FIFO_empty_get(self->rxFIFO)) ? RNE : 0)))) | (int32_t)(((!FIFO_full_get(self->txFIFO)) ? TNF : 0)))) | (int32_t)((FIFO_empty_get(self->txFIFO) ? TFE__spi : 0)));
+  case SSPCPSR:
+  return self->clockDivisor;
+  case SSPIMSC:
+  return self->intEnable;
+  case SSPRIS:
+  return self->intRaw;
+  case SSPMIS:
+  return RPSPI__RP2040_intStatus_get(self);
+  case SSPDMACR:
+  return self->dmaControl;
+  case SSPPERIPHID0:
+  return 34;
+  case SSPPERIPHID1:
+  return 16;
+  case SSPPERIPHID2:
+  return 52;
+  case SSPPERIPHID3:
+  return 0;
+  case SSPPCELLID0:
+  return 13;
+  case SSPPCELLID1:
+  return 240;
+  case SSPPCELLID2:
+  return 5;
+  case SSPPCELLID3:
+  return 177;
+  }
+  return BasePeripheral__RP2040_readUint32(&self->base, offset);
+}
+
+static void RPSPI__RP2040_writeUint32(RPSPI__RP2040* self, int32_t offset, int32_t value) {
+  switch (offset) {
+  case SSPCR0:
+  (self->control0 = value);
+  return;
+  case SSPCR1:
+  (self->control1 = value);
+  return;
+  case SSPDR:
+  if ((!FIFO_full_get(self->txFIFO))) {
+  FIFO_push(self->txFIFO, ((int32_t)(value) & (int32_t)((((int32_t)((uint32_t)(1) << (((int32_t)(RPSPI__RP2040_dataBits_get(self))) & 31))) - 1))));
+  RPSPI__RP2040_doTX(self);
+  RPSPI__RP2040_fifosUpdated(self);
+  }
+  return;
+  case SSPCPSR:
+  (self->clockDivisor = ((int32_t)(value) & (int32_t)(CPSDVSR_MASK)));
+  return;
+  case SSPIMSC:
+  (self->intEnable = value);
+  RPSPI__RP2040_checkInterrupts(self);
+  return;
+  case SSPDMACR:
+  (self->dmaControl = value);
+  return;
+  case SSPICR:
+  (self->intRaw &= (~((int32_t)(value) & (int32_t)(((int32_t)(SSPRTINTR) | (int32_t)(SSPRORINTR))))));
+  RPSPI__RP2040_checkInterrupts(self);
+  return;
+  default:
+  BasePeripheral__RP2040_writeUint32(&self->base, offset, value);
+  }
+}
+
 // ─── ssi.ts ───
+enum { SSI_CTRLR0 = (0) };
+enum { SSI_SSIENR = (8) };
+enum { SSI_SER = (16) };
+enum { SSI_BAUDR = (20) };
 enum { SSI_TXFLR = (32) };
 enum { SSI_RXFLR = (36) };
 enum { SSI_SR = (40) };
 enum { SSI_DR0 = (96) };
+enum { SSI_IDR = (88) };
+enum { SSI_VERSION_ID = (92) };
 enum { SSI_SR_TFNF_BITS = (2) };
 enum { SSI_SR_TFE_BITS = (4) };
 enum { SSI_SR_RFNE_BITS = (8) };
-enum { SSI_IDR = (88) };
-enum { SSI_VERSION_ID = (92) };
+enum { CMD_READ_DATA = (3) };
+enum { CMD_READ_SFDP = (90) };
 enum { CMD_READ_STATUS = (5) };
-static RPSSI* RPSSI_new(RP2350* rp2040, const char* name) {
+enum { CMD_JEDEC_ID = (159) };
+static RPSSI* RPSSI_new(RP2040* rpchip, const char* name) {
   RPSSI* self = calloc(1, sizeof(RPSSI));
   {
-    BasePeripheral* __base = BasePeripheral_new(rp2040, name);
+    BasePeripheral__RP2040* __base = BasePeripheral__RP2040_new(rpchip, name);
     self->base = *__base;
     free(__base);
   }
   (&(self)->base)->__vtable_Peripheral = &RPSSI_Peripheral_vtable;
-  self->dr0 = 0;
+  self->regs = calloc(256, sizeof(uint32_t));
+  self->phase = SpiPhase_Idle;
+  self->flashCmd = 0;
+  self->flashAddr = 0;
+  self->addrBytesRemaining = 0;
+  self->rxFifoHead = 0;
+  self->rxFifoTail = 0;
+  self->rxFifoCount = 0;
   return self;
+}
+
+static void RPSSI_resetSpiState(RPSSI* self) {
+  (self->phase = SpiPhase_Idle);
+  (self->flashCmd = 0);
+  (self->flashAddr = 0);
+  (self->addrBytesRemaining = 0);
+  (self->rxFifoHead = 0);
+  (self->rxFifoTail = 0);
+  (self->rxFifoCount = 0);
+}
+
+static void RPSSI_rxFifoPush(RPSSI* self, int32_t value) {
+  if ((self->rxFifoCount < 16)) {
+  (self->rxFifo[self->rxFifoTail] = ((int32_t)(value) & (int32_t)(255)));
+  (self->rxFifoTail = ((int32_t)((self->rxFifoTail + 1)) & (int32_t)(15)));
+  (self->rxFifoCount++);
+  }
+}
+
+static int32_t RPSSI_rxFifoShift(RPSSI* self) {
+  if ((self->rxFifoCount == 0)) {
+  return 0;
+  }
+  uint8_t value = self->rxFifo[self->rxFifoHead];
+  (self->rxFifoHead = ((int32_t)((self->rxFifoHead + 1)) & (int32_t)(15)));
+  (self->rxFifoCount--);
+  return value;
+}
+
+static int32_t RPSSI_processSpiByte(RPSSI* self, int32_t txByte) {
+  switch (self->phase) {
+  case SpiPhase_Idle:
+  {
+  (self->flashCmd = txByte);
+  switch (txByte) {
+  case CMD_READ_DATA:
+  case CMD_READ_SFDP:
+  (self->phase = SpiPhase_Addr);
+  (self->flashAddr = 0);
+  (self->addrBytesRemaining = 3);
+  break;
+  case CMD_READ_STATUS:
+  (self->phase = SpiPhase_Status);
+  break;
+  case CMD_JEDEC_ID:
+  (self->phase = SpiPhase_Jedec);
+  (self->addrBytesRemaining = 0);
+  break;
+  default:
+  break;
+  }
+  return 255;
+  }
+  case SpiPhase_Addr:
+  {
+  (self->flashAddr = ((uint32_t)(((int32_t)(((int32_t)((uint32_t)(self->flashAddr) << (8)))) | (int32_t)(((int32_t)(txByte) & (int32_t)(255))))) >> (0)));
+  if (((--self->addrBytesRemaining) == 0)) {
+  (self->phase = ((self->flashCmd == CMD_READ_SFDP) ? SpiPhase_Dummy : SpiPhase_Data));
+  }
+  return 255;
+  }
+  case SpiPhase_Dummy:
+  (self->phase = SpiPhase_Data);
+  return 255;
+  case SpiPhase_Data:
+  {
+  uint8_t* flash = self->base.rpchip->flash;
+  int32_t byte = ((self->flashAddr < 16777216) ? flash[self->flashAddr] : 255);
+  (self->flashAddr = ((uint32_t)((self->flashAddr + 1)) >> (0)));
+  return byte;
+  }
+  case SpiPhase_Status:
+  return 0;
+  case SpiPhase_Jedec:
+  {
+  int32_t idx = (self->addrBytesRemaining++);
+  if ((idx == 0)) {
+  return 239;
+  }
+  if ((idx == 1)) {
+  return 18;
+  }
+  if ((idx == 2)) {
+  return 17;
+  }
+  return 255;
+  }
+  default:
+  return 255;
+  }
+  return (int32_t){0};
 }
 
 static int32_t RPSSI_readUint32(RPSSI* self, int32_t offset) {
@@ -12608,36 +18692,56 @@ static int32_t RPSSI_readUint32(RPSSI* self, int32_t offset) {
   case SSI_TXFLR:
   return 0;
   case SSI_RXFLR:
-  return 0;
+  return self->rxFifoCount;
   case SSI_SR:
-  return ((int32_t)(((int32_t)(SSI_SR_TFE_BITS) | (int32_t)(SSI_SR_RFNE_BITS))) | (int32_t)(SSI_SR_TFNF_BITS));
+  return ((uint32_t)(((int32_t)(((int32_t)(SSI_SR_TFE_BITS) | (int32_t)(SSI_SR_TFNF_BITS))) | (int32_t)(((self->rxFifoCount > 0) ? SSI_SR_RFNE_BITS : 0)))) >> (0));
+  case SSI_DR0:
+  return RPSSI_rxFifoShift(self);
   case SSI_IDR:
   return 1364414537;
   case SSI_VERSION_ID:
   return 875573546;
-  case SSI_DR0:
-  return self->dr0;
+  default:
+  if ((offset < (256 * 4))) {
+  return self->regs[(offset / 4)];
   }
-  return BasePeripheral_readUint32(&self->base, offset);
+  return BasePeripheral__RP2040_readUint32(&self->base, offset);
+  }
+  return (int32_t){0};
 }
 
 static void RPSSI_writeUint32(RPSSI* self, int32_t offset, int32_t value) {
   switch (offset) {
-  case SSI_DR0:
-  if ((value == CMD_READ_STATUS)) {
-  (self->dr0 = 0);
+  case SSI_SSIENR:
+  if ((((int32_t)(value) & (int32_t)(1)) == 0)) {
+  RPSSI_resetSpiState(self);
   }
-  return;
+  if ((((double)(offset) / (double)(4)) < 256)) {
+  (self->regs[(offset / 4)] = ((int32_t)(value) & (int32_t)(1)));
+  }
+  break;
+  case SSI_DR0:
+  {
+  int32_t txByte = ((int32_t)(value) & (int32_t)(255));
+  int32_t rxByte = RPSSI_processSpiByte(self, txByte);
+  RPSSI_rxFifoPush(self, rxByte);
+  break;
+  }
   default:
-  BasePeripheral_writeUint32(&self->base, offset, value);
+  if ((((double)(offset) / (double)(4)) < 256)) {
+  (self->regs[(offset / 4)] = ((uint32_t)(value) >> (0)));
+  } else {
+  BasePeripheral__RP2040_writeUint32(&self->base, offset, value);
+  }
+  break;
   }
 }
 
 // ─── syscfg_rp2350.ts ───
-static RP2350SysCfg* RP2350SysCfg_new(RP2350* rp2040, const char* name) {
+static RP2350SysCfg* RP2350SysCfg_new(RP2350* rpchip, const char* name) {
   RP2350SysCfg* self = calloc(1, sizeof(RP2350SysCfg));
   {
-    BasePeripheral* __base = BasePeripheral_new(rp2040, name);
+    BasePeripheral* __base = BasePeripheral_new(rpchip, name);
     self->base = *__base;
     free(__base);
   }
@@ -12656,15 +18760,52 @@ static void RP2350SysCfg_writeUint32(RP2350SysCfg* self, int32_t offset, int32_t
   BasePeripheral_writeUint32(&self->base, offset, value);
 }
 
+// ─── syscfg.ts ───
+enum { PROC0_NMI_MASK = (0) };
+enum { PROC1_NMI_MASK = (4) };
+static RP2040SysCfg* RP2040SysCfg_new(RP2040* rpchip, const char* name) {
+  RP2040SysCfg* self = calloc(1, sizeof(RP2040SysCfg));
+  {
+    BasePeripheral__RP2040* __base = BasePeripheral__RP2040_new(rpchip, name);
+    self->base = *__base;
+    free(__base);
+  }
+  (&(self)->base)->__vtable_Peripheral = &RP2040SysCfg_Peripheral_vtable;
+  return self;
+}
+
+static int32_t RP2040SysCfg_readUint32(RP2040SysCfg* self, int32_t offset) {
+  switch (offset) {
+  case PROC0_NMI_MASK:
+  return RP2040_core0_get(self->base.rpchip)->interruptNMIMask;
+  case PROC1_NMI_MASK:
+  return RP2040_core1_get(self->base.rpchip)->interruptNMIMask;
+  }
+  return BasePeripheral__RP2040_readUint32(&self->base, offset);
+}
+
+static void RP2040SysCfg_writeUint32(RP2040SysCfg* self, int32_t offset, int32_t value) {
+  switch (offset) {
+  case PROC0_NMI_MASK:
+  (RP2040_core0_get(self->base.rpchip)->interruptNMIMask = value);
+  break;
+  case PROC1_NMI_MASK:
+  (RP2040_core1_get(self->base.rpchip)->interruptNMIMask = value);
+  break;
+  default:
+  BasePeripheral__RP2040_writeUint32(&self->base, offset, value);
+  }
+}
+
 // ─── sysinfo_rp2350.ts ───
 enum { CHIP_ID = (0) };
 enum { PACKAGE_SEL = (4) };
 enum { PLATFORM = (8) };
 enum { GITREF_RP2350 = (20) };
-static RP2350SysInfo* RP2350SysInfo_new(RP2350* rp2040, const char* name) {
+static RP2350SysInfo* RP2350SysInfo_new(RP2350* rpchip, const char* name) {
   RP2350SysInfo* self = calloc(1, sizeof(RP2350SysInfo));
   {
-    BasePeripheral* __base = BasePeripheral_new(rp2040, name);
+    BasePeripheral* __base = BasePeripheral_new(rpchip, name);
     self->base = *__base;
     free(__base);
   }
@@ -12689,10 +18830,10 @@ static int32_t RP2350SysInfo_readUint32(RP2350SysInfo* self, int32_t offset) {
 // ─── sysinfo.ts ───
 enum { PLATFORM__sysinfo = (4) };
 enum { GITREF_RP2040 = (64) };
-static RP2040SysInfo* RP2040SysInfo_new(RP2350* rp2040, const char* name) {
+static RP2040SysInfo* RP2040SysInfo_new(RP2040* rpchip, const char* name) {
   RP2040SysInfo* self = calloc(1, sizeof(RP2040SysInfo));
   {
-    BasePeripheral* __base = BasePeripheral_new(rp2040, name);
+    BasePeripheral__RP2040* __base = BasePeripheral__RP2040_new(rpchip, name);
     self->base = *__base;
     free(__base);
   }
@@ -12709,16 +18850,16 @@ static int32_t RP2040SysInfo_readUint32(RP2040SysInfo* self, int32_t offset) {
   case GITREF_RP2040:
   return 3771273960u;
   }
-  return BasePeripheral_readUint32(&self->base, offset);
+  return BasePeripheral__RP2040_readUint32(&self->base, offset);
 }
 
 // ─── tbman.ts ───
 enum { PLATFORM__tbman = (0) };
 enum { ASIC = (1) };
-static RPTBMAN* RPTBMAN_new(RP2350* rp2040, const char* name) {
+static RPTBMAN* RPTBMAN_new(RP2350* rpchip, const char* name) {
   RPTBMAN* self = calloc(1, sizeof(RPTBMAN));
   {
-    BasePeripheral* __base = BasePeripheral_new(rp2040, name);
+    BasePeripheral* __base = BasePeripheral_new(rpchip, name);
     self->base = *__base;
     free(__base);
   }
@@ -12732,6 +18873,27 @@ static int32_t RPTBMAN_readUint32(RPTBMAN* self, int32_t offset) {
   return ASIC;
   default:
   return BasePeripheral_readUint32(&self->base, offset);
+  }
+  return (int32_t){0};
+}
+
+static RPTBMAN__RP2040* RPTBMAN__RP2040_new(RP2040* rpchip, const char* name) {
+  RPTBMAN__RP2040* self = calloc(1, sizeof(RPTBMAN__RP2040));
+  {
+    BasePeripheral__RP2040* __base = BasePeripheral__RP2040_new(rpchip, name);
+    self->base = *__base;
+    free(__base);
+  }
+  (&(self)->base)->__vtable_Peripheral = &RPTBMAN__RP2040_Peripheral_vtable;
+  return self;
+}
+
+static int32_t RPTBMAN__RP2040_readUint32(RPTBMAN__RP2040* self, int32_t offset) {
+  switch (offset) {
+  case PLATFORM__tbman:
+  return ASIC;
+  default:
+  return BasePeripheral__RP2040_readUint32(&self->base, offset);
   }
   return (int32_t){0};
 }
@@ -12770,12 +18932,12 @@ static void RPTimerAlarm_fire(RPTimerAlarm* self) {
   RPTimer_fireAlarm(self->timer, self->index);
 }
 
-static RPTimer* RPTimer_new(RP2350* rp2040, const char* name, int32_t timer_irq_base) {
+static RPTimer* RPTimer_new(RP2350* rpchip, const char* name, int32_t timer_irq_base) {
   RPTimer* self = calloc(1, sizeof(RPTimer));
   {
-    BasePeripheral* __super_24 = BasePeripheral_new(rp2040, name);
-    self->base = *__super_24;
-    free(__super_24);
+    BasePeripheral* __super_43 = BasePeripheral_new(rpchip, name);
+    self->base = *__super_43;
+    free(__super_43);
   }
   (&(self)->base)->__vtable_Peripheral = &RPTimer_Peripheral_vtable;
   self->timer_irq_base = timer_irq_base;
@@ -12785,13 +18947,13 @@ static RPTimer* RPTimer_new(RP2350* rp2040, const char* name, int32_t timer_irq_
   self->intForce = 0;
   self->paused = false;
   self->intRegBase = 0;
-  (self->clock = (IClock){ .obj = (void*)(rp2040->clock), .vtable = &SimulationClock_IClock_vtable });
-  do { const char* __switch_tmp_25 = rp2040->identifier;
-  if (strcmp(__switch_tmp_25, "rp2040") == 0) {
+  (self->clock = (IClock){ .obj = (void*)(rpchip->clock), .vtable = &SimulationClock_IClock_vtable });
+  do { const char* __switch_tmp_44 = rpchip->identifier;
+  if (strcmp(__switch_tmp_44, "rp2040") == 0) {
   (self->intRegBase = 52);
   break;
   }
-  else if (strcmp(__switch_tmp_25, "rp2350") == 0) {
+  else if (strcmp(__switch_tmp_44, "rp2350") == 0) {
   (self->intRegBase = 60);
   break;
   }
@@ -12873,10 +19035,10 @@ static void RPTimer_writeUint32(RPTimer* self, int32_t offset, int32_t value) {
   {
   int32_t alarmIndex = ((double)((offset - ALARM0)) / (double)(4));
   RPTimerAlarm* alarm = self->alarms[alarmIndex];
-  int32_t deltaMicros = ((uint32_t)((value - ((double)(IClock_getNanos(self->clock)) / (double)(1000)))) >> (0));
+  double deltaMicros = ((uint32_t)((value - ((double)(IClock_getNanos(self->clock)) / (double)(1000)))) >> (0));
   (alarm->armed = true);
   (alarm->targetMicros = value);
-  IAlarm_schedule(alarm->clockAlarm, (deltaMicros * 1000));
+  IAlarm_schedule(alarm->clockAlarm, (deltaMicros * 1000.0));
   return;
   }
   case ARMED:
@@ -12927,11 +19089,192 @@ static void RPTimer_checkInterrupts(RPTimer* self) {
   for (
 int32_t i = 0
 ; (i < 4); (i++)) {
-  RP2350_setInterrupt(self->base.rp2040, (self->timer_irq_base + i), (!(!((int32_t)(intStatus) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(i)) & 31))))))));
+  RP2350_setInterrupt(self->base.rpchip, (self->timer_irq_base + i), (!(!((int32_t)(intStatus) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(i)) & 31))))))));
   }
 }
 
 static void RPTimer_disarmAlarm(RPTimer* self, RPTimerAlarm* alarm) {
+  IAlarm_cancel(alarm->clockAlarm);
+  (alarm->armed = false);
+}
+
+static RPTimerAlarm__RP2040* RPTimerAlarm__RP2040_new(RPTimer__RP2040* timer, int32_t bitValue, int32_t index) {
+  RPTimerAlarm__RP2040* self = calloc(1, sizeof(RPTimerAlarm__RP2040));
+  (self)->__vtable_AlarmCallback = &RPTimerAlarm__RP2040_AlarmCallback_vtable;
+  self->timer = timer;
+  self->bitValue = bitValue;
+  self->index = index;
+  self->armed = false;
+  self->targetMicros = 0;
+  return self;
+}
+
+static void RPTimerAlarm__RP2040_fire(RPTimerAlarm__RP2040* self) {
+  RPTimer__RP2040_fireAlarm(self->timer, self->index);
+}
+
+static RPTimer__RP2040* RPTimer__RP2040_new(RP2040* rpchip, const char* name, int32_t timer_irq_base) {
+  RPTimer__RP2040* self = calloc(1, sizeof(RPTimer__RP2040));
+  {
+    BasePeripheral__RP2040* __super_45 = BasePeripheral__RP2040_new(rpchip, name);
+    self->base = *__super_45;
+    free(__super_45);
+  }
+  (&(self)->base)->__vtable_Peripheral = &RPTimer__RP2040_Peripheral_vtable;
+  self->timer_irq_base = timer_irq_base;
+  self->latchedTimeHigh = 0;
+  self->intRaw = 0;
+  self->intEnable = 0;
+  self->intForce = 0;
+  self->paused = false;
+  self->intRegBase = 0;
+  (self->clock = (IClock){ .obj = (void*)(rpchip->clock), .vtable = &SimulationClock_IClock_vtable });
+  do { const char* __switch_tmp_46 = rpchip->identifier;
+  if (strcmp(__switch_tmp_46, "rp2040") == 0) {
+  (self->intRegBase = 52);
+  break;
+  }
+  else if (strcmp(__switch_tmp_46, "rp2350") == 0) {
+  (self->intRegBase = 60);
+  break;
+  }
+  else {
+  fprintf(stderr, "Error: %s\n", "Unknown rpchip identifier");
+  abort();
+  }
+  } while (0);
+  self->alarms[0] = RPTimerAlarm__RP2040_new(self, ALARM_0, 0);
+  self->alarms[1] = RPTimerAlarm__RP2040_new(self, ALARM_1, 1);
+  self->alarms[2] = RPTimerAlarm__RP2040_new(self, ALARM_2, 2);
+  self->alarms[3] = RPTimerAlarm__RP2040_new(self, ALARM_3, 3);
+  {
+    int32_t __forof_n = 4;
+    for (int32_t __forof_i = 0; __forof_i < __forof_n; __forof_i++) {
+      RPTimerAlarm__RP2040* alarm = self->alarms[__forof_i];
+  (alarm->clockAlarm = IClock_createAlarm(self->clock, (AlarmCallback){ .obj = (void*)(alarm), .vtable = &RPTimerAlarm__RP2040_AlarmCallback_vtable }));
+    }
+  }
+  return self;
+}
+
+static int32_t RPTimer__RP2040_intStatus_get(RPTimer__RP2040* self) {
+  return ((int32_t)(((int32_t)(self->intRaw) & (int32_t)(self->intEnable))) | (int32_t)(self->intForce));
+}
+
+static int32_t RPTimer__RP2040_readUint32(RPTimer__RP2040* self, int32_t offset) {
+  switch (offset) {
+  case TIMEHR:
+  return self->latchedTimeHigh;
+  case TIMELR:
+  {
+  double time = ((double)(IClock_getNanos(self->clock)) / (double)(1000));
+  (self->latchedTimeHigh = floor(((double)(time) / (double)(pow(2, 32)))));
+  return ((uint32_t)(time) >> (0));
+  }
+  case TIMERAWH:
+  {
+  double time = ((double)(IClock_getNanos(self->clock)) / (double)(1000));
+  return floor(((double)(time) / (double)(pow(2, 32))));
+  }
+  case TIMERAWL:
+  {
+  double time = ((double)(IClock_getNanos(self->clock)) / (double)(1000));
+  return ((uint32_t)(time) >> (0));
+  }
+  case ALARM0:
+  return self->alarms[0]->targetMicros;
+  case ALARM1:
+  return self->alarms[1]->targetMicros;
+  case ALARM2:
+  return self->alarms[2]->targetMicros;
+  case ALARM3:
+  return self->alarms[3]->targetMicros;
+  case PAUSE:
+  return (self->paused ? 1 : 0);
+  case ARMED:
+  return ((int32_t)(((int32_t)(((int32_t)((self->alarms[0]->armed ? self->alarms[0]->bitValue : 0)) | (int32_t)((self->alarms[1]->armed ? self->alarms[1]->bitValue : 0)))) | (int32_t)((self->alarms[2]->armed ? self->alarms[2]->bitValue : 0)))) | (int32_t)((self->alarms[3]->armed ? self->alarms[3]->bitValue : 0)));
+  }
+  switch ((offset - self->intRegBase)) {
+  case INTR__timer:
+  return self->intRaw;
+  case INTE__timer:
+  return self->intEnable;
+  case INTF__timer:
+  return self->intForce;
+  case INTS__timer:
+  return RPTimer__RP2040_intStatus_get(self);
+  }
+  return BasePeripheral__RP2040_readUint32(&self->base, offset);
+}
+
+static void RPTimer__RP2040_writeUint32(RPTimer__RP2040* self, int32_t offset, int32_t value) {
+  switch (offset) {
+  case ALARM0:
+  case ALARM1:
+  case ALARM2:
+  case ALARM3:
+  {
+  int32_t alarmIndex = ((double)((offset - ALARM0)) / (double)(4));
+  RPTimerAlarm__RP2040* alarm = self->alarms[alarmIndex];
+  double deltaMicros = ((uint32_t)((value - ((double)(IClock_getNanos(self->clock)) / (double)(1000)))) >> (0));
+  (alarm->armed = true);
+  (alarm->targetMicros = value);
+  IAlarm_schedule(alarm->clockAlarm, (deltaMicros * 1000.0));
+  return;
+  }
+  case ARMED:
+  {
+    int32_t __forof_n = 4;
+    for (int32_t __forof_i = 0; __forof_i < __forof_n; __forof_i++) {
+      RPTimerAlarm__RP2040* alarm = self->alarms[__forof_i];
+  if (((int32_t)(self->base.rawWriteValue) & (int32_t)(alarm->bitValue))) {
+  RPTimer__RP2040_disarmAlarm(self, alarm);
+  }
+    }
+  }
+  return;
+  case PAUSE:
+  (self->paused = (!(!((int32_t)(value) & (int32_t)(1)))));
+  if (self->paused) {
+  BasePeripheral__RP2040_warn(&self->base, "Unimplemented Timer Pause");
+  }
+  return;
+  }
+  switch ((offset - self->intRegBase)) {
+  case INTR__timer:
+  (self->intRaw &= (~self->base.rawWriteValue));
+  RPTimer__RP2040_checkInterrupts(self);
+  return;
+  case INTE__timer:
+  (self->intEnable = ((int32_t)(value) & (int32_t)(15)));
+  RPTimer__RP2040_checkInterrupts(self);
+  return;
+  case INTF__timer:
+  (self->intForce = ((int32_t)(value) & (int32_t)(15)));
+  RPTimer__RP2040_checkInterrupts(self);
+  return;
+  }
+  BasePeripheral__RP2040_writeUint32(&self->base, offset, value);
+}
+
+static void RPTimer__RP2040_fireAlarm(RPTimer__RP2040* self, int32_t index) {
+  RPTimerAlarm__RP2040* alarm = self->alarms[index];
+  RPTimer__RP2040_disarmAlarm(self, alarm);
+  (self->intRaw |= alarm->bitValue);
+  RPTimer__RP2040_checkInterrupts(self);
+}
+
+static void RPTimer__RP2040_checkInterrupts(RPTimer__RP2040* self) {
+  RPTimer__RP2040* __destruct_tmp_1 = self;
+  int32_t intStatus = RPTimer__RP2040_intStatus_get(__destruct_tmp_1);
+  for (
+int32_t i = 0
+; (i < 4); (i++)) {
+  RP2040_setInterrupt(self->base.rpchip, (self->timer_irq_base + i), (!(!((int32_t)(intStatus) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(i)) & 31))))))));
+  }
+}
+
+static void RPTimer__RP2040_disarmAlarm(RPTimer__RP2040* self, RPTimerAlarm__RP2040* alarm) {
   IAlarm_cancel(alarm->clockAlarm);
   (alarm->armed = false);
 }
@@ -12946,10 +19289,10 @@ enum { EHR_DATA5_OFFSET = (296) };
 enum { RND_SOURCE_ENABLE_OFFSET = (300) };
 enum { TRNG_SW_RESET_OFFSET = (320) };
 enum { SEED = (592494814) };
-static RP2350TRNG* RP2350TRNG_new(RP2350* rp2040, const char* name) {
+static RP2350TRNG* RP2350TRNG_new(RP2350* rpchip, const char* name) {
   RP2350TRNG* self = calloc(1, sizeof(RP2350TRNG));
   {
-    BasePeripheral* __base = BasePeripheral_new(rp2040, name);
+    BasePeripheral* __base = BasePeripheral_new(rpchip, name);
     self->base = *__base;
     free(__base);
   }
@@ -13058,12 +19401,12 @@ enum { TXE = (256) }; /* ((int32_t)((uint32_t)(1) << (8))) */
 enum { UARTEN = (1) }; /* ((int32_t)((uint32_t)(1) << (0))) */
 enum { UARTTXINTR = (32) }; /* ((int32_t)((uint32_t)(1) << (5))) */
 enum { UARTRXINTR = (16) }; /* ((int32_t)((uint32_t)(1) << (4))) */
-static RPUART* RPUART_new(RP2350* rp2040, const char* name, int32_t irq, IUARTDMAChannels* dreq) {
+static RPUART* RPUART_new(RP2350* rpchip, const char* name, int32_t irq, IUARTDMAChannels* dreq) {
   RPUART* self = calloc(1, sizeof(RPUART));
   {
-    BasePeripheral* __super_26 = BasePeripheral_new(rp2040, name);
-    self->base = *__super_26;
-    free(__super_26);
+    BasePeripheral* __super_47 = BasePeripheral_new(rpchip, name);
+    self->base = *__super_47;
+    free(__super_47);
   }
   (&(self)->base)->__vtable_Peripheral = &RPUART_Peripheral_vtable;
   self->irq = irq;
@@ -13113,7 +19456,7 @@ static int32_t RPUART_baudDivider_get(RPUART* self) {
 }
 
 static int32_t RPUART_baudRate_get(RPUART* self) {
-  return round(((double)(self->base.rp2040->clkPeri) / (double)((RPUART_baudDivider_get(self) * 16))));
+  return round(((double)(self->base.rpchip->clkPeri) / (double)((RPUART_baudDivider_get(self) * 16))));
 }
 
 static int32_t RPUART_flags_get(RPUART* self) {
@@ -13122,7 +19465,7 @@ static int32_t RPUART_flags_get(RPUART* self) {
 
 static void RPUART_checkInterrupts(RPUART* self) {
   (self->interruptStatus |= UARTTXINTR);
-  RP2350_setInterrupt(self->base.rp2040, self->irq, (!(!((int32_t)(self->interruptStatus) & (int32_t)(self->interruptMask)))));
+  RP2350_setInterrupt(self->base.rpchip, self->irq, (!(!((int32_t)(self->interruptStatus) & (int32_t)(self->interruptMask)))));
 }
 
 static void RPUART_feedByte(RPUART* self, int32_t value) {
@@ -13199,9 +19542,9 @@ static void RPUART_writeUint32(RPUART* self, int32_t offset, int32_t value) {
   case UARTCR:
   (self->ctrlRegister = value);
   if (RPUART_enabled_get(self)) {
-  RP2350_dma_setDREQ(self->base.rp2040, self->dreq->tx);
+  RP2350_dma_setDREQ(self->base.rpchip, self->dreq->tx);
   } else {
-  RP2350_dma_clearDREQ(self->base.rp2040, self->dreq->tx);
+  RP2350_dma_clearDREQ(self->base.rpchip, self->dreq->tx);
   }
   break;
   case UARTIMSC:
@@ -13214,6 +19557,165 @@ static void RPUART_writeUint32(RPUART* self, int32_t offset, int32_t value) {
   break;
   default:
   BasePeripheral_writeUint32(&self->base, offset, value);
+  }
+}
+
+static RPUART__RP2040* RPUART__RP2040_new(RP2040* rpchip, const char* name, int32_t irq, IUARTDMAChannels* dreq) {
+  RPUART__RP2040* self = calloc(1, sizeof(RPUART__RP2040));
+  {
+    BasePeripheral__RP2040* __super_48 = BasePeripheral__RP2040_new(rpchip, name);
+    self->base = *__super_48;
+    free(__super_48);
+  }
+  (&(self)->base)->__vtable_Peripheral = &RPUART__RP2040_Peripheral_vtable;
+  self->irq = irq;
+  self->dreq = dreq;
+  self->ctrlRegister = ((int32_t)(RXE) | (int32_t)(TXE));
+  self->lineCtrlRegister = 0;
+  self->rxFIFO = FIFO_new(32);
+  self->interruptMask = 0;
+  self->interruptStatus = 0;
+  self->intDivisor = 0;
+  self->fracDivisor = 0;
+  return self;
+}
+
+static int32_t RPUART__RP2040_enabled_get(RPUART__RP2040* self) {
+  return (!(!((int32_t)(self->ctrlRegister) & (int32_t)(UARTEN))));
+}
+
+static int32_t RPUART__RP2040_txEnabled_get(RPUART__RP2040* self) {
+  return (!(!((int32_t)(self->ctrlRegister) & (int32_t)(TXE))));
+}
+
+static int32_t RPUART__RP2040_rxEnabled_get(RPUART__RP2040* self) {
+  return (!(!((int32_t)(self->ctrlRegister) & (int32_t)(RXE))));
+}
+
+static int32_t RPUART__RP2040_fifosEnabled_get(RPUART__RP2040* self) {
+  return (!(!((int32_t)(self->lineCtrlRegister) & (int32_t)(FEN))));
+}
+
+static int32_t RPUART__RP2040_wordLength_get(RPUART__RP2040* self) {
+  switch (((int32_t)(((uint32_t)(self->lineCtrlRegister) >> (5))) & (int32_t)(3))) {
+  case 0:
+  return 5;
+  case 1:
+  return 6;
+  case 2:
+  return 7;
+  case 3:
+  return 8;
+  }
+  return (int32_t){0};
+}
+
+static int32_t RPUART__RP2040_baudDivider_get(RPUART__RP2040* self) {
+  return (self->intDivisor + ((double)(self->fracDivisor) / (double)(64)));
+}
+
+static int32_t RPUART__RP2040_baudRate_get(RPUART__RP2040* self) {
+  return round(((double)(self->base.rpchip->clkPeri) / (double)((RPUART__RP2040_baudDivider_get(self) * 16))));
+}
+
+static int32_t RPUART__RP2040_flags_get(RPUART__RP2040* self) {
+  return ((int32_t)(((int32_t)((FIFO_full_get(self->rxFIFO) ? RXFF : 0)) | (int32_t)((FIFO_empty_get(self->rxFIFO) ? RXFE : 0)))) | (int32_t)(TXFE));
+}
+
+static void RPUART__RP2040_checkInterrupts(RPUART__RP2040* self) {
+  (self->interruptStatus |= UARTTXINTR);
+  RP2040_setInterrupt(self->base.rpchip, self->irq, (!(!((int32_t)(self->interruptStatus) & (int32_t)(self->interruptMask)))));
+}
+
+static void RPUART__RP2040_feedByte(RPUART__RP2040* self, int32_t value) {
+  FIFO_push(self->rxFIFO, value);
+  (self->interruptStatus |= UARTRXINTR);
+  RPUART__RP2040_checkInterrupts(self);
+}
+
+static int32_t RPUART__RP2040_readUint32(RPUART__RP2040* self, int32_t offset) {
+  switch (offset) {
+  case UARTDR:
+  {
+  int32_t value = FIFO_pull(self->rxFIFO);
+  if ((!FIFO_empty_get(self->rxFIFO))) {
+  (self->interruptStatus |= UARTRXINTR);
+  } else {
+  (self->interruptStatus &= (~UARTRXINTR));
+  }
+  RPUART__RP2040_checkInterrupts(self);
+  return value;
+  }
+  case UARTFR:
+  return RPUART__RP2040_flags_get(self);
+  case UARTIBRD:
+  return self->intDivisor;
+  case UARTFBRD:
+  return self->fracDivisor;
+  case UARTLCR_H:
+  return self->lineCtrlRegister;
+  case UARTCR:
+  return self->ctrlRegister;
+  case UARTIMSC:
+  return self->interruptMask;
+  case UARTIRIS:
+  return self->interruptStatus;
+  case UARTIMIS:
+  return ((int32_t)(self->interruptStatus) & (int32_t)(self->interruptMask));
+  case UARTPERIPHID0:
+  return 17;
+  case UARTPERIPHID1:
+  return 16;
+  case UARTPERIPHID2:
+  return 52;
+  case UARTPERIPHID3:
+  return 0;
+  case UARTPCELLID0:
+  return 13;
+  case UARTPCELLID1:
+  return 240;
+  case UARTPCELLID2:
+  return 5;
+  case UARTPCELLID3:
+  return 177;
+  }
+  return BasePeripheral__RP2040_readUint32(&self->base, offset);
+}
+
+static void RPUART__RP2040_writeUint32(RPUART__RP2040* self, int32_t offset, int32_t value) {
+  switch (offset) {
+  case UARTDR:
+  ((self)->onByte_fn ? (self)->onByte_fn((self)->onByte_ctx, ((int32_t)(value) & (int32_t)(255))) : (void)0);
+  break;
+  case UARTIBRD:
+  (self->intDivisor = ((int32_t)(value) & (int32_t)(65535)));
+  ((self)->onBaudRateChange_fn ? (self)->onBaudRateChange_fn((self)->onBaudRateChange_ctx, RPUART__RP2040_baudRate_get(self)) : (void)0);
+  break;
+  case UARTFBRD:
+  (self->fracDivisor = ((int32_t)(value) & (int32_t)(63)));
+  ((self)->onBaudRateChange_fn ? (self)->onBaudRateChange_fn((self)->onBaudRateChange_ctx, RPUART__RP2040_baudRate_get(self)) : (void)0);
+  break;
+  case UARTLCR_H:
+  (self->lineCtrlRegister = value);
+  break;
+  case UARTCR:
+  (self->ctrlRegister = value);
+  if (RPUART__RP2040_enabled_get(self)) {
+  RP2040_dma_setDREQ(self->base.rpchip, self->dreq->tx);
+  } else {
+  RP2040_dma_clearDREQ(self->base.rpchip, self->dreq->tx);
+  }
+  break;
+  case UARTIMSC:
+  (self->interruptMask = ((int32_t)(value) & (int32_t)(2047)));
+  RPUART__RP2040_checkInterrupts(self);
+  break;
+  case UARTICR:
+  (self->interruptStatus &= (~self->base.rawWriteValue));
+  RPUART__RP2040_checkInterrupts(self);
+  break;
+  default:
+  BasePeripheral__RP2040_writeUint32(&self->base, offset, value);
   }
 }
 
@@ -13268,6 +19770,7 @@ enum { TO_PHY = (1) }; /* ((int32_t)((uint32_t)(1) << (0))) */
 enum { INTR_BUFF_STATUS = (16) }; /* ((int32_t)((uint32_t)(1) << (4))) */
 enum { SIE_WRITECLEAR_MASK = (-15792128) }; /* ((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(SIE_DATA_SEQ_ERROR) | (int32_t)(SIE_ACK_REC))) | (int32_t)(SIE_STALL_REC))) | (int32_t)(SIE_NAK_REC))) | (int32_t)(SIE_RX_TIMEOUT))) | (int32_t)(SIE_RX_OVERFLOW))) | (int32_t)(SIE_BIT_STUFF_ERROR))) | (int32_t)(SIE_CONNECTED))) | (int32_t)(SIE_CRC_ERROR))) | (int32_t)(SIE_BUS_RESET))) | (int32_t)(SIE_TRANS_COMPLETE))) | (int32_t)(SIE_SETUP_REC))) | (int32_t)(SIE_RESUME)) */
 enum { MAX_PENDING_BUFFERS = (8) };
+enum { MAX_BUFFER_SIZE = (1024) };
 static USBEndpointAlarm* USBEndpointAlarm_new(RPUSBController* usb, int32_t endpoint, bool isWrite) {
   USBEndpointAlarm* self = calloc(1, sizeof(USBEndpointAlarm));
   (self)->__vtable_AlarmCallback = &USBEndpointAlarm_AlarmCallback_vtable;
@@ -13275,16 +19778,33 @@ static USBEndpointAlarm* USBEndpointAlarm_new(RPUSBController* usb, int32_t endp
   self->endpoint = endpoint;
   self->isWrite = isWrite;
   self->buffers = calloc(MAX_PENDING_BUFFERS, sizeof(uint8_t*));
+  self->lengths = calloc(MAX_PENDING_BUFFERS, sizeof(int32_t));
   self->bufferCount = 0;
   return self;
 }
 
-static void USBEndpointAlarm_schedule(USBEndpointAlarm* self, uint8_t* buffer, int32_t delayNanos) {
+static uint8_t* USBEndpointAlarm_bufferSlot(USBEndpointAlarm* self, int32_t index) {
+  uint8_t* buffer = self->buffers[index];
+  if ((!buffer)) {
+  (buffer = calloc(MAX_BUFFER_SIZE, sizeof(uint8_t)));
+  (self->buffers[index] = buffer);
+  }
+  return buffer;
+}
+
+static void USBEndpointAlarm_schedule(USBEndpointAlarm* self, uint8_t* src, int32_t srcOffset, int32_t length, double delayNanos) {
   if ((self->bufferCount >= MAX_PENDING_BUFFERS)) {
   fprintf(stderr, "Error: %s\n", fmtStr("USBEndpointAlarm: pending buffer queue full (> %d)", MAX_PENDING_BUFFERS));
   abort();
   }
-  (self->buffers[(self->bufferCount++)] = buffer);
+  uint8_t* slot = USBEndpointAlarm_bufferSlot(self, self->bufferCount);
+  for (
+int32_t i = 0
+; (i < length); (i++)) {
+  (slot[i] = src[(srcOffset + i)]);
+  }
+  (self->lengths[self->bufferCount] = length);
+  (self->bufferCount++);
   IAlarm_schedule(self->clockAlarm, delayNanos);
 }
 
@@ -13293,19 +19813,23 @@ static void USBEndpointAlarm_fire(USBEndpointAlarm* self) {
   for (
 int32_t i = 0
 ; (i < self->bufferCount); (i++)) {
-  ((self->usb)->onEndpointWrite_fn ? (self->usb)->onEndpointWrite_fn((self->usb)->onEndpointWrite_ctx, self->endpoint, self->buffers[i]) : (void)0);
+  ((self->usb)->onEndpointWrite_fn ? (self->usb)->onEndpointWrite_fn((self->usb)->onEndpointWrite_ctx, self->endpoint, self->buffers[i], self->lengths[i]) : (void)0);
   }
   (self->bufferCount = 0);
   } else {
   if ((self->bufferCount > 0)) {
   uint8_t* buffer = self->buffers[0];
+  int32_t length = self->lengths[0];
   for (
 int32_t i = 0
 ; (i < (self->bufferCount - 1)); (i++)) {
   (self->buffers[i] = self->buffers[(i + 1)]);
+  (self->lengths[i] = self->lengths[(i + 1)]);
   }
   (self->bufferCount--);
-  RPUSBController_finishRead(self->usb, self->endpoint, buffer);
+  (self->buffers[self->bufferCount] = buffer);
+  (self->lengths[self->bufferCount] = length);
+  RPUSBController_finishRead(self->usb, self->endpoint, buffer, length);
   }
   }
 }
@@ -13314,16 +19838,16 @@ static int32_t RPUSBController_intStatus_get(RPUSBController* self) {
   return ((int32_t)(((int32_t)(self->intRaw) & (int32_t)(self->intEnable))) | (int32_t)(self->intForce));
 }
 
-static RPUSBController* RPUSBController_new(RP2350* rp2040, const char* name, int32_t usbctrl_irq) {
+static RPUSBController* RPUSBController_new(RP2350* rpchip, const char* name, int32_t usbctrl_irq) {
   RPUSBController* self = calloc(1, sizeof(RPUSBController));
   {
-    BasePeripheral* __super_27 = BasePeripheral_new(rp2040, name);
-    self->base = *__super_27;
-    free(__super_27);
+    BasePeripheral* __super_49 = BasePeripheral_new(rpchip, name);
+    self->base = *__super_49;
+    free(__super_49);
   }
   (self)->__vtable_AlarmCallback = &RPUSBController_AlarmCallback_vtable;
   (&(self)->base)->__vtable_Peripheral = &RPUSBController_Peripheral_vtable;
-  self->rp2040 = rp2040;
+  self->rpchip = rpchip;
   self->usbctrl_irq = usbctrl_irq;
   self->mainCtrl = 0;
   self->intRaw = 0;
@@ -13335,7 +19859,7 @@ static RPUSBController* RPUSBController_new(RP2350* rp2040, const char* name, in
   self->endpointWriteAlarms = calloc(ENDPOINT_COUNT, sizeof(USBEndpointAlarm*));
   self->readDelayMicroseconds = 10;
   self->writeDelayMicroseconds = 10;
-  SimulationClock* clock = rp2040->clock;
+  SimulationClock* clock = rpchip->clock;
   for (
 int32_t i = 0
 ; (i < ENDPOINT_COUNT); (++i)) {
@@ -13418,7 +19942,7 @@ static void RPUSBController_writeUint32(RPUSBController* self, int32_t offset, i
 
 static int32_t RPUSBController_readEndpointControlReg(RPUSBController* self, int32_t endpoint, bool out) {
   int32_t controlRegOffset = ((EP1_IN_CONTROL + (8 * (endpoint - 1))) + (out ? 4 : 0));
-  return (*(uint32_t*)((self->rp2040->usbDPRAMView) + (controlRegOffset)));
+  return (*(uint32_t*)((self->rpchip->usbDPRAMView) + (controlRegOffset)));
 }
 
 static int32_t RPUSBController_getEndpointBufferOffset(RPUSBController* self, int32_t endpoint, bool out) {
@@ -13444,57 +19968,59 @@ static void RPUSBController_DPRAMUpdated(RPUSBController* self, int32_t offset, 
   int32_t bufferOffset = (RPUSBController_getEndpointBufferOffset(self, endpoint, bufferOut) + USB_BUF1_OFFSET);
   BasePeripheral_debug(&self->base, fmtStr("Start USB transfer, endPoint=%d, direction=%d buffer=%x length=%d", endpoint, (bufferOut ? "out" : "in"), (unsigned)(bufferOffset), bufferLength));
   (value &= (~((int32_t)((uint32_t)(USB_BUF_CTRL_AVAILABLE) << (((int32_t)(USB_BUF1_SHIFT)) & 31)))));
-  (*(uint32_t*)((self->rp2040->usbDPRAMView) + (offset)) = (uint32_t)(value));
+  (*(uint32_t*)((self->rpchip->usbDPRAMView) + (offset)) = (uint32_t)(value));
   if (bufferOut) {
   ((self)->onEndpointRead_fn ? (self)->onEndpointRead_fn((self)->onEndpointRead_ctx, endpoint, bufferLength) : (void)0);
   } else {
   (value &= (~((int32_t)((uint32_t)(USB_BUF_CTRL_FULL) << (((int32_t)(USB_BUF1_SHIFT)) & 31)))));
-  (*(uint32_t*)((self->rp2040->usbDPRAMView) + (offset)) = (uint32_t)(value));
-  uint8_t* buffer = ((uint8_t*)(/* TODO: slice [src/peripherals/usb.ts:293: const buffer = this.rp2040.usbDPRAM.slice(bufferOffset, bufferOffset + bufferLen] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "slice [src/peripherals/usb.ts:293: const buffer = this.rp2040.usbDPRAM.slice(bufferOffset, bufferOffset + bufferLen]"); abort(); 0; }))));
+  (*(uint32_t*)((self->rpchip->usbDPRAMView) + (offset)) = (uint32_t)(value));
   RPUSBController_indicateBufferReady(self, endpoint, false);
-  USBEndpointAlarm_schedule(self->endpointWriteAlarms[endpoint], buffer, (self->writeDelayMicroseconds * 1000));
+  USBEndpointAlarm_schedule(self->endpointWriteAlarms[endpoint], self->rpchip->usbDPRAM, bufferOffset, bufferLength, (self->writeDelayMicroseconds * 1000.0));
   }
   }
   int32_t bufferLength = ((int32_t)(value) & (int32_t)(USB_BUF_CTRL_LEN_MASK));
   int32_t bufferOffset = RPUSBController_getEndpointBufferOffset(self, endpoint, bufferOut);
   BasePeripheral_debug(&self->base, fmtStr("Start USB transfer, endPoint=%d, direction=%d buffer=%x length=%d", endpoint, (bufferOut ? "out" : "in"), (unsigned)(bufferOffset), bufferLength));
   (value &= (~USB_BUF_CTRL_AVAILABLE));
-  (*(uint32_t*)((self->rp2040->usbDPRAMView) + (offset)) = (uint32_t)(value));
+  (*(uint32_t*)((self->rpchip->usbDPRAMView) + (offset)) = (uint32_t)(value));
   if (bufferOut) {
   ((self)->onEndpointRead_fn ? (self)->onEndpointRead_fn((self)->onEndpointRead_ctx, endpoint, bufferLength) : (void)0);
   } else {
   (value &= (~USB_BUF_CTRL_FULL));
-  (*(uint32_t*)((self->rp2040->usbDPRAMView) + (offset)) = (uint32_t)(value));
-  uint8_t* buffer = ((uint8_t*)(/* TODO: slice [src/peripherals/usb.ts:313: const buffer = this.rp2040.usbDPRAM.slice(bufferOffset, bufferOffset + bufferLen] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "slice [src/peripherals/usb.ts:313: const buffer = this.rp2040.usbDPRAM.slice(bufferOffset, bufferOffset + bufferLen]"); abort(); 0; }))));
+  (*(uint32_t*)((self->rpchip->usbDPRAMView) + (offset)) = (uint32_t)(value));
   if ((interrupt || (!doubleBuffer))) {
   RPUSBController_indicateBufferReady(self, endpoint, false);
   }
-  USBEndpointAlarm_schedule(self->endpointWriteAlarms[endpoint], buffer, (self->writeDelayMicroseconds * 1000));
+  USBEndpointAlarm_schedule(self->endpointWriteAlarms[endpoint], self->rpchip->usbDPRAM, bufferOffset, bufferLength, (self->writeDelayMicroseconds * 1000.0));
   }
   }
 }
 
-static void RPUSBController_endpointReadDone(RPUSBController* self, int32_t endpoint, uint8_t* buffer, int32_t delay) {
-  USBEndpointAlarm_schedule(self->endpointReadAlarms[endpoint], buffer, (delay * 1000));
+static void RPUSBController_endpointReadDone(RPUSBController* self, int32_t endpoint, uint8_t* src, int32_t length, int32_t delay) {
+  USBEndpointAlarm_schedule(self->endpointReadAlarms[endpoint], src, 0, length, (delay * 1000.0));
 }
 
-static void RPUSBController_finishRead(RPUSBController* self, int32_t endpoint, uint8_t* buffer) {
+static void RPUSBController_finishRead(RPUSBController* self, int32_t endpoint, uint8_t* buffer, int32_t length) {
   int32_t bufferOffset = RPUSBController_getEndpointBufferOffset(self, endpoint, true);
   int32_t bufControlReg = (EP0_OUT_BUFFER_CONTROL + (endpoint * 8));
-  int32_t bufControl = (*(uint32_t*)((self->rp2040->usbDPRAMView) + (bufControlReg)));
+  int32_t bufControl = (*(uint32_t*)((self->rpchip->usbDPRAMView) + (bufControlReg)));
   int32_t requestedLength = ((int32_t)(bufControl) & (int32_t)(USB_BUF_CTRL_LEN_MASK));
-  int32_t newLength = ((int32_t)(min(/* TODO: .length [src/peripherals/usb.ts:331: const newLength = Math.min(buffer.length, requestedLength);] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", ".length [src/peripherals/usb.ts:331: const newLength = Math.min(buffer.length, requestedLength);]"); abort(); 0; })), requestedLength)));
+  int32_t newLength = min(length, requestedLength);
   (bufControl |= USB_BUF_CTRL_FULL);
   (bufControl = ((int32_t)(((int32_t)(bufControl) & (int32_t)((~USB_BUF_CTRL_LEN_MASK)))) | (int32_t)(((int32_t)(newLength) & (int32_t)(USB_BUF_CTRL_LEN_MASK)))));
-  (*(uint32_t*)((self->rp2040->usbDPRAMView) + (bufControlReg)) = (uint32_t)(bufControl));
-  /* TODO: .set() [src/peripherals/usb.ts:335: this.rp2040.usbDPRAM.set(buffer.subarray(0, newLength), bufferOffset);] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", ".set() [src/peripherals/usb.ts:335: this.rp2040.usbDPRAM.set(buffer.subarray(0, newLength), bufferOffset);]"); abort(); 0; }));
+  (*(uint32_t*)((self->rpchip->usbDPRAMView) + (bufControlReg)) = (uint32_t)(bufControl));
+  for (
+int32_t i = 0
+; (i < newLength); (i++)) {
+  (*(uint8_t*)((self->rpchip->usbDPRAMView) + ((bufferOffset + i))) = (uint8_t)(buffer[i]));
+  }
   RPUSBController_indicateBufferReady(self, endpoint, true);
 }
 
 static void RPUSBController_checkInterrupts(RPUSBController* self) {
   RPUSBController* __destruct_tmp_1 = self;
   int32_t intStatus = RPUSBController_intStatus_get(__destruct_tmp_1);
-  RP2350_setInterrupt(self->rp2040, self->usbctrl_irq, (!(!intStatus)));
+  RP2350_setInterrupt(self->rpchip, self->usbctrl_irq, (!(!intStatus)));
 }
 
 static void RPUSBController_resetDevice(RPUSBController* self) {
@@ -13502,7 +20028,11 @@ static void RPUSBController_resetDevice(RPUSBController* self) {
 }
 
 static void RPUSBController_sendSetupPacket(RPUSBController* self, uint8_t* setupPacket) {
-  /* TODO: .set() [src/peripherals/usb.ts:349: this.rp2040.usbDPRAM.set(setupPacket);] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", ".set() [src/peripherals/usb.ts:349: this.rp2040.usbDPRAM.set(setupPacket);]"); abort(); 0; }));
+  for (
+int32_t i = 0
+; (i < 8); (i++)) {
+  (*(uint8_t*)((self->rpchip->usbDPRAMView) + (i)) = (uint8_t)(setupPacket[i]));
+  }
   (self->sieStatus |= SIE_SETUP_REC);
   RPUSBController_sieStatusUpdated(self);
 }
@@ -13545,6 +20075,344 @@ static void RPUSBController_sieStatusUpdated(RPUSBController* self) {
   RPUSBController_checkInterrupts(self);
 }
 
+static USBEndpointAlarm__RP2040* USBEndpointAlarm__RP2040_new(RPUSBController__RP2040* usb, int32_t endpoint, bool isWrite) {
+  USBEndpointAlarm__RP2040* self = calloc(1, sizeof(USBEndpointAlarm__RP2040));
+  (self)->__vtable_AlarmCallback = &USBEndpointAlarm__RP2040_AlarmCallback_vtable;
+  self->usb = usb;
+  self->endpoint = endpoint;
+  self->isWrite = isWrite;
+  self->buffers = calloc(MAX_PENDING_BUFFERS, sizeof(uint8_t*));
+  self->lengths = calloc(MAX_PENDING_BUFFERS, sizeof(int32_t));
+  self->bufferCount = 0;
+  return self;
+}
+
+static uint8_t* USBEndpointAlarm__RP2040_bufferSlot(USBEndpointAlarm__RP2040* self, int32_t index) {
+  uint8_t* buffer = self->buffers[index];
+  if ((!buffer)) {
+  (buffer = calloc(MAX_BUFFER_SIZE, sizeof(uint8_t)));
+  (self->buffers[index] = buffer);
+  }
+  return buffer;
+}
+
+static void USBEndpointAlarm__RP2040_schedule(USBEndpointAlarm__RP2040* self, uint8_t* src, int32_t srcOffset, int32_t length, double delayNanos) {
+  if ((self->bufferCount >= MAX_PENDING_BUFFERS)) {
+  fprintf(stderr, "Error: %s\n", fmtStr("USBEndpointAlarm__RP2040: pending buffer queue full (> %d)", MAX_PENDING_BUFFERS));
+  abort();
+  }
+  uint8_t* slot = USBEndpointAlarm__RP2040_bufferSlot(self, self->bufferCount);
+  for (
+int32_t i = 0
+; (i < length); (i++)) {
+  (slot[i] = src[(srcOffset + i)]);
+  }
+  (self->lengths[self->bufferCount] = length);
+  (self->bufferCount++);
+  IAlarm_schedule(self->clockAlarm, delayNanos);
+}
+
+static void USBEndpointAlarm__RP2040_fire(USBEndpointAlarm__RP2040* self) {
+  if (self->isWrite) {
+  for (
+int32_t i = 0
+; (i < self->bufferCount); (i++)) {
+  ((self->usb)->onEndpointWrite_fn ? (self->usb)->onEndpointWrite_fn((self->usb)->onEndpointWrite_ctx, self->endpoint, self->buffers[i], self->lengths[i]) : (void)0);
+  }
+  (self->bufferCount = 0);
+  } else {
+  if ((self->bufferCount > 0)) {
+  uint8_t* buffer = self->buffers[0];
+  int32_t length = self->lengths[0];
+  for (
+int32_t i = 0
+; (i < (self->bufferCount - 1)); (i++)) {
+  (self->buffers[i] = self->buffers[(i + 1)]);
+  (self->lengths[i] = self->lengths[(i + 1)]);
+  }
+  (self->bufferCount--);
+  (self->buffers[self->bufferCount] = buffer);
+  (self->lengths[self->bufferCount] = length);
+  RPUSBController__RP2040_finishRead(self->usb, self->endpoint, buffer, length);
+  }
+  }
+}
+
+static int32_t RPUSBController__RP2040_intStatus_get(RPUSBController__RP2040* self) {
+  return ((int32_t)(((int32_t)(self->intRaw) & (int32_t)(self->intEnable))) | (int32_t)(self->intForce));
+}
+
+static RPUSBController__RP2040* RPUSBController__RP2040_new(RP2040* rpchip, const char* name, int32_t usbctrl_irq) {
+  RPUSBController__RP2040* self = calloc(1, sizeof(RPUSBController__RP2040));
+  {
+    BasePeripheral__RP2040* __super_50 = BasePeripheral__RP2040_new(rpchip, name);
+    self->base = *__super_50;
+    free(__super_50);
+  }
+  (self)->__vtable_AlarmCallback = &RPUSBController__RP2040_AlarmCallback_vtable;
+  (&(self)->base)->__vtable_Peripheral = &RPUSBController__RP2040_Peripheral_vtable;
+  self->rpchip = rpchip;
+  self->usbctrl_irq = usbctrl_irq;
+  self->mainCtrl = 0;
+  self->intRaw = 0;
+  self->intEnable = 0;
+  self->intForce = 0;
+  self->sieStatus = 0;
+  self->buffStatus = 0;
+  self->endpointReadAlarms = calloc(ENDPOINT_COUNT, sizeof(USBEndpointAlarm__RP2040*));
+  self->endpointWriteAlarms = calloc(ENDPOINT_COUNT, sizeof(USBEndpointAlarm__RP2040*));
+  self->readDelayMicroseconds = 10;
+  self->writeDelayMicroseconds = 10;
+  SimulationClock* clock = rpchip->clock;
+  for (
+int32_t i = 0
+; (i < ENDPOINT_COUNT); (++i)) {
+  USBEndpointAlarm__RP2040* readAlarm = USBEndpointAlarm__RP2040_new(self, i, false);
+  (readAlarm->clockAlarm = SimulationClock_createAlarm(clock, (AlarmCallback){ .obj = (void*)(readAlarm), .vtable = &USBEndpointAlarm__RP2040_AlarmCallback_vtable }));
+  (self->endpointReadAlarms[i] = readAlarm);
+  USBEndpointAlarm__RP2040* writeAlarm = USBEndpointAlarm__RP2040_new(self, i, true);
+  (writeAlarm->clockAlarm = SimulationClock_createAlarm(clock, (AlarmCallback){ .obj = (void*)(writeAlarm), .vtable = &USBEndpointAlarm__RP2040_AlarmCallback_vtable }));
+  (self->endpointWriteAlarms[i] = writeAlarm);
+  }
+  (self->resetAlarm = SimulationClock_createAlarm(clock, (AlarmCallback){ .obj = (void*)(self), .vtable = &RPUSBController__RP2040_AlarmCallback_vtable }));
+  return self;
+}
+
+static void RPUSBController__RP2040_fire(RPUSBController__RP2040* self) {
+  (self->sieStatus |= SIE_BUS_RESET);
+  RPUSBController__RP2040_sieStatusUpdated(self);
+}
+
+static int32_t RPUSBController__RP2040_readUint32(RPUSBController__RP2040* self, int32_t offset) {
+  switch (offset) {
+  case MAIN_CTRL:
+  return self->mainCtrl;
+  case SIE_STATUS:
+  return self->sieStatus;
+  case BUFF_STATUS:
+  return self->buffStatus;
+  case BUFF_CPU_SHOULD_HANDLE:
+  return 0;
+  case INTR__usb:
+  return self->intRaw;
+  case INTE__usb:
+  return self->intEnable;
+  case INTF__usb:
+  return self->intForce;
+  case INTS__usb:
+  return RPUSBController__RP2040_intStatus_get(self);
+  }
+  return BasePeripheral__RP2040_readUint32(&self->base, offset);
+}
+
+static void RPUSBController__RP2040_writeUint32(RPUSBController__RP2040* self, int32_t offset, int32_t value) {
+  switch (offset) {
+  case MAIN_CTRL:
+  (self->mainCtrl = ((int32_t)(value) & (int32_t)(((int32_t)(((int32_t)(SIM_TIMING) | (int32_t)(CONTROLLER_EN))) | (int32_t)(HOST_NDEVICE)))));
+  if ((((int32_t)(value) & (int32_t)(CONTROLLER_EN)) && (!((int32_t)(value) & (int32_t)(HOST_NDEVICE))))) {
+  ((self)->onUSBEnabled_fn ? (self)->onUSBEnabled_fn((self)->onUSBEnabled_ctx) : (void)0);
+  }
+  break;
+  case BUFF_STATUS:
+  (self->buffStatus &= (~self->base.rawWriteValue));
+  RPUSBController__RP2040_buffStatusUpdated(self);
+  break;
+  case USB_MUXING:
+  if ((((int32_t)(value) & (int32_t)(TO_DIGITAL_PAD)) && (!((int32_t)(value) & (int32_t)(TO_PHY))))) {
+  (self->sieStatus |= SIE_CONNECTED);
+  }
+  break;
+  case SIE_STATUS:
+  (self->sieStatus &= (~((int32_t)(self->base.rawWriteValue) & (int32_t)(SIE_WRITECLEAR_MASK))));
+  if (((int32_t)(self->base.rawWriteValue) & (int32_t)(SIE_BUS_RESET))) {
+  ((self)->onResetReceived_fn ? (self)->onResetReceived_fn((self)->onResetReceived_ctx) : (void)0);
+  (self->sieStatus &= (~((int32_t)((uint32_t)(SIE_LINE_STATE_MASK) << (((int32_t)(SIE_LINE_STATE_SHIFT)) & 31)))));
+  (self->sieStatus |= ((int32_t)(((int32_t)((uint32_t)(SIELineState_J) << (((int32_t)(SIE_LINE_STATE_SHIFT)) & 31)))) | (int32_t)(SIE_CONNECTED)));
+  }
+  RPUSBController__RP2040_sieStatusUpdated(self);
+  break;
+  case INTE__usb:
+  (self->intEnable = ((int32_t)(value) & (int32_t)(1048575)));
+  RPUSBController__RP2040_checkInterrupts(self);
+  break;
+  case INTF__usb:
+  (self->intForce = ((int32_t)(value) & (int32_t)(1048575)));
+  RPUSBController__RP2040_checkInterrupts(self);
+  break;
+  default:
+  BasePeripheral__RP2040_writeUint32(&self->base, offset, value);
+  }
+}
+
+static int32_t RPUSBController__RP2040_readEndpointControlReg(RPUSBController__RP2040* self, int32_t endpoint, bool out) {
+  int32_t controlRegOffset = ((EP1_IN_CONTROL + (8 * (endpoint - 1))) + (out ? 4 : 0));
+  return (*(uint32_t*)((self->rpchip->usbDPRAMView) + (controlRegOffset)));
+}
+
+static int32_t RPUSBController__RP2040_getEndpointBufferOffset(RPUSBController__RP2040* self, int32_t endpoint, bool out) {
+  if ((endpoint == 0)) {
+  return 256;
+  }
+  return ((int32_t)(RPUSBController__RP2040_readEndpointControlReg(self, endpoint, out)) & (int32_t)(65472));
+}
+
+static void RPUSBController__RP2040_DPRAMUpdated(RPUSBController__RP2040* self, int32_t offset, int32_t value) {
+  if (((((int32_t)(value) & (int32_t)(USB_BUF_CTRL_AVAILABLE)) && (offset >= EP0_IN_BUFFER_CONTROL)) && (offset <= EP15_OUT_BUFFER_CONTROL))) {
+  int32_t endpoint = ((int32_t)((offset - EP0_IN_BUFFER_CONTROL)) >> (3));
+  int32_t bufferOut = (((int32_t)(offset) & (int32_t)(4)) ? true : false);
+  int32_t doubleBuffer = false;
+  int32_t interrupt = true;
+  if ((endpoint != 0)) {
+  int32_t control = RPUSBController__RP2040_readEndpointControlReg(self, endpoint, bufferOut);
+  (doubleBuffer = (!(!((int32_t)(control) & (int32_t)(USB_CTRL_DOUBLE_BUF)))));
+  (interrupt = (!(!((int32_t)(control) & (int32_t)(USB_CTRL_INTERRUPT_PER_TRANSFER)))));
+  }
+  if ((doubleBuffer && ((int32_t)(((int32_t)(value) >> (((int32_t)(USB_BUF1_SHIFT)) & 31))) & (int32_t)(USB_BUF_CTRL_AVAILABLE)))) {
+  int32_t bufferLength = ((int32_t)(((int32_t)(value) >> (((int32_t)(USB_BUF1_SHIFT)) & 31))) & (int32_t)(USB_BUF_CTRL_LEN_MASK));
+  int32_t bufferOffset = (RPUSBController__RP2040_getEndpointBufferOffset(self, endpoint, bufferOut) + USB_BUF1_OFFSET);
+  BasePeripheral__RP2040_debug(&self->base, fmtStr("Start USB transfer, endPoint=%d, direction=%d buffer=%x length=%d", endpoint, (bufferOut ? "out" : "in"), (unsigned)(bufferOffset), bufferLength));
+  (value &= (~((int32_t)((uint32_t)(USB_BUF_CTRL_AVAILABLE) << (((int32_t)(USB_BUF1_SHIFT)) & 31)))));
+  (*(uint32_t*)((self->rpchip->usbDPRAMView) + (offset)) = (uint32_t)(value));
+  if (bufferOut) {
+  ((self)->onEndpointRead_fn ? (self)->onEndpointRead_fn((self)->onEndpointRead_ctx, endpoint, bufferLength) : (void)0);
+  } else {
+  (value &= (~((int32_t)((uint32_t)(USB_BUF_CTRL_FULL) << (((int32_t)(USB_BUF1_SHIFT)) & 31)))));
+  (*(uint32_t*)((self->rpchip->usbDPRAMView) + (offset)) = (uint32_t)(value));
+  RPUSBController__RP2040_indicateBufferReady(self, endpoint, false);
+  USBEndpointAlarm__RP2040_schedule(self->endpointWriteAlarms[endpoint], self->rpchip->usbDPRAM, bufferOffset, bufferLength, (self->writeDelayMicroseconds * 1000.0));
+  }
+  }
+  int32_t bufferLength = ((int32_t)(value) & (int32_t)(USB_BUF_CTRL_LEN_MASK));
+  int32_t bufferOffset = RPUSBController__RP2040_getEndpointBufferOffset(self, endpoint, bufferOut);
+  BasePeripheral__RP2040_debug(&self->base, fmtStr("Start USB transfer, endPoint=%d, direction=%d buffer=%x length=%d", endpoint, (bufferOut ? "out" : "in"), (unsigned)(bufferOffset), bufferLength));
+  (value &= (~USB_BUF_CTRL_AVAILABLE));
+  (*(uint32_t*)((self->rpchip->usbDPRAMView) + (offset)) = (uint32_t)(value));
+  if (bufferOut) {
+  ((self)->onEndpointRead_fn ? (self)->onEndpointRead_fn((self)->onEndpointRead_ctx, endpoint, bufferLength) : (void)0);
+  } else {
+  (value &= (~USB_BUF_CTRL_FULL));
+  (*(uint32_t*)((self->rpchip->usbDPRAMView) + (offset)) = (uint32_t)(value));
+  if ((interrupt || (!doubleBuffer))) {
+  RPUSBController__RP2040_indicateBufferReady(self, endpoint, false);
+  }
+  USBEndpointAlarm__RP2040_schedule(self->endpointWriteAlarms[endpoint], self->rpchip->usbDPRAM, bufferOffset, bufferLength, (self->writeDelayMicroseconds * 1000.0));
+  }
+  }
+}
+
+static void RPUSBController__RP2040_endpointReadDone(RPUSBController__RP2040* self, int32_t endpoint, uint8_t* src, int32_t length, int32_t delay) {
+  USBEndpointAlarm__RP2040_schedule(self->endpointReadAlarms[endpoint], src, 0, length, (delay * 1000.0));
+}
+
+static void RPUSBController__RP2040_finishRead(RPUSBController__RP2040* self, int32_t endpoint, uint8_t* buffer, int32_t length) {
+  int32_t bufferOffset = RPUSBController__RP2040_getEndpointBufferOffset(self, endpoint, true);
+  int32_t bufControlReg = (EP0_OUT_BUFFER_CONTROL + (endpoint * 8));
+  int32_t bufControl = (*(uint32_t*)((self->rpchip->usbDPRAMView) + (bufControlReg)));
+  int32_t requestedLength = ((int32_t)(bufControl) & (int32_t)(USB_BUF_CTRL_LEN_MASK));
+  int32_t newLength = min(length, requestedLength);
+  (bufControl |= USB_BUF_CTRL_FULL);
+  (bufControl = ((int32_t)(((int32_t)(bufControl) & (int32_t)((~USB_BUF_CTRL_LEN_MASK)))) | (int32_t)(((int32_t)(newLength) & (int32_t)(USB_BUF_CTRL_LEN_MASK)))));
+  (*(uint32_t*)((self->rpchip->usbDPRAMView) + (bufControlReg)) = (uint32_t)(bufControl));
+  for (
+int32_t i = 0
+; (i < newLength); (i++)) {
+  (*(uint8_t*)((self->rpchip->usbDPRAMView) + ((bufferOffset + i))) = (uint8_t)(buffer[i]));
+  }
+  RPUSBController__RP2040_indicateBufferReady(self, endpoint, true);
+}
+
+static void RPUSBController__RP2040_checkInterrupts(RPUSBController__RP2040* self) {
+  RPUSBController__RP2040* __destruct_tmp_1 = self;
+  int32_t intStatus = RPUSBController__RP2040_intStatus_get(__destruct_tmp_1);
+  RP2040_setInterrupt(self->rpchip, self->usbctrl_irq, (!(!intStatus)));
+}
+
+static void RPUSBController__RP2040_resetDevice(RPUSBController__RP2040* self) {
+  IAlarm_schedule(self->resetAlarm, 10000000);
+}
+
+static void RPUSBController__RP2040_sendSetupPacket(RPUSBController__RP2040* self, uint8_t* setupPacket) {
+  for (
+int32_t i = 0
+; (i < 8); (i++)) {
+  (*(uint8_t*)((self->rpchip->usbDPRAMView) + (i)) = (uint8_t)(setupPacket[i]));
+  }
+  (self->sieStatus |= SIE_SETUP_REC);
+  RPUSBController__RP2040_sieStatusUpdated(self);
+}
+
+static void RPUSBController__RP2040_indicateBufferReady(RPUSBController__RP2040* self, int32_t endpoint, bool out) {
+  (self->buffStatus |= ((int32_t)((uint32_t)(1) << (((int32_t)(((endpoint * 2) + (out ? 1 : 0)))) & 31))));
+  RPUSBController__RP2040_buffStatusUpdated(self);
+}
+
+static void RPUSBController__RP2040_buffStatusUpdated(RPUSBController__RP2040* self) {
+  if (self->buffStatus) {
+  (self->intRaw |= INTR_BUFF_STATUS);
+  } else {
+  (self->intRaw &= (~INTR_BUFF_STATUS));
+  }
+  RPUSBController__RP2040_checkInterrupts(self);
+}
+
+static void RPUSBController__RP2040_mirrorSieBit(RPUSBController__RP2040* self, int32_t sieBit, int32_t intRawBit) {
+  if (((int32_t)(self->sieStatus) & (int32_t)(sieBit))) {
+  (self->intRaw |= intRawBit);
+  } else {
+  (self->intRaw &= (~intRawBit));
+  }
+}
+
+static void RPUSBController__RP2040_sieStatusUpdated(RPUSBController__RP2040* self) {
+  RPUSBController__RP2040_mirrorSieBit(self, SIE_SETUP_REC, ((int32_t)((uint32_t)(1) << (16))));
+  RPUSBController__RP2040_mirrorSieBit(self, SIE_RESUME, ((int32_t)((uint32_t)(1) << (15))));
+  RPUSBController__RP2040_mirrorSieBit(self, SIE_SUSPENDED, ((int32_t)((uint32_t)(1) << (14))));
+  RPUSBController__RP2040_mirrorSieBit(self, SIE_CONNECTED, ((int32_t)((uint32_t)(1) << (13))));
+  RPUSBController__RP2040_mirrorSieBit(self, SIE_BUS_RESET, ((int32_t)((uint32_t)(1) << (12))));
+  RPUSBController__RP2040_mirrorSieBit(self, SIE_VBUS_DETECTED, ((int32_t)((uint32_t)(1) << (11))));
+  RPUSBController__RP2040_mirrorSieBit(self, SIE_STALL_REC, ((int32_t)((uint32_t)(1) << (10))));
+  RPUSBController__RP2040_mirrorSieBit(self, SIE_CRC_ERROR, ((int32_t)((uint32_t)(1) << (9))));
+  RPUSBController__RP2040_mirrorSieBit(self, SIE_BIT_STUFF_ERROR, ((int32_t)((uint32_t)(1) << (8))));
+  RPUSBController__RP2040_mirrorSieBit(self, SIE_RX_OVERFLOW, ((int32_t)((uint32_t)(1) << (7))));
+  RPUSBController__RP2040_mirrorSieBit(self, SIE_RX_TIMEOUT, ((int32_t)((uint32_t)(1) << (6))));
+  RPUSBController__RP2040_mirrorSieBit(self, SIE_DATA_SEQ_ERROR, ((int32_t)((uint32_t)(1) << (5))));
+  RPUSBController__RP2040_checkInterrupts(self);
+}
+
+// ─── vreg_rp2040.ts ───
+enum { CHIP_RESET = (8) };
+static RP2040VregAndChipReset* RP2040VregAndChipReset_new(RP2350* rpchip, const char* name) {
+  RP2040VregAndChipReset* self = calloc(1, sizeof(RP2040VregAndChipReset));
+  {
+    BasePeripheral* __base = BasePeripheral_new(rpchip, name);
+    self->base = *__base;
+    free(__base);
+  }
+  (&(self)->base)->__vtable_Peripheral = &RP2040VregAndChipReset_Peripheral_vtable;
+  self->chipReset = 0;
+  return self;
+}
+
+static int32_t RP2040VregAndChipReset_readUint32(RP2040VregAndChipReset* self, int32_t offset) {
+  switch (offset) {
+  case CHIP_RESET:
+  return self->chipReset;
+  default:
+  return BasePeripheral_readUint32(&self->base, offset);
+  }
+  return (int32_t){0};
+}
+
+static void RP2040VregAndChipReset_writeUint32(RP2040VregAndChipReset* self, int32_t offset, int32_t value) {
+  switch (offset) {
+  case CHIP_RESET:
+  (self->chipReset &= (~((int32_t)(value) & (int32_t)(((int32_t)((uint32_t)(1) << (24)))))));
+  break;
+  default:
+  BasePeripheral_writeUint32(&self->base, offset, value);
+  }
+}
+
 // ─── watchdog.ts ───
 enum { LOAD = (4) };
 enum { REASON = (8) };
@@ -13577,15 +20445,15 @@ enum { CYCLES_SHIFT = (0) };
 enum { TICK_FREQUENCY = (2000000) };
 static void RPWatchdog_onWatchdogTrigger_default(void* __ctx) {
   RPWatchdog* self = (RPWatchdog*)__ctx;
-  /* TODO: log [src/peripherals/watchdog.ts:64: this.rp2040.logger.warn(this.name, 'Watchdog triggered, but no reset handler pro] */ 0;
+  /* TODO: log [src/peripherals/watchdog.ts:64: this.rpchip.logger.warn(this.name, 'Watchdog triggered, but no reset handler pro] */ 0;
 }
 
-static RPWatchdog* RPWatchdog_new(RP2350* rp2040, const char* name) {
+static RPWatchdog* RPWatchdog_new(RP2350* rpchip, const char* name) {
   RPWatchdog* self = calloc(1, sizeof(RPWatchdog));
   {
-    BasePeripheral* __super_28 = BasePeripheral_new(rp2040, name);
-    self->base = *__super_28;
-    free(__super_28);
+    BasePeripheral* __super_51 = BasePeripheral_new(rpchip, name);
+    self->base = *__super_51;
+    free(__super_51);
   }
   (&(self)->base)->__vtable_Peripheral = &RPWatchdog_Peripheral_vtable;
   (self)->__vtable_AlarmCallback = &RPWatchdog_AlarmCallback_vtable;
@@ -13597,7 +20465,7 @@ static RPWatchdog* RPWatchdog_new(RP2350* rp2040, const char* name) {
   self->pauseJtag = true;
   self->onWatchdogTrigger_fn = RPWatchdog_onWatchdogTrigger_default;
   self->onWatchdogTrigger_ctx = self;
-  (self->timer = Timer32_new("RPWatchdog_timer", rp2040->clock, TICK_FREQUENCY));
+  (self->timer = Timer32_new("RPWatchdog_timer", rpchip->clock, TICK_FREQUENCY));
   Timer32_mode_set(self->timer, TimerMode_Decrement);
   Timer32_enable_set(self->timer, false);
   Timer32_top_set(self->timer, TIME_MASK);
@@ -13682,6 +20550,113 @@ static void RPWatchdog_writeUint32(RPWatchdog* self, int32_t offset, int32_t val
   }
 }
 
+static void RPWatchdog__RP2040_onWatchdogTrigger_default(void* __ctx) {
+  RPWatchdog__RP2040* self = (RPWatchdog__RP2040*)__ctx;
+  /* TODO: log [src/peripherals/watchdog.ts:196: this.rpchip.logger.warn(this.name, 'Watchdog triggered, but no reset handler pro] */ 0;
+}
+
+static RPWatchdog__RP2040* RPWatchdog__RP2040_new(RP2040* rpchip, const char* name) {
+  RPWatchdog__RP2040* self = calloc(1, sizeof(RPWatchdog__RP2040));
+  {
+    BasePeripheral__RP2040* __super_52 = BasePeripheral__RP2040_new(rpchip, name);
+    self->base = *__super_52;
+    free(__super_52);
+  }
+  (&(self)->base)->__vtable_Peripheral = &RPWatchdog__RP2040_Peripheral_vtable;
+  (self)->__vtable_AlarmCallback = &RPWatchdog__RP2040_AlarmCallback_vtable;
+  self->enable = false;
+  self->tickEnable = true;
+  self->reason = 0;
+  self->pauseDbg0 = true;
+  self->pauseDbg1 = true;
+  self->pauseJtag = true;
+  self->onWatchdogTrigger_fn = RPWatchdog__RP2040_onWatchdogTrigger_default;
+  self->onWatchdogTrigger_ctx = self;
+  (self->timer = Timer32_new("RPWatchdog_timer", rpchip->clock, TICK_FREQUENCY));
+  Timer32_mode_set(self->timer, TimerMode_Decrement);
+  Timer32_enable_set(self->timer, false);
+  Timer32_top_set(self->timer, TIME_MASK);
+  (self->alarm = Timer32PeriodicAlarm_new("RPWatchdog_alarm", self->timer, (AlarmCallback){ .obj = (void*)(self), .vtable = &RPWatchdog__RP2040_AlarmCallback_vtable }));
+  Timer32PeriodicAlarm_target_set(self->alarm, 0);
+  Timer32PeriodicAlarm_enable_set(self->alarm, false);
+  return self;
+}
+
+static void RPWatchdog__RP2040_fire(RPWatchdog__RP2040* self) {
+  (self->reason = TIMER__watchdog);
+  ((self)->onWatchdogTrigger_fn ? (self)->onWatchdogTrigger_fn((self)->onWatchdogTrigger_ctx) : (void)0);
+}
+
+static void RPWatchdog__RP2040_reset(RPWatchdog__RP2040* self) {
+  (self->enable = false);
+  (self->tickEnable = true);
+  (self->reason = 0);
+  (self->pauseDbg0 = true);
+  (self->pauseDbg1 = true);
+  (self->pauseJtag = true);
+  Timer32_enable_set(self->timer, false);
+  Timer32_set(self->timer, 0, false);
+  Timer32PeriodicAlarm_enable_set(self->alarm, false);
+}
+
+static int32_t RPWatchdog__RP2040_readUint32(RPWatchdog__RP2040* self, int32_t offset) {
+  switch (offset) {
+  case CTRL:
+  return ((int32_t)(((int32_t)(((int32_t)(((int32_t)((Timer32_enable_get(self->timer) ? ENABLE__watchdog : 0)) | (int32_t)((self->pauseDbg0 ? PAUSE_DBG0 : 0)))) | (int32_t)((self->pauseDbg1 ? PAUSE_DBG1 : 0)))) | (int32_t)((self->pauseJtag ? PAUSE_JTAG : 0)))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(Timer32_counter_get(self->timer)) & (int32_t)(TIME_MASK))) << (((int32_t)(TIME_SHIFT)) & 31)))));
+  case REASON:
+  return self->reason;
+  case SCRATCH0:
+  case SCRATCH1:
+  case SCRATCH2:
+  case SCRATCH3:
+  case SCRATCH4:
+  case SCRATCH5:
+  case SCRATCH6:
+  case SCRATCH7:
+  return self->scratchData[((int32_t)((offset - SCRATCH0)) >> (2))];
+  case TICK:
+  return (self->tickEnable ? ((int32_t)(RUNNING) | (int32_t)(TICK_ENABLE)) : 0);
+  }
+  return BasePeripheral__RP2040_readUint32(&self->base, offset);
+}
+
+static void RPWatchdog__RP2040_writeUint32(RPWatchdog__RP2040* self, int32_t offset, int32_t value) {
+  switch (offset) {
+  case CTRL:
+  if (((int32_t)(value) & (int32_t)(TRIGGER))) {
+  (self->reason = FORCE);
+  ((self)->onWatchdogTrigger_fn ? (self)->onWatchdogTrigger_fn((self)->onWatchdogTrigger_ctx) : (void)0);
+  }
+  (self->enable = (!(!((int32_t)(value) & (int32_t)(ENABLE__watchdog)))));
+  Timer32_enable_set(self->timer, (self->enable ? self->tickEnable : self->enable));
+  Timer32PeriodicAlarm_enable_set(self->alarm, (self->enable ? self->tickEnable : self->enable));
+  (self->pauseDbg0 = (!(!((int32_t)(value) & (int32_t)(PAUSE_DBG0)))));
+  (self->pauseDbg1 = (!(!((int32_t)(value) & (int32_t)(PAUSE_DBG1)))));
+  (self->pauseJtag = (!(!((int32_t)(value) & (int32_t)(PAUSE_JTAG)))));
+  break;
+  case LOAD:
+  Timer32_set(self->timer, ((int32_t)(((uint32_t)(value) >> (((int32_t)(LOAD_SHIFT)) & 31))) & (int32_t)(LOAD_MASK)), false);
+  break;
+  case SCRATCH0:
+  case SCRATCH1:
+  case SCRATCH2:
+  case SCRATCH3:
+  case SCRATCH4:
+  case SCRATCH5:
+  case SCRATCH6:
+  case SCRATCH7:
+  (self->scratchData[((int32_t)((offset - SCRATCH0)) >> (2))] = value);
+  break;
+  case TICK:
+  (self->tickEnable = (!(!((int32_t)(value) & (int32_t)(TICK_ENABLE)))));
+  Timer32_enable_set(self->timer, (self->enable ? self->tickEnable : self->enable));
+  Timer32PeriodicAlarm_enable_set(self->alarm, (self->enable ? self->tickEnable : self->enable));
+  break;
+  default:
+  BasePeripheral__RP2040_writeUint32(&self->base, offset, value);
+  }
+}
+
 // ─── xip_rp2350.ts ───
 enum { QMI_DIRECT_CSR = (0) };
 enum { QMI_DIRECT_TX = (4) };
@@ -13693,24 +20668,66 @@ enum { DIRECT_CSR_TXFULL = (1024) }; /* ((int32_t)((uint32_t)(1) << (10))) */
 enum { DIRECT_CSR_RXEMPTY = (65536) }; /* ((int32_t)((uint32_t)(1) << (16))) */
 enum { DIRECT_CSR_RXFULL = (131072) }; /* ((int32_t)((uint32_t)(1) << (17))) */
 enum { DIRECT_CSR_EN = (1) }; /* ((int32_t)((uint32_t)(1) << (0))) */
-static RPXIPQMI* RPXIPQMI_new(RP2350* rp2040, const char* name) {
+enum { QMI_CSR_RW_MASK = (-4194099) }; /* ((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(3221225472u) | (int32_t)(1069547520))) | (int32_t)(128))) | (int32_t)(64))) | (int32_t)(8))) | (int32_t)(4))) | (int32_t)(1)) */
+static RPXIPQMI* RPXIPQMI_new(RP2350* rpchip, const char* name) {
   RPXIPQMI* self = calloc(1, sizeof(RPXIPQMI));
   {
-    BasePeripheral* __base = BasePeripheral_new(rp2040, name);
+    BasePeripheral* __base = BasePeripheral_new(rpchip, name);
     self->base = *__base;
     free(__base);
   }
   (&(self)->base)->__vtable_Peripheral = &RPXIPQMI_Peripheral_vtable;
   self->directCsr = DIRECT_CSR_RESET;
   self->directCsrEn = false;
+  self->csActive = false;
+  self->ioQspi = 0;
+  self->cmd = 0;
+  self->addrBytes = calloc(3, sizeof(uint8_t));
+  self->addrBytesCount = 0;
+  self->addr = 0;
+  self->progBytes = calloc(256, sizeof(uint8_t));
+  self->progBytesCount = 0;
+  self->readKind = "none";
+  self->rdidIdx = 0;
+  self->readAddr = 0;
+  self->dummySkip = 0;
+  self->wel = false;
+  self->rxFifo = calloc(32, sizeof(uint8_t));
+  self->rxFifoHead = 0;
+  self->rxFifoCount = 0;
   return self;
+}
+
+static bool RPXIPQMI_csNow(RPXIPQMI* self) {
+  if ((((int32_t)(self->directCsr) & (int32_t)(4)) != 0)) {
+  return true;
+  }
+  return ((self->ioQspi != 0) ? (((int32_t)(((uint32_t)(RPIOQSPI_readReg(self->ioQspi, 28)) >> (12))) & (int32_t)(3)) == 2) : (self->ioQspi != 0));
+}
+
+static void RPXIPQMI_syncCs(RPXIPQMI* self) {
+  bool cs = RPXIPQMI_csNow(self);
+  if ((cs && (!self->csActive))) {
+  RPXIPQMI_beginTransaction(self);
+  } else {
+  if (((!cs) && self->csActive)) {
+  RPXIPQMI_endTransaction(self);
+  }
+  }
 }
 
 static int32_t RPXIPQMI_readUint32(RPXIPQMI* self, int32_t offset) {
   if ((offset == QMI_DIRECT_CSR)) {
-  return ((uint32_t)(((int32_t)(((int32_t)(((int32_t)(self->directCsr) | (int32_t)((self->directCsrEn ? DIRECT_CSR_EN : 0)))) | (int32_t)(DIRECT_CSR_TXEMPTY))) | (int32_t)(DIRECT_CSR_RXEMPTY))) >> (0));
+  int32_t rxEmpty = (self->rxFifoCount == 0);
+  return ((uint32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(self->directCsr) & (int32_t)(QMI_CSR_RW_MASK))) | (int32_t)((self->directCsrEn ? DIRECT_CSR_EN : 0)))) | (int32_t)(DIRECT_CSR_TXEMPTY))) | (int32_t)((rxEmpty ? DIRECT_CSR_RXEMPTY : 0)))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(self->rxFifoCount) & (int32_t)(7))) << (18)))))) >> (0));
   }
   if ((offset == QMI_DIRECT_RX)) {
+  if ((self->rxFifoCount > 0)) {
+  uint8_t byte = self->rxFifo[self->rxFifoHead];
+  (self->rxFifoHead = ((int32_t)((self->rxFifoHead + 1)) & (int32_t)(31)));
+  (self->rxFifoCount--);
+  return byte;
+  }
   return 0;
   }
   return BasePeripheral_readUint32(&self->base, offset);
@@ -13718,20 +20735,186 @@ static int32_t RPXIPQMI_readUint32(RPXIPQMI* self, int32_t offset) {
 
 static void RPXIPQMI_writeUint32(RPXIPQMI* self, int32_t offset, int32_t value) {
   if ((offset == QMI_DIRECT_CSR)) {
-  (self->directCsr = ((int32_t)(value) & (int32_t)((~DIRECT_CSR_BUSY))));
+  (self->directCsr = ((int32_t)(value) & (int32_t)(QMI_CSR_RW_MASK)));
   (self->directCsrEn = (!(!((int32_t)(value) & (int32_t)(DIRECT_CSR_EN)))));
+  RPXIPQMI_syncCs(self);
   return;
   }
   if ((offset == QMI_DIRECT_TX)) {
+  int32_t wide = (!(!((int32_t)(value) & (int32_t)(262144))));
+  int32_t nopush = (!(!((int32_t)(value) & (int32_t)(1048576))));
+  int32_t data = ((int32_t)(value) & (int32_t)(65535));
+  RPXIPQMI_spiByte(self, ((int32_t)(data) & (int32_t)(255)), nopush);
+  if (wide) {
+  RPXIPQMI_spiByte(self, ((int32_t)(((uint32_t)(data) >> (8))) & (int32_t)(255)), nopush);
+  }
   return;
   }
   BasePeripheral_writeUint32(&self->base, offset, value);
 }
 
-static RPXIP* RPXIP_new(RP2350* rp2040, const char* name) {
+static void RPXIPQMI_beginTransaction(RPXIPQMI* self) {
+  (self->csActive = true);
+}
+
+static void RPXIPQMI_invalidateFlash(RPXIPQMI* self, int32_t base, int32_t len) {
+  RP2350_invalidateFlashDecode(self->base.rpchip, base, len);
+}
+
+static void RPXIPQMI_endTransaction(RPXIPQMI* self) {
+  (self->csActive = false);
+  if (((self->cmd == 32) && (self->addrBytesCount == 3))) {
+  int32_t base = ((int32_t)(self->addr) & (int32_t)((~4095)));
+  for (
+int32_t i = base
+; (i < (base + 4096)); (i++)) {
+  (self->base.rpchip->flash[i] = 255);
+  }
+  RPXIPQMI_invalidateFlash(self, base, 4096);
+  } else {
+  if (((self->cmd == 2) && (self->addrBytesCount == 3))) {
+  int32_t pageBase = ((int32_t)(self->addr) & (int32_t)((~255)));
+  for (
+int32_t i = 0
+; (i < self->progBytesCount); (i++)) {
+  int32_t at = (pageBase + ((int32_t)((self->addr + i)) & (int32_t)(255)));
+  (self->base.rpchip->flash[at] &= self->progBytes[i]);
+  }
+  RPXIPQMI_invalidateFlash(self, pageBase, 256);
+  }
+  }
+  (self->cmd = 0);
+  (self->readKind = "none");
+}
+
+static void RPXIPQMI_pushRx(RPXIPQMI* self, int32_t byte) {
+  if ((self->rxFifoCount < 32)) {
+  (self->rxFifo[((int32_t)((self->rxFifoHead + self->rxFifoCount)) & (int32_t)(31))] = ((int32_t)(byte) & (int32_t)(255)));
+  (self->rxFifoCount++);
+  }
+}
+
+static int32_t RPXIPQMI_statusByte(RPXIPQMI* self) {
+  return (self->wel ? 2 : 0);
+}
+
+static void RPXIPQMI_spiByte(RPXIPQMI* self, int32_t byte, bool nopush) {
+  RPXIPQMI_syncCs(self);
+  if ((self->cmd == 0)) {
+  (self->cmd = byte);
+  (self->addrBytesCount = 0);
+  (self->progBytesCount = 0);
+  (self->dummySkip = 0);
+  switch (byte) {
+  case 6:
+  (self->wel = true);
+  (self->cmd = 0);
+  break;
+  case 4:
+  (self->wel = false);
+  (self->cmd = 0);
+  break;
+  case 5:
+  (self->readKind = "status");
+  break;
+  case 159:
+  (self->readKind = "rdid");
+  (self->rdidIdx = 0);
+  break;
+  case 32:
+  case 2:
+  case 3:
+  case 11:
+  if ((byte == 11)) {
+  (self->dummySkip = 1);
+  }
+  (self->readKind = "none");
+  break;
+  default:
+  (self->cmd = 0);
+  break;
+  }
+  if ((!nopush)) {
+  RPXIPQMI_pushRx(self, 255);
+  }
+  return;
+  }
+  if ((strcmp(self->readKind, "status") == 0)) {
+  if ((!nopush)) {
+  RPXIPQMI_pushRx(self, RPXIPQMI_statusByte(self));
+  }
+  return;
+  }
+  if ((strcmp(self->readKind, "rdid") == 0)) {
+  int32_t slot = (self->rdidIdx % 3);
+  (self->rdidIdx++);
+  if ((!nopush)) {
+  RPXIPQMI_pushRx(self, ((slot == 0) ? 239 : ((slot == 1) ? 64 : 24)));
+  }
+  return;
+  }
+  if (((self->cmd == 3) || (self->cmd == 11))) {
+  if ((self->addrBytesCount < 3)) {
+  (self->addrBytes[(self->addrBytesCount++)] = byte);
+  if ((self->addrBytesCount == 3)) {
+  (self->readAddr = ((int32_t)(((int32_t)(((int32_t)((uint32_t)(self->addrBytes[0]) << (16)))) | (int32_t)(((int32_t)((uint32_t)(self->addrBytes[1]) << (8)))))) | (int32_t)(self->addrBytes[2])));
+  }
+  } else {
+  if ((self->dummySkip > 0)) {
+  (self->dummySkip--);
+  } else {
+  if ((!nopush)) {
+  RPXIPQMI_pushRx(self, self->base.rpchip->flash[self->readAddr]);
+  (self->readAddr = ((int32_t)((self->readAddr + 1)) & (int32_t)(16777215)));
+  } else {
+  (self->readAddr = ((int32_t)((self->readAddr + 1)) & (int32_t)(16777215)));
+  }
+  }
+  }
+  return;
+  }
+  if (((self->cmd == 32) || (self->cmd == 2))) {
+  if ((self->addrBytesCount < 3)) {
+  (self->addrBytes[(self->addrBytesCount++)] = byte);
+  if ((self->addrBytesCount == 3)) {
+  (self->addr = ((int32_t)(((int32_t)(((int32_t)((uint32_t)(self->addrBytes[0]) << (16)))) | (int32_t)(((int32_t)((uint32_t)(self->addrBytes[1]) << (8)))))) | (int32_t)(self->addrBytes[2])));
+  if ((self->cmd == 32)) {
+  int32_t base = ((int32_t)(self->addr) & (int32_t)((~4095)));
+  for (
+int32_t i = base
+; (i < (base + 4096)); (i++)) {
+  (self->base.rpchip->flash[i] = 255);
+  }
+  RPXIPQMI_invalidateFlash(self, base, 4096);
+  (self->cmd = 0);
+  }
+  }
+  } else {
+  if ((self->cmd == 2)) {
+  int32_t pageBase = ((int32_t)(self->addr) & (int32_t)((~255)));
+  int32_t at = (pageBase + ((int32_t)((self->addr + self->progBytesCount)) & (int32_t)(255)));
+  (self->base.rpchip->flash[at] &= byte);
+  (self->progBytes[(self->progBytesCount++)] = byte);
+  if ((self->progBytesCount >= 256)) {
+  RPXIPQMI_invalidateFlash(self, pageBase, 256);
+  (self->cmd = 0);
+  }
+  }
+  }
+  if ((!nopush)) {
+  RPXIPQMI_pushRx(self, 255);
+  }
+  return;
+  }
+  if ((!nopush)) {
+  RPXIPQMI_pushRx(self, 255);
+  }
+}
+
+static RPXIP* RPXIP_new(RP2350* rpchip, const char* name) {
   RPXIP* self = calloc(1, sizeof(RPXIP));
   {
-    BasePeripheral* __base = BasePeripheral_new(rp2040, name);
+    BasePeripheral* __base = BasePeripheral_new(rpchip, name);
     self->base = *__base;
     free(__base);
   }
@@ -13751,58 +20934,29 @@ static void RPXIP_writeUint32(RPXIP* self, int32_t offset, int32_t value) {
 }
 
 // ─── cpu.ts ───
-static inline int32_t opcode(int32_t i) {
-  return ((int32_t)(i) & (int32_t)(127));
+static int32_t int53High(int64_t packed) {
+  return ((int32_t)(floor(((double)(packed) / (double)(4294967296)))) | (int32_t)(0));
 }
 
-static inline int32_t rd(int32_t i) {
-  return ((int32_t)(((uint32_t)(i) >> (7))) & (int32_t)(31));
-}
-
-static inline int32_t func3(int32_t i) {
-  return ((int32_t)(((uint32_t)(i) >> (12))) & (int32_t)(7));
-}
-
-static inline int32_t rs1(int32_t i) {
-  return ((int32_t)(((uint32_t)(i) >> (15))) & (int32_t)(31));
-}
-
-static inline int32_t rs2(int32_t i) {
-  return ((int32_t)(((uint32_t)(i) >> (20))) & (int32_t)(31));
-}
-
-static inline int32_t func7(int32_t i) {
-  return ((int32_t)(((uint32_t)(i) >> (25))) & (int32_t)(127));
-}
-
-static inline int32_t shamt(int32_t i) {
-  return ((int32_t)(((uint32_t)(i) >> (20))) & (int32_t)(31));
-}
-
-static inline int32_t imm_i(int32_t i) {
-  return ((int32_t)(i) >> (20));
-}
-
-static inline int32_t immU_i(int32_t i) {
-  return ((int32_t)(((uint32_t)(i) >> (20))) & (int32_t)(4095));
-}
-
-static inline int32_t imm_s(int32_t i) {
-  return ((int32_t)(((int32_t)((uint32_t)(((int32_t)(i) >> (25))) << (5)))) | (int32_t)(((int32_t)(((uint32_t)(i) >> (7))) & (int32_t)(31))));
-}
-
-static inline int32_t imm_b(int32_t i) {
-  return ((int32_t)(((int32_t)(((int32_t)(((int32_t)((uint32_t)(((int32_t)(i) >> (31))) << (12)))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(((uint32_t)(i) >> (7))) & (int32_t)(1))) << (11)))))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(((uint32_t)(i) >> (25))) & (int32_t)(63))) << (5)))))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(((uint32_t)(i) >> (8))) & (int32_t)(15))) << (1)))));
-}
-
-static inline int32_t imm_u(int32_t i) {
-  return ((int32_t)(i) & (int32_t)(4294963200u));
-}
-
-static inline int32_t imm_j(int32_t i) {
-  return ((int32_t)(((int32_t)(((int32_t)(((int32_t)((uint32_t)(((int32_t)(i) >> (31))) << (20)))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(((uint32_t)(i) >> (12))) & (int32_t)(255))) << (12)))))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(((uint32_t)(i) >> (20))) & (int32_t)(1))) << (11)))))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(((uint32_t)(i) >> (21))) & (int32_t)(1023))) << (1)))));
-}
-
+static const int32_t xreg_list_0[] = {0};
+static const int32_t xreg_list_1[] = {0};
+static const int32_t xreg_list_2[] = {0};
+static const int32_t xreg_list_3[] = {0};
+static const int32_t xreg_list_4[] = {1};
+static const int32_t xreg_list_5[] = {8, 1};
+static const int32_t xreg_list_6[] = {9, 8, 1};
+static const int32_t xreg_list_7[] = {18, 9, 8, 1};
+static const int32_t xreg_list_8[] = {19, 18, 9, 8, 1};
+static const int32_t xreg_list_9[] = {20, 19, 18, 9, 8, 1};
+static const int32_t xreg_list_10[] = {21, 20, 19, 18, 9, 8, 1};
+static const int32_t xreg_list_11[] = {22, 21, 20, 19, 18, 9, 8, 1};
+static const int32_t xreg_list_12[] = {23, 22, 21, 20, 19, 18, 9, 8, 1};
+static const int32_t xreg_list_13[] = {24, 23, 22, 21, 20, 19, 18, 9, 8, 1};
+static const int32_t xreg_list_14[] = {25, 24, 23, 22, 21, 20, 19, 18, 9, 8, 1};
+static const int32_t xreg_list_15[] = {27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 9, 8, 1};
+static const int32_t* xreg_list[] = {xreg_list_0, xreg_list_1, xreg_list_2, xreg_list_3, xreg_list_4, xreg_list_5, xreg_list_6, xreg_list_7, xreg_list_8, xreg_list_9, xreg_list_10, xreg_list_11, xreg_list_12, xreg_list_13, xreg_list_14, xreg_list_15};
+static const int32_t xreg_list_lens[] = {0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13};
+static const int32_t stack_adj_base[] = {0, 0, 0, 0, 16, 16, 16, 16, 32, 32, 32, 32, 48, 48, 48, 64};
 static int32_t CPU_getRegister(CPU* self, int32_t index) {
   return self->regs[index];
 }
@@ -13878,6 +21032,7 @@ static CPU* CPU_new(RP2350* chip, const char* coreLabel, int32_t mhartid) {
   self->did_just_jump = false;
   self->lr_addr = (-1);
   self->inst_length = 0;
+  self->curPacked = 0;
   self->btb = (-1);
   CPU_reset(self);
   return self;
@@ -13922,42 +21077,7 @@ static void CPU_reset(CPU* self) {
   (self->csrs[3859] = 2264682047u);
 }
 
-static int32_t CPU_fetchInstruction(CPU* self) {
-  int32_t pc = self->pc;
-  if (((int32_t)(pc) & (int32_t)(3))) {
-  uint32_t inst = RP2350_readUint16(self->chip, pc);
-  if ((((int32_t)(inst) & (int32_t)(3)) != 3)) {
-  if ((inst == 0)) {
-  fprintf(stderr, "Error: %s\n", fmtStr("Illegal 16 bit instruction 0 at 0x%x", (unsigned)(pc)));
-  abort();
-  }
-  executeRv32c(self, inst);
-  (self->inst_length = 2);
-  return 0;
-  }
-  int32_t full = ((uint32_t)(((int32_t)(inst) | (int32_t)(((int32_t)((uint32_t)(RP2350_readUint16(self->chip, (pc + 2))) << (16)))))) >> (0));
-  if (self->did_just_jump) {
-  (self->cycles++);
-  }
-  (self->inst_length = 4);
-  return full;
-  }
-  int32_t word = ((uint32_t)(RP2350_readUint32(self->chip, pc)) >> (0));
-  if ((((int32_t)(word) & (int32_t)(3)) != 3)) {
-  int32_t inst = ((int32_t)(word) & (int32_t)(65535));
-  if ((inst == 0)) {
-  fprintf(stderr, "Error: %s\n", fmtStr("Illegal 16 bit instruction 0 at 0x%x", (unsigned)(pc)));
-  abort();
-  }
-  executeRv32c(self, inst);
-  (self->inst_length = 2);
-  return 0;
-  }
-  (self->inst_length = 4);
-  return word;
-}
-
-static void CPU_printDisassembly(CPU* self) { /* TODO: stubbed: uses unsupported JS [src/riscv/cpu.ts:218: printDisassembly() {] */ }
+static void CPU_printDisassembly(CPU* self) { /* TODO: stubbed: uses unsupported JS [src/riscv/cpu.ts:310: printDisassembly() {] */ }
 
 static int32_t CPU_executeInstruction(CPU* self) {
   int64_t before = self->cycles;
@@ -13966,8 +21086,8 @@ static int32_t CPU_executeInstruction(CPU* self) {
   (self->cycles++);
   return (self->cycles - before);
   }
-  int32_t instruction = CPU_fetchInstruction(self);
-  CPU_step(self, instruction);
+  (self->curPacked = getDecodeEntry(self->chip, self->pc));
+  CPU_executePacked(self);
   (self->cycles++);
   return (self->cycles - before);
 }
@@ -13986,51 +21106,181 @@ static void CPU_executeInstructionsUpTo(CPU* self, int64_t cycle) {
 }
 
 static void CPU_step(CPU* self, int32_t instruction) {
-  if ((instruction != 0)) {
-  switch (((int32_t)(instruction) & (int32_t)(127))) {
-  case 3:
-  executeLoad(instruction, self);
+  (self->curPacked = decodeWord(((uint32_t)(instruction) >> (0))));
+  CPU_executePacked(self);
+}
+
+static void CPU_executePacked(CPU* self) {
+  int64_t packed = self->curPacked;
+  int32_t ops = ((uint32_t)(packed) >> (0));
+  int32_t tag = ((int32_t)(((uint32_t)(ops) >> (24))) & (int32_t)(255));
+  int32_t r = ((int32_t)(((uint32_t)(ops) >> (9))) & (int32_t)(31));
+  int32_t s1 = ((int32_t)(((uint32_t)(ops) >> (14))) & (int32_t)(31));
+  int32_t s2 = ((int32_t)(((uint32_t)(ops) >> (19))) & (int32_t)(31));
+  int32_t is32 = ((int32_t)(((uint32_t)(ops) >> (8))) & (int32_t)(1));
+  int32_t imm = ((uint32_t)((uint64_t)(packed) >> 32));
+  if (((is32 && ((int32_t)(self->pc) & (int32_t)(3))) && self->did_just_jump)) {
+  (self->cycles++);
+  }
+  (self->inst_length = (is32 ? 4 : 2));
+  switch (tag) {
+  case T_INVALID:
+  fprintf(stderr, "Error: %s\n", fmtStr("Illegal instruction 0 at 0x%x", (unsigned)(self->pc)));
+  abort();
+  case T_LB:
+  case T_LH:
+  case T_LW:
+  case T_LBU:
+  case T_LHU:
+  CPU_execLoad(self, tag, r, s1, ((int32_t)(((int32_t)((uint32_t)(imm) << (20)))) >> (20)));
   break;
-  case 15:
-  executeMiscMem(instruction, self);
+  case T_FENCE:
   break;
-  case 19:
-  executeOpImm(instruction, self);
+  case T_ADDI:
+  case T_SLLI:
+  case T_BSETI:
+  case T_BCLRI:
+  case T_BINVI:
+  case T_CTZ:
+  case T_CPOP:
+  case T_SEXT_H:
+  case T_SEXT_B:
+  case T_CLZ:
+  case T_ZIP:
+  case T_UNZIP:
+  case T_SLTI:
+  case T_SLTIU:
+  case T_XORI:
+  case T_ORI:
+  case T_ANDI:
+  case T_SRLI:
+  case T_SRAI:
+  case T_BEXTI:
+  case T_RORI:
+  case T_REV8:
+  case T_BREV8:
+  case T_ORC_B:
+  case T_ZEXT_H:
+  CPU_execOpImm(self, tag, r, s1, ((int32_t)(((int32_t)((uint32_t)(imm) << (20)))) >> (20)));
   break;
-  case 23:
-  executeAuipc(instruction, self);
+  case T_SB:
+  case T_SH:
+  case T_SW:
+  CPU_execStore(self, tag, s1, s2, ((int32_t)(((int32_t)((uint32_t)(imm) << (20)))) >> (20)));
   break;
-  case 35:
-  executeStore(instruction, self);
+  case T_LR_W:
+  case T_SC_W:
+  case T_AMOADD_W:
+  case T_AMOSWAP_W:
+  case T_AMOXOR_W:
+  case T_AMOOR_W:
+  case T_AMOAND_W:
+  case T_AMOMIN_W:
+  case T_AMOMAX_W:
+  case T_AMOMINU_W:
+  case T_AMOMAXU_W:
+  CPU_execAmo(self, tag, r, s1, s2);
   break;
-  case 47:
-  executeAmo(instruction, self);
+  case T_ADD:
+  case T_SUB:
+  case T_MUL:
+  case T_SLL:
+  case T_MULH:
+  case T_BSET:
+  case T_BCLR:
+  case T_ROL:
+  case T_BINV:
+  case T_SLT:
+  case T_MULHSU:
+  case T_SH1ADD:
+  case T_SLTU:
+  case T_MULHU:
+  case T_XOR:
+  case T_DIV:
+  case T_SH2ADD:
+  case T_PACK:
+  case T_MIN:
+  case T_XNOR:
+  case T_SRL:
+  case T_MINU:
+  case T_SRA:
+  case T_BEXT:
+  case T_ROR:
+  case T_DIVU:
+  case T_OR:
+  case T_REM:
+  case T_MAX:
+  case T_ORN:
+  case T_SH3ADD:
+  case T_AND:
+  case T_ANDN:
+  case T_PACKH:
+  case T_MAXU:
+  case T_REMU:
+  CPU_execOp(self, tag, r, s1, s2);
   break;
-  case 51:
-  executeOp(instruction, self);
+  case T_H3_BLOCK:
+  case T_H3_UNBLOCK:
+  CPU_execH3(self, tag);
   break;
-  case 55:
-  executeLui(instruction, self);
+  case T_LUI:
+  CPU_setRegisterU(self, r, ((uint32_t)(((int32_t)((uint32_t)(imm) << (12)))) >> (0)));
   break;
-  case 99:
-  executeBranch(instruction, self);
+  case T_AUIPC:
+  CPU_setRegister(self, r, (((int32_t)((uint32_t)(imm) << (12))) + self->pc));
   break;
-  case 103:
-  executeJalr(instruction, self);
+  case T_BEQ:
+  case T_BNE:
+  case T_BLT:
+  case T_BGE:
+  case T_BLTU:
+  case T_BGEU:
+  CPU_execBranch(self, tag, s1, s2, ((int32_t)(((int32_t)((uint32_t)(imm) << (19)))) >> (19)));
   break;
-  case 111:
-  executeJal(instruction, self);
+  case T_JALR:
+  {
+  int32_t target = (CPU_getRegister(self, s1) + ((int32_t)(((int32_t)((uint32_t)(imm) << (20)))) >> (20)));
+  CPU_setRegister(self, r, (self->pc + self->inst_length));
+  (self->next_pc = target);
+  (self->cycles++);
   break;
-  case 115:
-  executeSystem(instruction, self);
+  }
+  case T_JAL:
+  {
+  int32_t link = (self->pc + self->inst_length);
+  CPU_setRegister(self, r, link);
+  checkTraceMagic(self, link);
+  (self->next_pc = (self->pc + ((int32_t)(((int32_t)((uint32_t)(imm) << (11)))) >> (11))));
+  (self->cycles++);
   break;
-  case 11:
-  executeCustom0(instruction, self);
+  }
+  case T_MRET:
+  case T_ECALL:
+  case T_EBREAK:
+  case T_WFI:
+  case T_CSRRW:
+  case T_CSRRS:
+  case T_CSRRC:
+  case T_CSRWI:
+  case T_CSRRSI:
+  case T_CSRRCI:
+  CPU_execSystem(self, tag, r, s1, imm);
+  break;
+  case T_H3_BEXTM:
+  case T_H3_BEXTMI:
+  CPU_execCustom0(self, tag, r, s1, s2, imm);
+  break;
+  case T_CM_PUSH:
+  case T_CM_POP:
+  case T_CM_POPRETZ:
+  case T_CM_POPRET:
+  case T_CM_MVSA01:
+  case T_CM_MVA01S:
+  CPU_execZcmp(self, tag, r, s1, s2, imm);
   break;
   default:
-  fprintf(stderr, "Error: %s\n", fmtStr("Invalid instruction: 0x%x at 0x%x, opcode 0x%x", (unsigned)(instruction), (unsigned)(self->pc), (unsigned)(((int32_t)(instruction) & (int32_t)(127)))));
+  fprintf(stderr, "Error: %s\n", fmtStr("Unhandled tag %d at PC 0x%x", tag, (unsigned)(self->pc)));
   abort();
-  }
   }
   if ((self->next_pc != 0)) {
   (self->pc = self->next_pc);
@@ -14039,6 +21289,591 @@ static void CPU_step(CPU* self, int32_t instruction) {
   } else {
   (self->pc += self->inst_length);
   (self->did_just_jump = false);
+  }
+}
+
+static void CPU_execLoad(CPU* self, int32_t tag, int32_t r, int32_t s1, int32_t imm) {
+  int32_t addr = (CPU_getRegisterU(self, s1) + imm);
+  if ((tag == T_LB)) {
+  CPU_setRegister(self, r, signExtend8(RP2350_readUint8(self->chip, addr)));
+  } else {
+  if ((tag == T_LH)) {
+  CPU_setRegister(self, r, signExtend16(RP2350_readUint16(self->chip, addr)));
+  } else {
+  if ((tag == T_LW)) {
+  CPU_setRegisterU(self, r, RP2350_readUint32(self->chip, addr));
+  } else {
+  if ((tag == T_LBU)) {
+  CPU_setRegister(self, r, RP2350_readUint8(self->chip, addr));
+  } else {
+  CPU_setRegister(self, r, RP2350_readUint16(self->chip, addr));
+  }
+  }
+  }
+  }
+}
+
+static void CPU_execStore(CPU* self, int32_t tag, int32_t s1, int32_t s2, int32_t imm) {
+  int32_t addr = (CPU_getRegister(self, s1) + imm);
+  int32_t v = CPU_getRegister(self, s2);
+  if ((tag == T_SB)) {
+  RP2350_writeUint8(self->chip, addr, ((int32_t)(v) & (int32_t)(255)));
+  } else {
+  if ((tag == T_SH)) {
+  RP2350_writeUint16(self->chip, addr, ((int32_t)(v) & (int32_t)(65535)));
+  } else {
+  RP2350_writeUint32(self->chip, addr, v);
+  }
+  }
+}
+
+static void CPU_execOpImm(CPU* self, int32_t tag, int32_t r, int32_t s1, int32_t imm) {
+  switch (tag) {
+  case T_ADDI:
+  CPU_setRegisterU(self, r, ((uint32_t)((CPU_getRegisterU(self, s1) + imm)) >> (0)));
+  break;
+  case T_SLLI:
+  CPU_setRegisterU(self, r, ((int32_t)((uint32_t)(CPU_getRegisterU(self, s1)) << (((int32_t)(imm)) & 31))));
+  break;
+  case T_BSETI:
+  CPU_setRegister(self, r, ((int32_t)(CPU_getRegister(self, s1)) | (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(imm)) & 31))))));
+  break;
+  case T_BCLRI:
+  CPU_setRegister(self, r, ((int32_t)(CPU_getRegister(self, s1)) & (int32_t)((~((int32_t)((uint32_t)(1) << (((int32_t)(imm)) & 31)))))));
+  break;
+  case T_BINVI:
+  CPU_setRegister(self, r, ((int32_t)(CPU_getRegister(self, s1)) ^ (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(imm)) & 31))))));
+  break;
+  case T_CTZ:
+  {
+  int32_t t = ((uint32_t)(CPU_getRegister(self, s1)) >> (0));
+  CPU_setRegister(self, r, ((t == 0) ? 32 : (31 - clz32(((int32_t)(t) & (int32_t)((-t)))))));
+  break;
+  }
+  case T_CPOP:
+  {
+  int32_t t = ((uint32_t)(CPU_getRegister(self, s1)) >> (0));
+  (t = (t - ((int32_t)(((int32_t)(t) >> (1))) & (int32_t)(1431655765))));
+  (t = (((int32_t)(t) & (int32_t)(858993459)) + ((int32_t)(((int32_t)(t) >> (2))) & (int32_t)(858993459))));
+  CPU_setRegister(self, r, ((int32_t)((((int32_t)((t + ((int32_t)(t) >> (4)))) & (int32_t)(252645135)) * 16843009)) >> (24)));
+  break;
+  }
+  case T_SEXT_H:
+  CPU_setRegister(self, r, signExtend16(((int32_t)(CPU_getRegisterU(self, s1)) & (int32_t)(65535))));
+  break;
+  case T_SEXT_B:
+  CPU_setRegister(self, r, signExtend8(((int32_t)(CPU_getRegisterU(self, s1)) & (int32_t)(255))));
+  break;
+  case T_CLZ:
+  CPU_setRegister(self, r, clz32(CPU_getRegisterU(self, s1)));
+  break;
+  case T_ZIP:
+  {
+  uint32_t u = CPU_getRegisterU(self, s1);
+  int32_t result = 0;
+  for (
+int32_t i = 0
+; (i < 16); (i++)) {
+  (result |= ((int32_t)((uint32_t)(((int32_t)(((uint32_t)(u) >> (((int32_t)((16 + i))) & 31))) & (int32_t)(1))) << (((int32_t)((2 * i))) & 31))));
+  (result |= ((int32_t)((uint32_t)(((int32_t)(((uint32_t)(u) >> (((int32_t)(i)) & 31))) & (int32_t)(1))) << (((int32_t)(((2 * i) + 1))) & 31))));
+  }
+  CPU_setRegisterU(self, r, ((uint32_t)(result) >> (0)));
+  break;
+  }
+  case T_UNZIP:
+  {
+  uint32_t u = CPU_getRegisterU(self, s1);
+  int32_t result = 0;
+  for (
+int32_t i = 0
+; (i < 16); (i++)) {
+  (result |= ((int32_t)((uint32_t)(((int32_t)(((uint32_t)(u) >> (((int32_t)(((2 * i) + 1))) & 31))) & (int32_t)(1))) << (((int32_t)(i)) & 31))));
+  (result |= ((int32_t)((uint32_t)(((int32_t)(((uint32_t)(u) >> (((int32_t)((2 * i))) & 31))) & (int32_t)(1))) << (((int32_t)((16 + i))) & 31))));
+  }
+  CPU_setRegisterU(self, r, ((uint32_t)(result) >> (0)));
+  break;
+  }
+  case T_SLTI:
+  CPU_setRegister(self, r, ((CPU_getRegister(self, s1) < imm) ? 1 : 0));
+  break;
+  case T_SLTIU:
+  CPU_setRegister(self, r, ((CPU_getRegisterU(self, s1) < ((int32_t)(imm) & (int32_t)(4095))) ? 1 : 0));
+  break;
+  case T_XORI:
+  CPU_setRegister(self, r, ((int32_t)(CPU_getRegister(self, s1)) ^ (int32_t)(imm)));
+  break;
+  case T_ORI:
+  CPU_setRegister(self, r, ((int32_t)(CPU_getRegister(self, s1)) | (int32_t)(imm)));
+  break;
+  case T_ANDI:
+  CPU_setRegister(self, r, ((int32_t)(CPU_getRegister(self, s1)) & (int32_t)(imm)));
+  break;
+  case T_SRLI:
+  CPU_setRegister(self, r, ((uint32_t)(CPU_getRegister(self, s1)) >> (((int32_t)(imm)) & 31)));
+  break;
+  case T_SRAI:
+  CPU_setRegister(self, r, ((int32_t)(CPU_getRegister(self, s1)) >> (((int32_t)(imm)) & 31)));
+  break;
+  case T_BEXTI:
+  CPU_setRegister(self, r, ((int32_t)(((uint32_t)(CPU_getRegister(self, s1)) >> (((int32_t)(imm)) & 31))) & (int32_t)(1)));
+  break;
+  case T_RORI:
+  {
+  uint32_t u = CPU_getRegisterU(self, s1);
+  CPU_setRegister(self, r, ((int32_t)(((uint32_t)(((int32_t)((uint32_t)(u) << (((int32_t)((32 - imm))) & 31)))) >> (0))) | (int32_t)(((uint32_t)(u) >> (((int32_t)(imm)) & 31)))));
+  break;
+  }
+  case T_REV8:
+  {
+  int32_t v = CPU_getRegister(self, s1);
+  CPU_setRegisterU(self, r, ((uint32_t)(((int32_t)(((int32_t)(((int32_t)(((uint32_t)(v) >> (24))) | (int32_t)(((int32_t)(((uint32_t)(v) >> (8))) & (int32_t)(65280))))) | (int32_t)(((int32_t)(((int32_t)((uint32_t)(v) << (8)))) & (int32_t)(16711680))))) | (int32_t)(((uint32_t)(((int32_t)((uint32_t)(((int32_t)(v) & (int32_t)(255))) << (24)))) >> (0))))) >> (0)));
+  break;
+  }
+  case T_BREV8:
+  {
+  uint32_t u = CPU_getRegisterU(self, s1);
+  int32_t result = 0;
+  for (
+int32_t i = 0
+; (i < 32); (i += 8)) {
+  int32_t by = ((int32_t)(((uint32_t)(u) >> (((int32_t)(i)) & 31))) & (int32_t)(255));
+  (by = ((int32_t)(((int32_t)(((int32_t)(by) & (int32_t)(240))) >> (4))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(by) & (int32_t)(15))) << (4))))));
+  (by = ((int32_t)(((int32_t)(((int32_t)(by) & (int32_t)(204))) >> (2))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(by) & (int32_t)(51))) << (2))))));
+  (by = ((int32_t)(((int32_t)(((int32_t)(by) & (int32_t)(170))) >> (1))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(by) & (int32_t)(85))) << (1))))));
+  (result |= ((int32_t)((uint32_t)(by) << (((int32_t)(i)) & 31))));
+  }
+  CPU_setRegisterU(self, r, ((uint32_t)(result) >> (0)));
+  break;
+  }
+  case T_ORC_B:
+  {
+  uint32_t u = CPU_getRegisterU(self, s1);
+  int32_t result = 0;
+  for (
+int32_t i = 0
+; (i < 32); (i += 8)) {
+  if (((int32_t)(u) & (int32_t)(((int32_t)((uint32_t)(128) << (((int32_t)(i)) & 31)))))) {
+  (result |= ((int32_t)((uint32_t)(255) << (((int32_t)(i)) & 31))));
+  }
+  }
+  CPU_setRegisterU(self, r, ((uint32_t)(result) >> (0)));
+  break;
+  }
+  case T_ZEXT_H:
+  CPU_setRegisterU(self, r, ((int32_t)(CPU_getRegisterU(self, s1)) & (int32_t)(65535)));
+  break;
+  }
+}
+
+static void CPU_execAmo(CPU* self, int32_t tag, int32_t r, int32_t s1, int32_t s2) {
+  uint32_t addr = CPU_getRegisterU(self, s1);
+  if ((tag == T_LR_W)) {
+  CPU_setRegisterU(self, r, RP2350_readUint32(self->chip, addr));
+  (self->lr_addr = ((int32_t)(addr) & (int32_t)((~15))));
+  CPU_invalidateLrReservation(self->otherCore, addr);
+  (self->cycles += 3);
+  return;
+  }
+  if ((tag == T_SC_W)) {
+  if ((self->lr_addr == ((int32_t)(addr) & (int32_t)((~15))))) {
+  RP2350_writeUint32(self->chip, addr, CPU_getRegisterU(self, s2));
+  CPU_setRegisterU(self, r, 0);
+  } else {
+  CPU_setRegisterU(self, r, 1);
+  }
+  (self->lr_addr = (-1));
+  (self->cycles += 3);
+  return;
+  }
+  uint32_t v = CPU_getRegisterU(self, s2);
+  uint32_t mem = RP2350_readUint32(self->chip, addr);
+  CPU_setRegisterU(self, r, mem);
+  int32_t sv = 0;
+  if ((tag == T_AMOADD_W)) {
+  (sv = ((uint32_t)((mem + v)) >> (0)));
+  } else {
+  if ((tag == T_AMOSWAP_W)) {
+  (sv = v);
+  } else {
+  if ((tag == T_AMOXOR_W)) {
+  (sv = ((int32_t)(mem) ^ (int32_t)(v)));
+  } else {
+  if ((tag == T_AMOOR_W)) {
+  (sv = ((int32_t)(mem) | (int32_t)(v)));
+  } else {
+  if ((tag == T_AMOAND_W)) {
+  (sv = ((int32_t)(mem) & (int32_t)(v)));
+  } else {
+  if ((tag == T_AMOMIN_W)) {
+  (sv = ((((int32_t)(mem) | (int32_t)(0)) < ((int32_t)(v) | (int32_t)(0))) ? mem : v));
+  } else {
+  if ((tag == T_AMOMAX_W)) {
+  (sv = ((((int32_t)(mem) | (int32_t)(0)) > ((int32_t)(v) | (int32_t)(0))) ? mem : v));
+  } else {
+  if ((tag == T_AMOMINU_W)) {
+  (sv = ((mem < v) ? mem : v));
+  } else {
+  (sv = ((mem > v) ? mem : v));
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  RP2350_writeUint32(self->chip, addr, sv);
+  CPU_invalidateLrReservation(self->otherCore, addr);
+  (self->cycles += 3);
+}
+
+static void CPU_execOp(CPU* self, int32_t tag, int32_t r, int32_t s1, int32_t s2) {
+  int32_t a = CPU_getRegister(self, s1);
+  int32_t b = CPU_getRegister(self, s2);
+  switch (tag) {
+  case T_ADD:
+  CPU_setRegister(self, r, (a + b));
+  break;
+  case T_SUB:
+  CPU_setRegister(self, r, (a - b));
+  break;
+  case T_MUL:
+  CPU_setRegister(self, r, imul32(a, b));
+  break;
+  case T_SLL:
+  CPU_setRegister(self, r, ((int32_t)((uint32_t)(a) << (((int32_t)(b)) & 31))));
+  break;
+  case T_MULH:
+  {
+  int32_t hi = umulh(((uint32_t)(a) >> (0)), ((uint32_t)(b) >> (0)));
+  if ((a < 0)) {
+  (hi = ((int32_t)((hi - ((uint32_t)(b) >> (0)))) | (int32_t)(0)));
+  }
+  if ((b < 0)) {
+  (hi = ((int32_t)((hi - ((uint32_t)(a) >> (0)))) | (int32_t)(0)));
+  }
+  CPU_setRegister(self, r, hi);
+  break;
+  }
+  case T_BSET:
+  CPU_setRegister(self, r, ((int32_t)(a) | (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(((int32_t)(b) & (int32_t)(31)))) & 31))))));
+  break;
+  case T_BCLR:
+  CPU_setRegister(self, r, ((int32_t)(a) & (int32_t)((~((int32_t)((uint32_t)(1) << (((int32_t)(((int32_t)(b) & (int32_t)(31)))) & 31)))))));
+  break;
+  case T_ROL:
+  {
+  int32_t sh = ((int32_t)(b) & (int32_t)(31));
+  CPU_setRegister(self, r, ((uint32_t)(((int32_t)(((int32_t)((uint32_t)(a) << (((int32_t)(sh)) & 31)))) | (int32_t)(((uint32_t)(a) >> (((int32_t)((32 - sh))) & 31))))) >> (0)));
+  break;
+  }
+  case T_BINV:
+  CPU_setRegister(self, r, ((int32_t)(a) ^ (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(((int32_t)(b) & (int32_t)(31)))) & 31))))));
+  break;
+  case T_SLT:
+  CPU_setRegister(self, r, ((a < b) ? 1 : 0));
+  break;
+  case T_MULHSU:
+  {
+  int32_t bu = ((uint32_t)(b) >> (0));
+  int32_t hi = umulh(((uint32_t)(a) >> (0)), bu);
+  if ((a < 0)) {
+  (hi = ((int32_t)((hi - bu)) | (int32_t)(0)));
+  }
+  CPU_setRegister(self, r, hi);
+  break;
+  }
+  case T_SH1ADD:
+  CPU_setRegister(self, r, ((int32_t)((((int32_t)((uint32_t)(a) << (1))) + b)) & (int32_t)(4294967295u)));
+  break;
+  case T_SLTU:
+  CPU_setRegister(self, r, ((((uint32_t)(a) >> (0)) < ((uint32_t)(b) >> (0))) ? 1 : 0));
+  break;
+  case T_MULHU:
+  CPU_setRegisterU(self, r, umulh(((uint32_t)(a) >> (0)), ((uint32_t)(b) >> (0))));
+  break;
+  case T_XOR:
+  CPU_setRegister(self, r, ((int32_t)(a) ^ (int32_t)(b)));
+  break;
+  case T_DIV:
+  if ((b == 0)) {
+  CPU_setRegisterU(self, r, 4294967295u);
+  } else {
+  if (((((uint32_t)(a) >> (0)) == 2147483648u) && (((uint32_t)(b) >> (0)) == 4294967295u))) {
+  CPU_setRegisterU(self, r, 2147483648u);
+  } else {
+  CPU_setRegister(self, r, ((int32_t)(((double)(a) / (double)(b))) | (int32_t)(0)));
+  }
+  }
+  (self->cycles += 17);
+  break;
+  case T_SH2ADD:
+  CPU_setRegister(self, r, ((int32_t)((((int32_t)((uint32_t)(a) << (2))) + b)) & (int32_t)(4294967295u)));
+  break;
+  case T_PACK:
+  CPU_setRegister(self, r, ((int32_t)(((int32_t)(a) & (int32_t)(65535))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(b) & (int32_t)(65535))) << (16))))));
+  break;
+  case T_MIN:
+  CPU_setRegister(self, r, ((a < b) ? a : b));
+  break;
+  case T_XNOR:
+  CPU_setRegister(self, r, ((int32_t)((~a)) ^ (int32_t)(b)));
+  break;
+  case T_SRL:
+  CPU_setRegister(self, r, ((uint32_t)(a) >> (((int32_t)(b)) & 31)));
+  break;
+  case T_MINU:
+  {
+  int32_t u1 = ((uint32_t)(a) >> (0));
+  int32_t u2 = ((uint32_t)(b) >> (0));
+  CPU_setRegister(self, r, ((u1 < u2) ? u1 : u2));
+  break;
+  }
+  case T_SRA:
+  CPU_setRegister(self, r, ((int32_t)(a) >> (((int32_t)(b)) & 31)));
+  break;
+  case T_BEXT:
+  CPU_setRegister(self, r, ((int32_t)(((uint32_t)(a) >> (((int32_t)(((int32_t)(b) & (int32_t)(31)))) & 31))) & (int32_t)(1)));
+  break;
+  case T_ROR:
+  {
+  int32_t sh = ((int32_t)(b) & (int32_t)(31));
+  int32_t u = ((uint32_t)(a) >> (0));
+  CPU_setRegister(self, r, ((int32_t)(((uint32_t)(((int32_t)((uint32_t)(u) << (((int32_t)((32 - sh))) & 31)))) >> (0))) | (int32_t)(((uint32_t)(u) >> (((int32_t)(sh)) & 31)))));
+  break;
+  }
+  case T_DIVU:
+  if ((b == 0)) {
+  CPU_setRegisterU(self, r, 4294967295u);
+  } else {
+  CPU_setRegister(self, r, ((uint32_t)(((double)(((uint32_t)(a) >> (0))) / (double)(((uint32_t)(b) >> (0))))) >> (0)));
+  }
+  (self->cycles += 17);
+  break;
+  case T_OR:
+  CPU_setRegister(self, r, ((int32_t)(a) | (int32_t)(b)));
+  break;
+  case T_REM:
+  if ((b == 0)) {
+  CPU_setRegister(self, r, a);
+  } else {
+  if (((((uint32_t)(a) >> (0)) == 2147483648u) && (((uint32_t)(b) >> (0)) == 4294967295u))) {
+  CPU_setRegister(self, r, 0);
+  } else {
+  CPU_setRegister(self, r, (a % b));
+  }
+  }
+  (self->cycles += 17);
+  break;
+  case T_MAX:
+  CPU_setRegister(self, r, ((a > b) ? a : b));
+  break;
+  case T_ORN:
+  CPU_setRegister(self, r, ((int32_t)(a) | (int32_t)((~b))));
+  break;
+  case T_SH3ADD:
+  CPU_setRegister(self, r, ((int32_t)((((int32_t)((uint32_t)(a) << (3))) + b)) & (int32_t)(4294967295u)));
+  break;
+  case T_AND:
+  CPU_setRegister(self, r, ((int32_t)(a) & (int32_t)(b)));
+  break;
+  case T_ANDN:
+  CPU_setRegister(self, r, ((int32_t)(a) & (int32_t)((~b))));
+  break;
+  case T_PACKH:
+  CPU_setRegister(self, r, ((int32_t)(((int32_t)(a) & (int32_t)(255))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(b) & (int32_t)(255))) << (8))))));
+  break;
+  case T_MAXU:
+  {
+  int32_t u1 = ((uint32_t)(a) >> (0));
+  int32_t u2 = ((uint32_t)(b) >> (0));
+  CPU_setRegisterU(self, r, ((uint32_t)(((u1 > u2) ? u1 : u2)) >> (0)));
+  break;
+  }
+  case T_REMU:
+  CPU_setRegisterU(self, r, ((uint32_t)(((b == 0) ? a : (((uint32_t)(a) >> (0)) % ((uint32_t)(b) >> (0))))) >> (0)));
+  (self->cycles += 17);
+  break;
+  }
+}
+
+static void CPU_execH3(CPU* self, int32_t tag) {
+  if ((tag == T_H3_BLOCK)) {
+  if (self->eventRegistered) {
+  (self->eventRegistered = false);
+  } else {
+  if (CPU_wakingInterruptPending(self)) {
+  (self->interruptsUpdated = true);
+  } else {
+  (self->waiting = true);
+  (self->waitingOnBlock = true);
+  }
+  }
+  } else {
+  CPU_fireSEV(self);
+  }
+}
+
+static void CPU_execBranch(CPU* self, int32_t tag, int32_t s1, int32_t s2, int32_t imm) {
+  int32_t taken = false;
+  if ((tag == T_BEQ)) {
+  (taken = (CPU_getRegister(self, s1) == CPU_getRegister(self, s2)));
+  } else {
+  if ((tag == T_BNE)) {
+  (taken = (CPU_getRegister(self, s1) != CPU_getRegister(self, s2)));
+  } else {
+  if ((tag == T_BLT)) {
+  (taken = (CPU_getRegister(self, s1) < CPU_getRegister(self, s2)));
+  } else {
+  if ((tag == T_BGE)) {
+  (taken = (CPU_getRegister(self, s1) >= CPU_getRegister(self, s2)));
+  } else {
+  if ((tag == T_BLTU)) {
+  (taken = (CPU_getRegisterU(self, s1) < CPU_getRegisterU(self, s2)));
+  } else {
+  (taken = (CPU_getRegisterU(self, s1) >= CPU_getRegisterU(self, s2)));
+  }
+  }
+  }
+  }
+  }
+  if (taken) {
+  (self->next_pc = (self->pc + imm));
+  }
+  CPU_h3_branch_cycles(self, taken);
+}
+
+static void CPU_execSystem(CPU* self, int32_t tag, int32_t r, int32_t s1, int32_t imm) {
+  if ((tag == T_MRET)) {
+  int32_t mstatus = CPU_getCSR(self, 768, 0);
+  (mstatus &= (~((int32_t)((uint32_t)(3) << (11)))));
+  (mstatus &= (~8));
+  (mstatus |= ((int32_t)(((uint32_t)(mstatus) >> (4))) & (int32_t)(8)));
+  (mstatus |= ((int32_t)((uint32_t)(1) << (7))));
+  CPU_setCSR(self, 768, mstatus, 0);
+  (self->next_pc = CPU_getCSR(self, 833, 0));
+  (self->cycles++);
+  CPU_updateMEICONTEXT_priority_restore(self);
+  (self->interruptsUpdated = true);
+  } else {
+  if ((tag == T_ECALL)) {
+  CPU_trapEntry(self, 11, true);
+  } else {
+  if ((tag == T_EBREAK)) {
+  CPU_trapEntry(self, 3, true);
+  } else {
+  if ((tag == T_WFI)) {
+  if (CPU_wakingInterruptPending(self)) {
+  (self->interruptsUpdated = true);
+  } else {
+  (self->waiting = true);
+  (self->waitingOnBlock = false);
+  }
+  } else {
+  if ((tag == T_CSRRW)) {
+  int32_t csr = ((int32_t)(imm) & (int32_t)(4095));
+  int32_t newVal = CPU_getRegister(self, s1);
+  if ((r != 0)) {
+  CPU_setRegister(self, r, CPU_getCSR(self, csr, newVal));
+  }
+  CPU_setCSR(self, csr, newVal, newVal);
+  } else {
+  if ((tag == T_CSRRS)) {
+  int32_t csr = ((int32_t)(imm) & (int32_t)(4095));
+  int32_t orVal = CPU_getRegister(self, s1);
+  int32_t old = CPU_getCSR(self, csr, orVal);
+  if ((s1 != 0)) {
+  CPU_setCSR(self, csr, ((int32_t)(old) | (int32_t)(orVal)), orVal);
+  }
+  CPU_setRegister(self, r, old);
+  } else {
+  if ((tag == T_CSRRC)) {
+  int32_t csr = ((int32_t)(imm) & (int32_t)(4095));
+  int32_t notVal = CPU_getRegister(self, s1);
+  int32_t old = CPU_getCSR(self, csr, notVal);
+  if ((notVal != 0)) {
+  CPU_setCSR(self, csr, ((int32_t)(old) & (int32_t)((~notVal))), notVal);
+  }
+  CPU_setRegister(self, r, old);
+  } else {
+  int32_t csr = ((int32_t)(((uint32_t)(imm) >> (5))) & (int32_t)(4095));
+  int32_t imm5 = ((int32_t)(imm) & (int32_t)(31));
+  if ((tag == T_CSRWI)) {
+  if ((r != 0)) {
+  CPU_setRegister(self, r, CPU_getCSR(self, csr, imm5));
+  }
+  CPU_setCSR(self, csr, imm5, imm5);
+  } else {
+  if ((tag == T_CSRRSI)) {
+  int32_t old = CPU_getCSR(self, csr, imm5);
+  if ((imm5 != 0)) {
+  CPU_setCSR(self, csr, ((int32_t)(old) | (int32_t)(imm5)), imm5);
+  }
+  CPU_setRegister(self, r, old);
+  } else {
+  int32_t old = CPU_getCSR(self, csr, imm5);
+  if ((imm5 != 0)) {
+  CPU_setCSR(self, csr, ((int32_t)(old) & (int32_t)((~imm5))), imm5);
+  }
+  CPU_setRegister(self, r, old);
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+}
+
+static void CPU_execCustom0(CPU* self, int32_t tag, int32_t r, int32_t s1, int32_t s2, int32_t imm) {
+  int32_t size = ((int32_t)(((uint32_t)(imm) >> (1))) & (int32_t)(7));
+  int32_t sh = ((tag == T_H3_BEXTM) ? CPU_getRegisterU(self, s2) : s2);
+  CPU_setRegisterU(self, r, ((int32_t)(((uint32_t)(CPU_getRegisterU(self, s1)) >> (((int32_t)(sh)) & 31))) & (int32_t)((((int32_t)((uint32_t)(2) << (((int32_t)(size)) & 31))) - 1))));
+}
+
+static void CPU_execZcmp(CPU* self, int32_t tag, int32_t r, int32_t s1, int32_t s2, int32_t imm) {
+  if ((tag == T_CM_PUSH)) {
+  int32_t stack_adj = (stack_adj_base[s2] + imm);
+  uint32_t sp = CPU_getRegisterU(self, 2);
+  int32_t addr = (sp - 4);
+  {
+    int32_t __forof_idx = s2;
+    for (int32_t __forof_i = 0; __forof_i < xreg_list_lens[__forof_idx]; __forof_i++) {
+      int32_t reg = xreg_list[__forof_idx][__forof_i];
+  RP2350_writeUint32(self->chip, addr, CPU_getRegisterU(self, reg));
+  (addr -= 4);
+  (self->cycles++);
+    }
+  }
+  CPU_setRegisterU(self, 2, (sp - stack_adj));
+  } else {
+  if ((((tag == T_CM_POP) || (tag == T_CM_POPRETZ)) || (tag == T_CM_POPRET))) {
+  int32_t stack_adj = (stack_adj_base[s2] + imm);
+  uint32_t sp = CPU_getRegisterU(self, 2);
+  int32_t addr = ((sp + stack_adj) - 4);
+  {
+    int32_t __forof_idx = s2;
+    for (int32_t __forof_i = 0; __forof_i < xreg_list_lens[__forof_idx]; __forof_i++) {
+      int32_t reg = xreg_list[__forof_idx][__forof_i];
+  CPU_setRegisterU(self, reg, RP2350_readUint32(self->chip, addr));
+  (addr -= 4);
+  (self->cycles++);
+    }
+  }
+  CPU_setRegisterU(self, 2, (sp + stack_adj));
+  if ((tag == T_CM_POPRETZ)) {
+  CPU_setRegister(self, 10, 0);
+  }
+  if (((tag == T_CM_POPRET) || (tag == T_CM_POPRETZ))) {
+  (self->next_pc = CPU_getRegister(self, 1));
+  (self->cycles++);
+  }
+  } else {
+  CPU_setRegister(self, r, CPU_getRegister(self, s2));
+  CPU_setRegister(self, s1, CPU_getRegister(self, imm));
+  }
   }
 }
 
@@ -14378,7 +22213,7 @@ int32_t irq = (((int32_t)(raw_write) & (int32_t)(31)) * 4)
   case 3860:
   return;
   }
-  /* TODO: log [src/riscv/cpu.ts:697: this.logger.info(] */ 0;
+  /* TODO: log [src/riscv/cpu.ts:1364: this.logger.info(] */ 0;
   (self->csrs[csr] = value);
 }
 
@@ -14450,7 +22285,7 @@ static int32_t CPU_getCSR(CPU* self, int32_t csr, int32_t raw_write) {
   return meicontext;
   }
   }
-  /* TODO: log [src/riscv/cpu.ts:770: this.logger.info(this.coreLabel, `Unknown CSR get: 0x${csr.toString(16)}`);] */ 0;
+  /* TODO: log [src/riscv/cpu.ts:1437: this.logger.info(this.coreLabel, `Unknown CSR get: 0x${csr.toString(16)}`);] */ 0;
   return self->csrs[csr];
 }
 
@@ -14467,629 +22302,6 @@ static int32_t umulh(int32_t a, int32_t b) {
   return ((uint32_t)((((hh + ((uint32_t)(lh) >> (16))) + ((uint32_t)(hl) >> (16))) + ((uint32_t)(cross) >> (16)))) >> (0));
 }
 
-static void executeLoad(int32_t inst, CPU* cpu) {
-  int32_t r = rd(inst);
-  int32_t s1 = rs1(inst);
-  int32_t im = imm_i(inst);
-  int32_t addr = (CPU_getRegisterU(cpu, s1) + im);
-  switch (func3(inst)) {
-  case 0:
-  CPU_setRegister(cpu, r, signExtend8(RP2350_readUint8(cpu->chip, addr)));
-  break;
-  case 1:
-  CPU_setRegister(cpu, r, signExtend16(RP2350_readUint16(cpu->chip, addr)));
-  break;
-  case 2:
-  CPU_setRegisterU(cpu, r, RP2350_readUint32(cpu->chip, addr));
-  break;
-  case 4:
-  CPU_setRegister(cpu, r, RP2350_readUint8(cpu->chip, addr));
-  break;
-  case 5:
-  CPU_setRegister(cpu, r, RP2350_readUint16(cpu->chip, addr));
-  break;
-  default:
-  fprintf(stderr, "Error: %s\n", fmtStr("Invalid LOAD func3 %d", func3(inst)));
-  abort();
-  }
-}
-
-static void executeMiscMem(int32_t inst, CPU* cpu) {
-}
-
-static void executeOpImm(int32_t inst, CPU* cpu) {
-  int32_t r = rd(inst);
-  int32_t s1 = rs1(inst);
-  switch (func3(inst)) {
-  case 0:
-  CPU_setRegisterU(cpu, r, ((uint32_t)((CPU_getRegisterU(cpu, s1) + imm_i(inst))) >> (0)));
-  break;
-  case 1:
-  {
-  int32_t sh = shamt(inst);
-  int32_t f7 = func7(inst);
-  int32_t imu = immU_i(inst);
-  if ((f7 == 0)) {
-  CPU_setRegisterU(cpu, r, ((int32_t)((uint32_t)(CPU_getRegisterU(cpu, s1)) << (((int32_t)(sh)) & 31))));
-  } else {
-  if ((f7 == 20)) {
-  CPU_setRegister(cpu, r, ((int32_t)(CPU_getRegister(cpu, s1)) | (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(sh)) & 31))))));
-  } else {
-  if ((f7 == 36)) {
-  CPU_setRegister(cpu, r, ((int32_t)(CPU_getRegister(cpu, s1)) & (int32_t)((~((int32_t)((uint32_t)(1) << (((int32_t)(sh)) & 31)))))));
-  } else {
-  if ((f7 == 52)) {
-  CPU_setRegister(cpu, r, ((int32_t)(CPU_getRegister(cpu, s1)) ^ (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(sh)) & 31))))));
-  } else {
-  if ((imu == 1537)) {
-  int32_t t = ((uint32_t)(CPU_getRegister(cpu, s1)) >> (0));
-  CPU_setRegister(cpu, r, ((t == 0) ? 32 : (31 - clz32(((int32_t)(t) & (int32_t)((-t)))))));
-  } else {
-  if ((imu == 1538)) {
-  int32_t t = ((uint32_t)(CPU_getRegister(cpu, s1)) >> (0));
-  (t = (t - ((int32_t)(((int32_t)(t) >> (1))) & (int32_t)(1431655765))));
-  (t = (((int32_t)(t) & (int32_t)(858993459)) + ((int32_t)(((int32_t)(t) >> (2))) & (int32_t)(858993459))));
-  CPU_setRegister(cpu, r, ((int32_t)((((int32_t)((t + ((int32_t)(t) >> (4)))) & (int32_t)(252645135)) * 16843009)) >> (24)));
-  } else {
-  if ((imu == 1541)) {
-  CPU_setRegister(cpu, r, signExtend16(((int32_t)(CPU_getRegisterU(cpu, s1)) & (int32_t)(65535))));
-  } else {
-  if ((imu == 1540)) {
-  CPU_setRegister(cpu, r, signExtend8(((int32_t)(CPU_getRegisterU(cpu, s1)) & (int32_t)(255))));
-  } else {
-  if ((((int32_t)(inst) & (int32_t)(4293947519u)) == 1610616851)) {
-  CPU_setRegister(cpu, r, clz32(CPU_getRegisterU(cpu, s1)));
-  } else {
-  if ((imu == 143)) {
-  uint32_t u = CPU_getRegisterU(cpu, s1);
-  int32_t result = 0;
-  for (
-int32_t i = 0
-; (i < 16); (i++)) {
-  (result |= ((int32_t)((uint32_t)(((int32_t)(((uint32_t)(u) >> (((int32_t)((16 + i))) & 31))) & (int32_t)(1))) << (((int32_t)((2 * i))) & 31))));
-  (result |= ((int32_t)((uint32_t)(((int32_t)(((uint32_t)(u) >> (((int32_t)(i)) & 31))) & (int32_t)(1))) << (((int32_t)(((2 * i) + 1))) & 31))));
-  }
-  CPU_setRegisterU(cpu, r, ((uint32_t)(result) >> (0)));
-  } else {
-  fprintf(stderr, "Error: %s\n", fmtStr("Unknown OP-IMM func3=1, func7: 0x%x", (unsigned)(f7)));
-  abort();
-  }
-  }
-  }
-  }
-  }
-  }
-  }
-  }
-  }
-  }
-  break;
-  }
-  case 2:
-  CPU_setRegister(cpu, r, ((CPU_getRegister(cpu, s1) < imm_i(inst)) ? 1 : 0));
-  break;
-  case 3:
-  CPU_setRegister(cpu, r, ((CPU_getRegisterU(cpu, s1) < immU_i(inst)) ? 1 : 0));
-  break;
-  case 4:
-  CPU_setRegister(cpu, r, ((int32_t)(CPU_getRegister(cpu, s1)) ^ (int32_t)(imm_i(inst))));
-  break;
-  case 5:
-  {
-  int32_t sh = shamt(inst);
-  int32_t f7 = func7(inst);
-  int32_t imu = immU_i(inst);
-  int32_t v = CPU_getRegister(cpu, s1);
-  if ((f7 == 0)) {
-  CPU_setRegister(cpu, r, ((uint32_t)(v) >> (((int32_t)(sh)) & 31)));
-  } else {
-  if ((f7 == 32)) {
-  CPU_setRegister(cpu, r, ((int32_t)(v) >> (((int32_t)(sh)) & 31)));
-  } else {
-  if ((f7 == 36)) {
-  CPU_setRegister(cpu, r, ((int32_t)(((uint32_t)(v) >> (((int32_t)(sh)) & 31))) & (int32_t)(1)));
-  } else {
-  if ((f7 == 48)) {
-  uint32_t u = CPU_getRegisterU(cpu, s1);
-  CPU_setRegister(cpu, r, ((int32_t)(((uint32_t)(((int32_t)((uint32_t)(u) << (((int32_t)((32 - sh))) & 31)))) >> (0))) | (int32_t)(((uint32_t)(u) >> (((int32_t)(sh)) & 31)))));
-  } else {
-  if ((imu == 1688)) {
-  CPU_setRegisterU(cpu, r, ((uint32_t)(((int32_t)(((int32_t)(((int32_t)(((uint32_t)(v) >> (24))) | (int32_t)(((int32_t)(((uint32_t)(v) >> (8))) & (int32_t)(65280))))) | (int32_t)(((int32_t)(((int32_t)((uint32_t)(v) << (8)))) & (int32_t)(16711680))))) | (int32_t)(((uint32_t)(((int32_t)((uint32_t)(((int32_t)(v) & (int32_t)(255))) << (24)))) >> (0))))) >> (0)));
-  } else {
-  if ((imu == 1671)) {
-  uint32_t u = CPU_getRegisterU(cpu, s1);
-  int32_t result = 0;
-  for (
-int32_t i = 0
-; (i < 32); (i += 8)) {
-  int32_t by = ((int32_t)(((uint32_t)(u) >> (((int32_t)(i)) & 31))) & (int32_t)(255));
-  (by = ((int32_t)(((int32_t)(((int32_t)(by) & (int32_t)(240))) >> (4))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(by) & (int32_t)(15))) << (4))))));
-  (by = ((int32_t)(((int32_t)(((int32_t)(by) & (int32_t)(204))) >> (2))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(by) & (int32_t)(51))) << (2))))));
-  (by = ((int32_t)(((int32_t)(((int32_t)(by) & (int32_t)(170))) >> (1))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(by) & (int32_t)(85))) << (1))))));
-  (result |= ((int32_t)((uint32_t)(by) << (((int32_t)(i)) & 31))));
-  }
-  CPU_setRegisterU(cpu, r, ((uint32_t)(result) >> (0)));
-  } else {
-  if ((imu == 647)) {
-  uint32_t u = CPU_getRegisterU(cpu, s1);
-  int32_t result = 0;
-  for (
-int32_t i = 0
-; (i < 32); (i += 8)) {
-  if (((int32_t)(u) & (int32_t)(((int32_t)((uint32_t)(128) << (((int32_t)(i)) & 31)))))) {
-  (result |= ((int32_t)((uint32_t)(255) << (((int32_t)(i)) & 31))));
-  }
-  }
-  CPU_setRegisterU(cpu, r, ((uint32_t)(result) >> (0)));
-  } else {
-  if ((imu == 143)) {
-  uint32_t u = CPU_getRegisterU(cpu, s1);
-  int32_t result = 0;
-  for (
-int32_t i = 0
-; (i < 16); (i++)) {
-  (result |= ((int32_t)((uint32_t)(((int32_t)(((uint32_t)(u) >> (((int32_t)(((2 * i) + 1))) & 31))) & (int32_t)(1))) << (((int32_t)(i)) & 31))));
-  (result |= ((int32_t)((uint32_t)(((int32_t)(((uint32_t)(u) >> (((int32_t)((2 * i))) & 31))) & (int32_t)(1))) << (((int32_t)((16 + i))) & 31))));
-  }
-  CPU_setRegisterU(cpu, r, ((uint32_t)(result) >> (0)));
-  } else {
-  fprintf(stderr, "Error: %s\n", fmtStr("Unknown OP-IMM func3=5, func7: 0x%x", (unsigned)(f7)));
-  abort();
-  }
-  }
-  }
-  }
-  }
-  }
-  }
-  }
-  break;
-  }
-  case 6:
-  CPU_setRegister(cpu, r, ((int32_t)(CPU_getRegister(cpu, s1)) | (int32_t)(imm_i(inst))));
-  break;
-  case 7:
-  CPU_setRegister(cpu, r, ((int32_t)(CPU_getRegister(cpu, s1)) & (int32_t)(imm_i(inst))));
-  break;
-  default:
-  fprintf(stderr, "Error: %s\n", fmtStr("Invalid OP-IMM func3 %d", func3(inst)));
-  abort();
-  }
-}
-
-static void executeStore(int32_t inst, CPU* cpu) {
-  int32_t s1 = rs1(inst);
-  int32_t s2 = rs2(inst);
-  int32_t addr = (CPU_getRegister(cpu, s1) + imm_s(inst));
-  int32_t v = CPU_getRegister(cpu, s2);
-  switch (func3(inst)) {
-  case 0:
-  RP2350_writeUint8(cpu->chip, addr, ((int32_t)(v) & (int32_t)(255)));
-  break;
-  case 1:
-  RP2350_writeUint16(cpu->chip, addr, ((int32_t)(v) & (int32_t)(65535)));
-  break;
-  case 2:
-  RP2350_writeUint32(cpu->chip, addr, v);
-  break;
-  default:
-  fprintf(stderr, "Error: %s\n", fmtStr("Invalid STORE func3 %d", func3(inst)));
-  abort();
-  }
-}
-
-static void executeAmo(int32_t inst, CPU* cpu) {
-  if ((func3(inst) != 2)) {
-  fprintf(stderr, "Error: %s\n", fmtStr("Invalid AMO func3 %d", func3(inst)));
-  abort();
-  }
-  int32_t funct5 = ((int32_t)(((uint32_t)(inst) >> (27))) & (int32_t)(31));
-  int32_t r = rd(inst);
-  int32_t s1 = rs1(inst);
-  int32_t s2 = rs2(inst);
-  RP2350* chip = cpu->chip;
-  uint32_t addr = CPU_getRegisterU(cpu, s1);
-  if ((funct5 == 2)) {
-  CPU_setRegisterU(cpu, r, RP2350_readUint32(chip, addr));
-  (cpu->lr_addr = ((int32_t)(addr) & (int32_t)((~15))));
-  CPU_invalidateLrReservation(cpu->otherCore, addr);
-  (cpu->cycles += 3);
-  return;
-  }
-  if ((funct5 == 3)) {
-  if ((cpu->lr_addr == ((int32_t)(addr) & (int32_t)((~15))))) {
-  RP2350_writeUint32(chip, addr, CPU_getRegisterU(cpu, s2));
-  CPU_setRegisterU(cpu, r, 0);
-  } else {
-  CPU_setRegisterU(cpu, r, 1);
-  }
-  (cpu->lr_addr = (-1));
-  (cpu->cycles += 3);
-  return;
-  }
-  uint32_t v = CPU_getRegisterU(cpu, s2);
-  uint32_t mem = RP2350_readUint32(chip, addr);
-  CPU_setRegisterU(cpu, r, mem);
-  void amoStore(int32_t val) {
-  RP2350_writeUint32(chip, addr, val);
-  CPU_invalidateLrReservation(cpu->otherCore, addr);
-  }
-  switch (funct5) {
-  case 0:
-  amoStore(((uint32_t)((mem + v)) >> (0)));
-  break;
-  case 1:
-  amoStore(v);
-  break;
-  case 4:
-  amoStore(((int32_t)(mem) ^ (int32_t)(v)));
-  break;
-  case 8:
-  amoStore(((int32_t)(mem) | (int32_t)(v)));
-  break;
-  case 12:
-  amoStore(((int32_t)(mem) & (int32_t)(v)));
-  break;
-  case 16:
-  {
-  int32_t ms = ((int32_t)(mem) | (int32_t)(0));
-  int32_t vs = ((int32_t)(v) | (int32_t)(0));
-  amoStore(((ms < vs) ? mem : v));
-  break;
-  }
-  case 20:
-  {
-  int32_t ms = ((int32_t)(mem) | (int32_t)(0));
-  int32_t vs = ((int32_t)(v) | (int32_t)(0));
-  amoStore(((ms > vs) ? mem : v));
-  break;
-  }
-  case 24:
-  amoStore(((mem < v) ? mem : v));
-  break;
-  case 28:
-  amoStore(((mem > v) ? mem : v));
-  break;
-  default:
-  fprintf(stderr, "Error: %s\n", fmtStr("Unknown AMO funct5: 0x%x", (unsigned)(funct5)));
-  abort();
-  }
-  (cpu->cycles += 3);
-}
-
-static void executeOp(int32_t inst, CPU* cpu) {
-  int32_t r = rd(inst);
-  int32_t s1 = rs1(inst);
-  int32_t s2 = rs2(inst);
-  switch (func3(inst)) {
-  case 0:
-  {
-  int32_t a = CPU_getRegister(cpu, s1);
-  int32_t b = CPU_getRegister(cpu, s2);
-  int32_t f7 = func7(inst);
-  if ((f7 == 0)) {
-  CPU_setRegister(cpu, r, (a + b));
-  } else {
-  if ((f7 == 32)) {
-  CPU_setRegister(cpu, r, (a - b));
-  } else {
-  if ((f7 == 1)) {
-  CPU_setRegister(cpu, r, imul32(a, b));
-  } else {
-  fprintf(stderr, "Error: %s\n", fmtStr("Unknown OP func3=0, func7: 0x%x", (unsigned)(f7)));
-  abort();
-  }
-  }
-  }
-  break;
-  }
-  case 1:
-  {
-  int32_t a = CPU_getRegister(cpu, s1);
-  uint32_t b = CPU_getRegisterU(cpu, s2);
-  int32_t f7 = func7(inst);
-  if ((f7 == 0)) {
-  CPU_setRegister(cpu, r, ((int32_t)((uint32_t)(a) << (((int32_t)(b)) & 31))));
-  } else {
-  if ((f7 == 1)) {
-  int32_t bs = CPU_getRegister(cpu, s2);
-  int32_t hi = umulh(((uint32_t)(a) >> (0)), ((uint32_t)(bs) >> (0)));
-  if ((a < 0)) {
-  (hi = ((int32_t)((hi - ((uint32_t)(bs) >> (0)))) | (int32_t)(0)));
-  }
-  if ((bs < 0)) {
-  (hi = ((int32_t)((hi - ((uint32_t)(a) >> (0)))) | (int32_t)(0)));
-  }
-  CPU_setRegister(cpu, r, hi);
-  } else {
-  if ((f7 == 20)) {
-  CPU_setRegister(cpu, r, ((int32_t)(a) | (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(((int32_t)(b) & (int32_t)(31)))) & 31))))));
-  } else {
-  if ((f7 == 36)) {
-  CPU_setRegister(cpu, r, ((int32_t)(a) & (int32_t)((~((int32_t)((uint32_t)(1) << (((int32_t)(((int32_t)(b) & (int32_t)(31)))) & 31)))))));
-  } else {
-  if ((f7 == 48)) {
-  int32_t sh = ((int32_t)(b) & (int32_t)(31));
-  CPU_setRegister(cpu, r, ((uint32_t)(((int32_t)(((int32_t)((uint32_t)(a) << (((int32_t)(sh)) & 31)))) | (int32_t)(((uint32_t)(a) >> (((int32_t)((32 - sh))) & 31))))) >> (0)));
-  } else {
-  if ((f7 == 52)) {
-  CPU_setRegister(cpu, r, ((int32_t)(a) ^ (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(((int32_t)(b) & (int32_t)(31)))) & 31))))));
-  } else {
-  fprintf(stderr, "Error: %s\n", fmtStr("Unknown OP func3=1, func7: 0x%x", (unsigned)(f7)));
-  abort();
-  }
-  }
-  }
-  }
-  }
-  }
-  break;
-  }
-  case 2:
-  {
-  int32_t f7 = func7(inst);
-  if ((f7 == 0)) {
-  if (((r == 0) && (s1 == 0))) {
-  if ((s2 == 0)) {
-  if (cpu->eventRegistered) {
-  (cpu->eventRegistered = false);
-  } else {
-  if (CPU_wakingInterruptPending(cpu)) {
-  (cpu->interruptsUpdated = true);
-  } else {
-  (cpu->waiting = true);
-  (cpu->waitingOnBlock = true);
-  }
-  }
-  return;
-  } else {
-  if ((s2 == 1)) {
-  CPU_fireSEV(cpu);
-  return;
-  }
-  }
-  }
-  CPU_setRegister(cpu, r, ((CPU_getRegister(cpu, s1) < CPU_getRegister(cpu, s2)) ? 1 : 0));
-  } else {
-  if ((f7 == 1)) {
-  int32_t a = CPU_getRegister(cpu, s1);
-  uint32_t b = CPU_getRegisterU(cpu, s2);
-  int32_t hi = umulh(((uint32_t)(a) >> (0)), b);
-  if ((a < 0)) {
-  (hi = ((int32_t)((hi - b)) | (int32_t)(0)));
-  }
-  CPU_setRegister(cpu, r, hi);
-  } else {
-  if ((f7 == 16)) {
-  CPU_setRegister(cpu, r, ((int32_t)((((int32_t)((uint32_t)(CPU_getRegister(cpu, s1)) << (1))) + CPU_getRegister(cpu, s2))) & (int32_t)(4294967295u)));
-  } else {
-  fprintf(stderr, "Error: %s\n", fmtStr("Unknown OP func3=2, func7: 0x%x", (unsigned)(f7)));
-  abort();
-  }
-  }
-  }
-  break;
-  }
-  case 3:
-  {
-  uint32_t a = CPU_getRegisterU(cpu, s1);
-  uint32_t b = CPU_getRegisterU(cpu, s2);
-  int32_t f7 = func7(inst);
-  if ((f7 == 0)) {
-  CPU_setRegister(cpu, r, ((a < b) ? 1 : 0));
-  } else {
-  if ((f7 == 1)) {
-  CPU_setRegisterU(cpu, r, umulh(a, b));
-  } else {
-  fprintf(stderr, "Error: %s\n", fmtStr("Unknown OP func3=3, func7: 0x%x", (unsigned)(f7)));
-  abort();
-  }
-  }
-  break;
-  }
-  case 4:
-  {
-  int32_t a = CPU_getRegister(cpu, s1);
-  int32_t b = CPU_getRegister(cpu, s2);
-  int32_t f7 = func7(inst);
-  if ((f7 == 0)) {
-  CPU_setRegister(cpu, r, ((int32_t)(a) ^ (int32_t)(b)));
-  } else {
-  if ((f7 == 1)) {
-  if ((b == 0)) {
-  CPU_setRegisterU(cpu, r, 4294967295u);
-  } else {
-  if (((((uint32_t)(a) >> (0)) == 2147483648u) && (((uint32_t)(b) >> (0)) == 4294967295u))) {
-  CPU_setRegisterU(cpu, r, 2147483648u);
-  } else {
-  CPU_setRegister(cpu, r, ((int32_t)(((double)(a) / (double)(b))) | (int32_t)(0)));
-  }
-  }
-  (cpu->cycles += 17);
-  } else {
-  if ((f7 == 16)) {
-  CPU_setRegister(cpu, r, ((int32_t)((((int32_t)((uint32_t)(a) << (2))) + b)) & (int32_t)(4294967295u)));
-  } else {
-  if ((f7 == 4)) {
-  CPU_setRegister(cpu, r, ((int32_t)(((int32_t)(a) & (int32_t)(65535))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(b) & (int32_t)(65535))) << (16))))));
-  } else {
-  if ((f7 == 5)) {
-  CPU_setRegister(cpu, r, ((a < b) ? a : b));
-  } else {
-  if ((f7 == 32)) {
-  CPU_setRegister(cpu, r, ((int32_t)((~a)) ^ (int32_t)(b)));
-  } else {
-  fprintf(stderr, "Error: %s\n", fmtStr("Unknown OP func3=4, func7: 0x%x", (unsigned)(f7)));
-  abort();
-  }
-  }
-  }
-  }
-  }
-  }
-  break;
-  }
-  case 5:
-  {
-  int32_t a = CPU_getRegister(cpu, s1);
-  int32_t b = CPU_getRegister(cpu, s2);
-  int32_t f7 = func7(inst);
-  if ((f7 == 0)) {
-  CPU_setRegister(cpu, r, ((uint32_t)(a) >> (((int32_t)(b)) & 31)));
-  } else {
-  if ((f7 == 5)) {
-  int32_t u1 = ((uint32_t)(a) >> (0));
-  int32_t u2 = ((uint32_t)(b) >> (0));
-  CPU_setRegister(cpu, r, ((u1 < u2) ? u1 : u2));
-  } else {
-  if ((f7 == 32)) {
-  CPU_setRegister(cpu, r, ((int32_t)(a) >> (((int32_t)(b)) & 31)));
-  } else {
-  if ((f7 == 36)) {
-  CPU_setRegister(cpu, r, ((int32_t)(((uint32_t)(a) >> (((int32_t)(((int32_t)(b) & (int32_t)(31)))) & 31))) & (int32_t)(1)));
-  } else {
-  if ((f7 == 48)) {
-  int32_t sh = ((int32_t)(b) & (int32_t)(31));
-  uint32_t u = CPU_getRegisterU(cpu, s1);
-  CPU_setRegister(cpu, r, ((int32_t)(((uint32_t)(((int32_t)((uint32_t)(u) << (((int32_t)((32 - sh))) & 31)))) >> (0))) | (int32_t)(((uint32_t)(u) >> (((int32_t)(sh)) & 31)))));
-  } else {
-  if ((f7 == 1)) {
-  if ((b == 0)) {
-  CPU_setRegisterU(cpu, r, 4294967295u);
-  } else {
-  CPU_setRegister(cpu, r, ((uint32_t)(((double)(((uint32_t)(a) >> (0))) / (double)(((uint32_t)(b) >> (0))))) >> (0)));
-  }
-  (cpu->cycles += 17);
-  } else {
-  fprintf(stderr, "Error: %s\n", fmtStr("Unknown OP func3=5, func7: 0x%x", (unsigned)(f7)));
-  abort();
-  }
-  }
-  }
-  }
-  }
-  }
-  break;
-  }
-  case 6:
-  {
-  int32_t a = CPU_getRegister(cpu, s1);
-  int32_t b = CPU_getRegister(cpu, s2);
-  int32_t f7 = func7(inst);
-  if ((f7 == 0)) {
-  CPU_setRegister(cpu, r, ((int32_t)(a) | (int32_t)(b)));
-  } else {
-  if ((f7 == 1)) {
-  CPU_setRegister(cpu, r, ((b == 0) ? a : (a % b)));
-  (cpu->cycles += 17);
-  } else {
-  if ((f7 == 5)) {
-  CPU_setRegister(cpu, r, ((a > b) ? a : b));
-  } else {
-  if ((f7 == 32)) {
-  CPU_setRegister(cpu, r, ((int32_t)(a) | (int32_t)((~b))));
-  } else {
-  if ((f7 == 16)) {
-  CPU_setRegister(cpu, r, ((int32_t)((((int32_t)((uint32_t)(a) << (3))) + b)) & (int32_t)(4294967295u)));
-  } else {
-  fprintf(stderr, "Error: %s\n", fmtStr("Unknown OP func3=6, func7: 0x%x", (unsigned)(f7)));
-  abort();
-  }
-  }
-  }
-  }
-  }
-  break;
-  }
-  case 7:
-  {
-  int32_t a = CPU_getRegister(cpu, s1);
-  int32_t b = CPU_getRegister(cpu, s2);
-  int32_t f7 = func7(inst);
-  if ((f7 == 0)) {
-  CPU_setRegister(cpu, r, ((int32_t)(a) & (int32_t)(b)));
-  } else {
-  if ((f7 == 32)) {
-  CPU_setRegister(cpu, r, ((int32_t)(a) & (int32_t)((~b))));
-  } else {
-  if ((f7 == 4)) {
-  CPU_setRegister(cpu, r, ((int32_t)(((int32_t)(a) & (int32_t)(255))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(b) & (int32_t)(255))) << (8))))));
-  } else {
-  if ((f7 == 5)) {
-  CPU_setRegisterU(cpu, r, ((uint32_t)(((((uint32_t)(a) >> (0)) > ((uint32_t)(b) >> (0))) ? a : b)) >> (0)));
-  } else {
-  if ((f7 == 1)) {
-  CPU_setRegisterU(cpu, r, ((uint32_t)(((b == 0) ? a : (((uint32_t)(a) >> (0)) % ((uint32_t)(b) >> (0))))) >> (0)));
-  (cpu->cycles += 17);
-  } else {
-  fprintf(stderr, "Error: %s\n", fmtStr("Unknown OP func3=7, func7: 0x%x", (unsigned)(f7)));
-  abort();
-  }
-  }
-  }
-  }
-  }
-  break;
-  }
-  default:
-  fprintf(stderr, "Error: %s\n", fmtStr("Invalid OP func3 %d", func3(inst)));
-  abort();
-  }
-}
-
-static void executeBranch(int32_t inst, CPU* cpu) {
-  int32_t s1 = rs1(inst);
-  int32_t s2 = rs2(inst);
-  int32_t im = imm_b(inst);
-  int32_t taken = false;
-  switch (func3(inst)) {
-  case 0:
-  (taken = (CPU_getRegister(cpu, s1) == CPU_getRegister(cpu, s2)));
-  break;
-  case 1:
-  (taken = (CPU_getRegister(cpu, s1) != CPU_getRegister(cpu, s2)));
-  break;
-  case 4:
-  (taken = (CPU_getRegister(cpu, s1) < CPU_getRegister(cpu, s2)));
-  break;
-  case 5:
-  (taken = (CPU_getRegister(cpu, s1) >= CPU_getRegister(cpu, s2)));
-  break;
-  case 6:
-  (taken = (CPU_getRegisterU(cpu, s1) < CPU_getRegisterU(cpu, s2)));
-  break;
-  case 7:
-  (taken = (CPU_getRegisterU(cpu, s1) >= CPU_getRegisterU(cpu, s2)));
-  break;
-  default:
-  fprintf(stderr, "Error: %s\n", fmtStr("Invalid BRANCH func3 %d", func3(inst)));
-  abort();
-  }
-  if (taken) {
-  (cpu->next_pc = (cpu->pc + im));
-  }
-  CPU_h3_branch_cycles(cpu, taken);
-}
-
-static void executeJalr(int32_t inst, CPU* cpu) {
-  if ((func3(inst) != 0)) {
-  fprintf(stderr, "Error: %s\n", fmtStr("Invalid JALR func3 %d", func3(inst)));
-  abort();
-  }
-  int32_t target = (CPU_getRegister(cpu, rs1(inst)) + imm_i(inst));
-  CPU_setRegister(cpu, rd(inst), (cpu->pc + cpu->inst_length));
-  (cpu->next_pc = target);
-  (cpu->cycles++);
-}
-
-static void executeLui(int32_t inst, CPU* cpu) {
-  CPU_setRegisterU(cpu, rd(inst), imm_u(inst));
-}
-
-static void executeAuipc(int32_t inst, CPU* cpu) {
-  CPU_setRegister(cpu, rd(inst), (imm_u(inst) + cpu->pc));
-}
-
 static void checkTraceMagic(CPU* cpu, int32_t magicStart) {
   if (RP2350_readUint16(cpu->chip, magicStart) == 0xabcd && RP2350_readUint16(cpu->chip, magicStart + 2) == 0xffff) {
     char __trace_tag[64];
@@ -15104,267 +22316,617 @@ static void checkTraceMagic(CPU* cpu, int32_t magicStart) {
   }
 }
 
-static void executeJal(int32_t inst, CPU* cpu) {
-  CPU_setRegister(cpu, rd(inst), (cpu->pc + cpu->inst_length));
-  checkTraceMagic(cpu, (cpu->pc + cpu->inst_length));
-  (cpu->next_pc = (cpu->pc + imm_j(inst)));
-  (cpu->cycles++);
+// ─── decode-cache.ts ───
+enum { FLASH_SIZE = (16777216) }; /* ((16 * 1024) * 1024) */
+static int64_t decodeUncached(RP2350* chip, uint32_t address) {
+  uint32_t inst = RP2350_readUint16(chip, address);
+  if ((((int32_t)(inst) & (int32_t)(3)) != 3)) {
+  return decodeWord(inst);
+  }
+  return decodeWord(((uint32_t)(((int32_t)(inst) | (int32_t)(((int32_t)((uint32_t)(RP2350_readUint16(chip, (address + 2))) << (16)))))) >> (0)));
 }
 
-static void executeSystem(int32_t inst, CPU* cpu) {
-  switch (func3(inst)) {
+static int64_t decodeAndCache(RP2350* chip, uint64_t* cache, int32_t idx, uint32_t address) {
+  int64_t packed = decodeUncached(chip, address);
+  (cache[idx] = packed);
+  return packed;
+}
+
+static int64_t getDecodeEntry(RP2350* chip, uint32_t address) {
+  if (((address >= RAM_START_ADDRESS) && (address < (RAM_START_ADDRESS + (((256 * 2) + 8) * 1024))))) {
+  int32_t idx = ((uint32_t)((address - RAM_START_ADDRESS)) >> (1));
+  uint64_t packed = chip->sramDecode[idx];
+  return ((packed != 0) ? packed : decodeAndCache(chip, chip->sramDecode, idx, address));
+  }
+  if (((address >= FLASH_START_ADDRESS) && (address < RAM_START_ADDRESS))) {
+  int32_t idx = ((uint32_t)(((int32_t)(address) & (int32_t)((FLASH_SIZE - 1)))) >> (1));
+  uint64_t packed = chip->flashDecode[idx];
+  return ((packed != 0) ? packed : decodeAndCache(chip, chip->flashDecode, idx, address));
+  }
+  return decodeUncached(chip, address);
+}
+
+// ─── decode.ts ───
+enum { TAG_SHIFT = (24) };
+enum { RS2_SHIFT = (19) };
+enum { RS1_SHIFT = (14) };
+enum { RD_SHIFT = (9) };
+enum { LEN_SHIFT = (8) };
+enum { LEN_32 = (256) }; /* ((int32_t)((uint32_t)(1) << (((int32_t)(LEN_SHIFT)) & 31))) */
+enum { LEN_16 = (0) };
+static int64_t emit(int32_t tag, int32_t rd, int32_t rs1, int32_t rs2, int32_t imm, int32_t length) {
+  int32_t low = ((uint32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)((uint32_t)(tag) << (((int32_t)(TAG_SHIFT)) & 31)))) | (int32_t)(((int32_t)((uint32_t)(rd) << (((int32_t)(RD_SHIFT)) & 31)))))) | (int32_t)(((int32_t)((uint32_t)(rs1) << (((int32_t)(RS1_SHIFT)) & 31)))))) | (int32_t)(((int32_t)((uint32_t)(rs2) << (((int32_t)(RS2_SHIFT)) & 31)))))) | (int32_t)(length))) >> (0));
+  return (((uint64_t)(uint32_t)(low)) | (((uint64_t)(uint32_t)(((int32_t)(imm) & (int32_t)(2097151)))) << 32));
+}
+
+static inline int32_t opcode(int32_t i) {
+  return ((int32_t)(i) & (int32_t)(127));
+}
+
+static inline int32_t rd(int32_t i) {
+  return ((int32_t)(((uint32_t)(i) >> (7))) & (int32_t)(31));
+}
+
+static inline int32_t func3(int32_t i) {
+  return ((int32_t)(((uint32_t)(i) >> (12))) & (int32_t)(7));
+}
+
+static inline int32_t rs1(int32_t i) {
+  return ((int32_t)(((uint32_t)(i) >> (15))) & (int32_t)(31));
+}
+
+static inline int32_t rs2(int32_t i) {
+  return ((int32_t)(((uint32_t)(i) >> (20))) & (int32_t)(31));
+}
+
+static inline int32_t func7(int32_t i) {
+  return ((int32_t)(((uint32_t)(i) >> (25))) & (int32_t)(127));
+}
+
+static inline int32_t shamt(int32_t i) {
+  return ((int32_t)(((uint32_t)(i) >> (20))) & (int32_t)(31));
+}
+
+static inline int32_t imm_i(int32_t i) {
+  return ((int32_t)(((int32_t)(i) >> (20))) & (int32_t)(2097151));
+}
+
+static inline int32_t immU_i(int32_t i) {
+  return ((int32_t)(((uint32_t)(i) >> (20))) & (int32_t)(4095));
+}
+
+static inline int32_t imm_s(int32_t i) {
+  return ((int32_t)(((int32_t)(((int32_t)((uint32_t)(((int32_t)(i) >> (25))) << (5)))) | (int32_t)(((int32_t)(((uint32_t)(i) >> (7))) & (int32_t)(31))))) & (int32_t)(2097151));
+}
+
+static inline int32_t imm_b(int32_t i) {
+  return ((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)((uint32_t)(((int32_t)(i) >> (31))) << (12)))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(((uint32_t)(i) >> (7))) & (int32_t)(1))) << (11)))))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(((uint32_t)(i) >> (25))) & (int32_t)(63))) << (5)))))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(((uint32_t)(i) >> (8))) & (int32_t)(15))) << (1)))))) & (int32_t)(2097151));
+}
+
+static inline int32_t imm_u(int32_t i) {
+  return ((int32_t)(((uint32_t)(i) >> (12))) & (int32_t)(2097151));
+}
+
+static inline int32_t imm_j(int32_t i) {
+  return ((int32_t)(((int32_t)(((int32_t)(((int32_t)(((int32_t)((uint32_t)(((int32_t)(i) >> (31))) << (20)))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(((uint32_t)(i) >> (12))) & (int32_t)(255))) << (12)))))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(((uint32_t)(i) >> (20))) & (int32_t)(1))) << (11)))))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(((uint32_t)(i) >> (21))) & (int32_t)(1023))) << (1)))))) & (int32_t)(2097151));
+}
+
+static int64_t decodeWord(int32_t word) {
+  if ((((int32_t)(word) & (int32_t)(3)) != 3)) {
+  return decodeCompressed(((int32_t)(word) & (int32_t)(65535)));
+  }
+  return decodeStandard(word);
+}
+
+static int64_t decodeStandard(int32_t inst) {
+  int32_t op = opcode(inst);
+  int32_t f3 = func3(inst);
+  int32_t r = rd(inst);
+  int32_t s1 = rs1(inst);
+  int32_t s2 = rs2(inst);
+  switch (op) {
+  case 3:
+  switch (f3) {
   case 0:
+  return emit(T_LB, r, s1, 0, imm_i(inst), LEN_32);
+  case 1:
+  return emit(T_LH, r, s1, 0, imm_i(inst), LEN_32);
+  case 2:
+  return emit(T_LW, r, s1, 0, imm_i(inst), LEN_32);
+  case 4:
+  return emit(T_LBU, r, s1, 0, imm_i(inst), LEN_32);
+  case 5:
+  return emit(T_LHU, r, s1, 0, imm_i(inst), LEN_32);
+  default:
+  fprintf(stderr, "Error: %s\n", fmtStr("Invalid LOAD func3 %d", f3));
+  abort();
+  }
+  case 15:
+  return emit(T_FENCE, 0, 0, 0, 0, LEN_32);
+  case 19:
   {
+  int32_t sh = shamt(inst);
+  int32_t f7 = func7(inst);
+  int32_t imu = immU_i(inst);
+  switch (f3) {
+  case 0:
+  return emit(T_ADDI, r, s1, 0, imm_i(inst), LEN_32);
+  case 1:
+  if ((f7 == 0)) {
+  return emit(T_SLLI, r, s1, 0, sh, LEN_32);
+  }
+  if ((f7 == 20)) {
+  return emit(T_BSETI, r, s1, 0, sh, LEN_32);
+  }
+  if ((f7 == 36)) {
+  return emit(T_BCLRI, r, s1, 0, sh, LEN_32);
+  }
+  if ((f7 == 52)) {
+  return emit(T_BINVI, r, s1, 0, sh, LEN_32);
+  }
+  if ((imu == 1537)) {
+  return emit(T_CTZ, r, s1, 0, 0, LEN_32);
+  }
+  if ((imu == 1538)) {
+  return emit(T_CPOP, r, s1, 0, 0, LEN_32);
+  }
+  if ((imu == 1541)) {
+  return emit(T_SEXT_H, r, s1, 0, 0, LEN_32);
+  }
+  if ((imu == 1540)) {
+  return emit(T_SEXT_B, r, s1, 0, 0, LEN_32);
+  }
+  if ((((int32_t)(inst) & (int32_t)(4293947519u)) == 1610616851)) {
+  return emit(T_CLZ, r, s1, 0, 0, LEN_32);
+  }
+  if ((imu == 143)) {
+  return emit(T_ZIP, r, s1, 0, 0, LEN_32);
+  }
+  fprintf(stderr, "Error: %s\n", fmtStr("Unknown OP-IMM func3=1, func7: 0x%x", (unsigned)(f7)));
+  abort();
+  case 2:
+  return emit(T_SLTI, r, s1, 0, imm_i(inst), LEN_32);
+  case 3:
+  return emit(T_SLTIU, r, s1, 0, imm_i(inst), LEN_32);
+  case 4:
+  return emit(T_XORI, r, s1, 0, imm_i(inst), LEN_32);
+  case 5:
+  if ((f7 == 0)) {
+  return emit(T_SRLI, r, s1, 0, sh, LEN_32);
+  }
+  if ((f7 == 32)) {
+  return emit(T_SRAI, r, s1, 0, sh, LEN_32);
+  }
+  if ((f7 == 36)) {
+  return emit(T_BEXTI, r, s1, 0, sh, LEN_32);
+  }
+  if ((f7 == 48)) {
+  return emit(T_RORI, r, s1, 0, sh, LEN_32);
+  }
+  if ((imu == 1688)) {
+  return emit(T_REV8, r, s1, 0, 0, LEN_32);
+  }
+  if ((imu == 1671)) {
+  return emit(T_BREV8, r, s1, 0, 0, LEN_32);
+  }
+  if ((imu == 647)) {
+  return emit(T_ORC_B, r, s1, 0, 0, LEN_32);
+  }
+  if ((imu == 143)) {
+  return emit(T_UNZIP, r, s1, 0, 0, LEN_32);
+  }
+  fprintf(stderr, "Error: %s\n", fmtStr("Unknown OP-IMM func3=5, func7: 0x%x", (unsigned)(f7)));
+  abort();
+  case 6:
+  return emit(T_ORI, r, s1, 0, imm_i(inst), LEN_32);
+  case 7:
+  return emit(T_ANDI, r, s1, 0, imm_i(inst), LEN_32);
+  default:
+  fprintf(stderr, "Error: %s\n", fmtStr("Invalid OP-IMM func3 %d", f3));
+  abort();
+  }
+  }
+  case 23:
+  return emit(T_AUIPC, r, 0, 0, imm_u(inst), LEN_32);
+  case 35:
+  switch (f3) {
+  case 0:
+  return emit(T_SB, 0, s1, s2, imm_s(inst), LEN_32);
+  case 1:
+  return emit(T_SH, 0, s1, s2, imm_s(inst), LEN_32);
+  case 2:
+  return emit(T_SW, 0, s1, s2, imm_s(inst), LEN_32);
+  default:
+  fprintf(stderr, "Error: %s\n", fmtStr("Invalid STORE func3 %d", f3));
+  abort();
+  }
+  case 47:
+  {
+  if ((f3 != 2)) {
+  fprintf(stderr, "Error: %s\n", fmtStr("Invalid AMO func3 %d", f3));
+  abort();
+  }
+  int32_t funct5 = ((int32_t)(((uint32_t)(inst) >> (27))) & (int32_t)(31));
+  switch (funct5) {
+  case 2:
+  return emit(T_LR_W, r, s1, 0, 0, LEN_32);
+  case 3:
+  return emit(T_SC_W, r, s1, s2, 0, LEN_32);
+  case 0:
+  return emit(T_AMOADD_W, r, s1, s2, 0, LEN_32);
+  case 1:
+  return emit(T_AMOSWAP_W, r, s1, s2, 0, LEN_32);
+  case 4:
+  return emit(T_AMOXOR_W, r, s1, s2, 0, LEN_32);
+  case 8:
+  return emit(T_AMOOR_W, r, s1, s2, 0, LEN_32);
+  case 12:
+  return emit(T_AMOAND_W, r, s1, s2, 0, LEN_32);
+  case 16:
+  return emit(T_AMOMIN_W, r, s1, s2, 0, LEN_32);
+  case 20:
+  return emit(T_AMOMAX_W, r, s1, s2, 0, LEN_32);
+  case 24:
+  return emit(T_AMOMINU_W, r, s1, s2, 0, LEN_32);
+  case 28:
+  return emit(T_AMOMAXU_W, r, s1, s2, 0, LEN_32);
+  default:
+  fprintf(stderr, "Error: %s\n", fmtStr("Unknown AMO funct5: 0x%x", (unsigned)(funct5)));
+  abort();
+  }
+  }
+  case 51:
+  {
+  int32_t f7 = func7(inst);
+  switch (f3) {
+  case 0:
+  if ((f7 == 0)) {
+  return emit(T_ADD, r, s1, s2, 0, LEN_32);
+  }
+  if ((f7 == 32)) {
+  return emit(T_SUB, r, s1, s2, 0, LEN_32);
+  }
+  if ((f7 == 1)) {
+  return emit(T_MUL, r, s1, s2, 0, LEN_32);
+  }
+  fprintf(stderr, "Error: %s\n", fmtStr("Unknown OP func3=0, func7: 0x%x", (unsigned)(f7)));
+  abort();
+  case 1:
+  if ((f7 == 0)) {
+  return emit(T_SLL, r, s1, s2, 0, LEN_32);
+  }
+  if ((f7 == 1)) {
+  return emit(T_MULH, r, s1, s2, 0, LEN_32);
+  }
+  if ((f7 == 20)) {
+  return emit(T_BSET, r, s1, s2, 0, LEN_32);
+  }
+  if ((f7 == 36)) {
+  return emit(T_BCLR, r, s1, s2, 0, LEN_32);
+  }
+  if ((f7 == 48)) {
+  return emit(T_ROL, r, s1, s2, 0, LEN_32);
+  }
+  if ((f7 == 52)) {
+  return emit(T_BINV, r, s1, s2, 0, LEN_32);
+  }
+  fprintf(stderr, "Error: %s\n", fmtStr("Unknown OP func3=1, func7: 0x%x", (unsigned)(f7)));
+  abort();
+  case 2:
+  if ((f7 == 0)) {
+  if (((r == 0) && (s1 == 0))) {
+  if ((s2 == 0)) {
+  return emit(T_H3_BLOCK, 0, 0, 0, 0, LEN_32);
+  }
+  if ((s2 == 1)) {
+  return emit(T_H3_UNBLOCK, 0, 0, 0, 0, LEN_32);
+  }
+  }
+  return emit(T_SLT, r, s1, s2, 0, LEN_32);
+  }
+  if ((f7 == 1)) {
+  return emit(T_MULHSU, r, s1, s2, 0, LEN_32);
+  }
+  if ((f7 == 16)) {
+  return emit(T_SH1ADD, r, s1, s2, 0, LEN_32);
+  }
+  fprintf(stderr, "Error: %s\n", fmtStr("Unknown OP func3=2, func7: 0x%x", (unsigned)(f7)));
+  abort();
+  case 3:
+  if ((f7 == 0)) {
+  return emit(T_SLTU, r, s1, s2, 0, LEN_32);
+  }
+  if ((f7 == 1)) {
+  return emit(T_MULHU, r, s1, s2, 0, LEN_32);
+  }
+  fprintf(stderr, "Error: %s\n", fmtStr("Unknown OP func3=3, func7: 0x%x", (unsigned)(f7)));
+  abort();
+  case 4:
+  if ((f7 == 0)) {
+  return emit(T_XOR, r, s1, s2, 0, LEN_32);
+  }
+  if ((f7 == 1)) {
+  return emit(T_DIV, r, s1, s2, 0, LEN_32);
+  }
+  if ((f7 == 16)) {
+  return emit(T_SH2ADD, r, s1, s2, 0, LEN_32);
+  }
+  if ((f7 == 4)) {
+  return emit(T_PACK, r, s1, s2, 0, LEN_32);
+  }
+  if ((f7 == 5)) {
+  return emit(T_MIN, r, s1, s2, 0, LEN_32);
+  }
+  if ((f7 == 32)) {
+  return emit(T_XNOR, r, s1, s2, 0, LEN_32);
+  }
+  fprintf(stderr, "Error: %s\n", fmtStr("Unknown OP func3=4, func7: 0x%x", (unsigned)(f7)));
+  abort();
+  case 5:
+  if ((f7 == 0)) {
+  return emit(T_SRL, r, s1, s2, 0, LEN_32);
+  }
+  if ((f7 == 5)) {
+  return emit(T_MINU, r, s1, s2, 0, LEN_32);
+  }
+  if ((f7 == 32)) {
+  return emit(T_SRA, r, s1, s2, 0, LEN_32);
+  }
+  if ((f7 == 36)) {
+  return emit(T_BEXT, r, s1, s2, 0, LEN_32);
+  }
+  if ((f7 == 48)) {
+  return emit(T_ROR, r, s1, s2, 0, LEN_32);
+  }
+  if ((f7 == 1)) {
+  return emit(T_DIVU, r, s1, s2, 0, LEN_32);
+  }
+  fprintf(stderr, "Error: %s\n", fmtStr("Unknown OP func3=5, func7: 0x%x", (unsigned)(f7)));
+  abort();
+  case 6:
+  if ((f7 == 0)) {
+  return emit(T_OR, r, s1, s2, 0, LEN_32);
+  }
+  if ((f7 == 1)) {
+  return emit(T_REM, r, s1, s2, 0, LEN_32);
+  }
+  if ((f7 == 5)) {
+  return emit(T_MAX, r, s1, s2, 0, LEN_32);
+  }
+  if ((f7 == 32)) {
+  return emit(T_ORN, r, s1, s2, 0, LEN_32);
+  }
+  if ((f7 == 16)) {
+  return emit(T_SH3ADD, r, s1, s2, 0, LEN_32);
+  }
+  fprintf(stderr, "Error: %s\n", fmtStr("Unknown OP func3=6, func7: 0x%x", (unsigned)(f7)));
+  abort();
+  case 7:
+  if ((f7 == 0)) {
+  return emit(T_AND, r, s1, s2, 0, LEN_32);
+  }
+  if ((f7 == 32)) {
+  return emit(T_ANDN, r, s1, s2, 0, LEN_32);
+  }
+  if ((f7 == 4)) {
+  return emit(T_PACKH, r, s1, s2, 0, LEN_32);
+  }
+  if ((f7 == 5)) {
+  return emit(T_MAXU, r, s1, s2, 0, LEN_32);
+  }
+  if ((f7 == 1)) {
+  return emit(T_REMU, r, s1, s2, 0, LEN_32);
+  }
+  fprintf(stderr, "Error: %s\n", fmtStr("Unknown OP func3=7, func7: 0x%x", (unsigned)(f7)));
+  abort();
+  default:
+  fprintf(stderr, "Error: %s\n", fmtStr("Invalid OP func3 %d", f3));
+  abort();
+  }
+  }
+  case 55:
+  return emit(T_LUI, r, 0, 0, imm_u(inst), LEN_32);
+  case 99:
+  switch (f3) {
+  case 0:
+  return emit(T_BEQ, 0, s1, s2, imm_b(inst), LEN_32);
+  case 1:
+  return emit(T_BNE, 0, s1, s2, imm_b(inst), LEN_32);
+  case 4:
+  return emit(T_BLT, 0, s1, s2, imm_b(inst), LEN_32);
+  case 5:
+  return emit(T_BGE, 0, s1, s2, imm_b(inst), LEN_32);
+  case 6:
+  return emit(T_BLTU, 0, s1, s2, imm_b(inst), LEN_32);
+  case 7:
+  return emit(T_BGEU, 0, s1, s2, imm_b(inst), LEN_32);
+  default:
+  fprintf(stderr, "Error: %s\n", fmtStr("Invalid BRANCH func3 %d", f3));
+  abort();
+  }
+  case 103:
+  if ((f3 != 0)) {
+  fprintf(stderr, "Error: %s\n", fmtStr("Invalid JALR func3 %d", f3));
+  abort();
+  }
+  return emit(T_JALR, r, s1, 0, imm_i(inst), LEN_32);
+  case 111:
+  return emit(T_JAL, r, 0, 0, imm_j(inst), LEN_32);
+  case 115:
+  {
+  switch (f3) {
+  case 0:
   switch (((uint32_t)(inst) >> (0))) {
   case 807403635:
-  {
-  int32_t mstatus = CPU_getCSR(cpu, 768, 0);
-  (mstatus &= (~((int32_t)((uint32_t)(3) << (11)))));
-  (mstatus &= (~8));
-  (mstatus |= ((int32_t)(((uint32_t)(mstatus) >> (4))) & (int32_t)(8)));
-  (mstatus |= ((int32_t)((uint32_t)(1) << (7))));
-  CPU_setCSR(cpu, 768, mstatus, 0);
-  (cpu->next_pc = CPU_getCSR(cpu, 833, 0));
-  (cpu->cycles++);
-  CPU_updateMEICONTEXT_priority_restore(cpu);
-  (cpu->interruptsUpdated = true);
-  break;
-  }
+  return emit(T_MRET, 0, 0, 0, 0, LEN_32);
   case 115:
-  CPU_trapEntry(cpu, 11, true);
-  break;
+  return emit(T_ECALL, 0, 0, 0, 0, LEN_32);
   case 1048691:
-  CPU_trapEntry(cpu, 3, true);
-  break;
+  return emit(T_EBREAK, 0, 0, 0, 0, LEN_32);
   case 273678451:
-  if (CPU_wakingInterruptPending(cpu)) {
-  (cpu->interruptsUpdated = true);
-  } else {
-  (cpu->waiting = true);
-  (cpu->waitingOnBlock = false);
-  }
-  break;
+  return emit(T_WFI, 0, 0, 0, 0, LEN_32);
   default:
   fprintf(stderr, "Error: %s\n", fmtStr("Unknown SYSTEM instruction 0x%x", (unsigned)(((uint32_t)(inst) >> (0)))));
   abort();
   }
-  break;
-  }
   case 1:
-  {
-  int32_t csr = immU_i(inst);
-  int32_t r = rd(inst);
-  int32_t s1 = rs1(inst);
-  int32_t newVal = CPU_getRegister(cpu, s1);
-  if ((r != 0)) {
-  CPU_setRegister(cpu, r, CPU_getCSR(cpu, csr, newVal));
-  }
-  CPU_setCSR(cpu, csr, newVal, newVal);
-  break;
-  }
+  return emit(T_CSRRW, r, s1, 0, immU_i(inst), LEN_32);
   case 2:
-  {
-  int32_t csr = immU_i(inst);
-  int32_t r = rd(inst);
-  int32_t s1 = rs1(inst);
-  int32_t orVal = CPU_getRegister(cpu, s1);
-  int32_t old = CPU_getCSR(cpu, csr, orVal);
-  if ((s1 != 0)) {
-  CPU_setCSR(cpu, csr, ((int32_t)(old) | (int32_t)(orVal)), orVal);
-  }
-  CPU_setRegister(cpu, r, old);
-  break;
-  }
+  return emit(T_CSRRS, r, s1, 0, immU_i(inst), LEN_32);
   case 3:
-  {
-  int32_t csr = immU_i(inst);
-  int32_t r = rd(inst);
-  int32_t s1 = rs1(inst);
-  int32_t notVal = CPU_getRegister(cpu, s1);
-  int32_t old = CPU_getCSR(cpu, csr, notVal);
-  if ((notVal != 0)) {
-  CPU_setCSR(cpu, csr, ((int32_t)(old) & (int32_t)((~notVal))), notVal);
-  }
-  CPU_setRegister(cpu, r, old);
-  break;
-  }
+  return emit(T_CSRRC, r, s1, 0, immU_i(inst), LEN_32);
   case 5:
   {
-  int32_t csr = immU_i(inst);
-  int32_t r = rd(inst);
   int32_t imm5 = rs1(inst);
-  if ((r != 0)) {
-  CPU_setRegister(cpu, r, CPU_getCSR(cpu, csr, imm5));
-  }
-  CPU_setCSR(cpu, csr, imm5, imm5);
-  break;
+  return emit(T_CSRWI, r, 0, 0, ((int32_t)(((int32_t)((uint32_t)(immU_i(inst)) << (5)))) | (int32_t)(imm5)), LEN_32);
   }
   case 6:
   {
-  int32_t csr = immU_i(inst);
-  int32_t r = rd(inst);
   int32_t imm5 = rs1(inst);
-  int32_t old = CPU_getCSR(cpu, csr, imm5);
-  if ((imm5 != 0)) {
-  CPU_setCSR(cpu, csr, ((int32_t)(old) | (int32_t)(imm5)), imm5);
-  }
-  CPU_setRegister(cpu, r, old);
-  break;
+  return emit(T_CSRRSI, r, 0, 0, ((int32_t)(((int32_t)((uint32_t)(immU_i(inst)) << (5)))) | (int32_t)(imm5)), LEN_32);
   }
   case 7:
   {
-  int32_t csr = immU_i(inst);
-  int32_t r = rd(inst);
   int32_t imm5 = rs1(inst);
-  int32_t old = CPU_getCSR(cpu, csr, imm5);
-  if ((imm5 != 0)) {
-  CPU_setCSR(cpu, csr, ((int32_t)(old) & (int32_t)((~imm5))), imm5);
-  }
-  CPU_setRegister(cpu, r, old);
-  break;
+  return emit(T_CSRRCI, r, 0, 0, ((int32_t)(((int32_t)((uint32_t)(immU_i(inst)) << (5)))) | (int32_t)(imm5)), LEN_32);
   }
   default:
-  fprintf(stderr, "Error: %s\n", fmtStr("Invalid SYSTEM func3 %d", func3(inst)));
+  fprintf(stderr, "Error: %s\n", fmtStr("Invalid SYSTEM func3 %d", f3));
   abort();
   }
-}
-
-static void executeCustom0(int32_t inst, CPU* cpu) {
+  }
+  case 11:
+  {
   int32_t c_ident = ((int32_t)(inst) & (int32_t)(3791679615u));
   int32_t size = ((int32_t)(((uint32_t)(inst) >> (26))) & (int32_t)(7));
+  int32_t immWithSize = ((int32_t)((uint32_t)(size) << (1)));
   if ((c_ident == 11)) {
-  uint32_t sh = CPU_getRegisterU(cpu, rs2(inst));
-  int32_t v = ((uint32_t)(CPU_getRegisterU(cpu, rs1(inst))) >> (((int32_t)(sh)) & 31));
-  CPU_setRegisterU(cpu, rd(inst), ((int32_t)(v) & (int32_t)((((int32_t)((uint32_t)(2) << (((int32_t)(size)) & 31))) - 1))));
-  } else {
+  return emit(T_H3_BEXTM, r, s1, s2, immWithSize, LEN_32);
+  }
   if ((c_ident == 16395)) {
-  int32_t v = ((uint32_t)(CPU_getRegisterU(cpu, rs1(inst))) >> (((int32_t)(rs2(inst))) & 31));
-  CPU_setRegisterU(cpu, rd(inst), ((int32_t)(v) & (int32_t)((((int32_t)((uint32_t)(2) << (((int32_t)(size)) & 31))) - 1))));
-  } else {
+  return emit(T_H3_BEXTMI, r, s1, s2, immWithSize, LEN_32);
+  }
   fprintf(stderr, "Error: %s\n", fmtStr("Invalid CUSTOM0 instruction 0x%x", (unsigned)(inst)));
   abort();
   }
+  default:
+  fprintf(stderr, "Error: %s\n", fmtStr("Invalid instruction: 0x%x, opcode 0x%x", (unsigned)(inst), (unsigned)(op)));
+  abort();
   }
+  return (int64_t){0};
 }
 
-// ─── index.ts ───
-// ─── rv32c.ts ───
-static void executeRv32c(CPU* cpu, int32_t inst) {
+static int64_t decodeCompressed(int32_t inst) {
+  if ((inst == 0)) {
+  fprintf(stderr, "Error: %s\n", "Illegal 16 bit instruction 0");
+  abort();
+  }
   switch (((int32_t)(inst) & (int32_t)(3))) {
   case 0:
-  switch (((int32_t)(((int32_t)(inst) >> (13))) & (int32_t)(7))) {
-  case 0:
-  caddi4spn(cpu, inst);
-  return;
-  case 2:
-  clw(cpu, inst);
-  return;
-  case 4:
-  zcb_100_00(cpu, inst);
-  return;
-  case 6:
-  csw(cpu, inst);
-  return;
-  }
-  break;
+  return decodeC0(inst);
   case 1:
-  switch (((int32_t)(((int32_t)(inst) >> (13))) & (int32_t)(7))) {
-  case 0:
-  caddi(cpu, inst);
-  return;
-  case 1:
-  cjal(cpu, inst);
-  return;
+  return decodeC1(inst);
   case 2:
-  cli(cpu, inst);
-  return;
-  case 3:
-  parse_011_01(cpu, inst);
-  return;
-  case 4:
-  parse_100_01(cpu, inst);
-  return;
-  case 5:
-  cj(cpu, inst);
-  return;
-  case 6:
-  cbeqz(cpu, inst);
-  return;
-  case 7:
-  cbenz(cpu, inst);
-  return;
-  }
-  break;
-  case 2:
-  switch (((int32_t)(((int32_t)(inst) >> (13))) & (int32_t)(7))) {
-  case 0:
-  cslli(cpu, inst);
-  return;
-  case 2:
-  clwsp(cpu, inst);
-  return;
-  case 4:
-  parse_100_10(cpu, inst);
-  return;
-  case 5:
-  parse_101_10(cpu, inst);
-  return;
-  case 6:
-  cswsp(cpu, inst);
-  return;
-  }
-  break;
+  return decodeC2(inst);
   }
   fprintf(stderr, "Error: %s\n", fmtStr("Unsupported compressed instruction: 0x%x", (unsigned)(inst)));
   abort();
 }
 
-static void assert(bool a) {
+enum { C_CI_MASK_12 = (4096) };
+enum { C_CI_MASK_6_4 = (112) };
+enum { C_CI_MASK_3_2 = (12) };
+enum { C_CSS_IMM_5_2 = (7680) };
+enum { C_CSS_IMM_7_6 = (384) };
+enum { C_CIW_IMM_5_4 = (6144) };
+enum { C_CIW_IMM_9_6 = (1920) };
+enum { C_CIW_IMM_3 = (32) };
+enum { C_CIW_IMM_2 = (64) };
+enum { C_CLWSW_IMM_5_3 = (7168) };
+enum { C_CLWSW_IMM_2 = (64) };
+enum { C_CLWSW_IMM_6 = (32) };
+enum { C_CB_OFFSET_8 = (4096) };
+enum { C_CB_OFFSET_4_3 = (3072) };
+enum { C_CB_OFFSET_7_6 = (96) };
+enum { C_CB_OFFSET_2_1 = (24) };
+enum { C_CB_OFFSET_5 = (4) };
+enum { C_CJ_OFFSET_11 = (4096) };
+enum { C_CJ_OFFSET_4 = (2048) };
+enum { C_CJ_OFFSET_9_8 = (1536) };
+enum { C_CJ_OFFSET_10 = (256) };
+enum { C_CJ_OFFSET_6 = (128) };
+enum { C_CJ_OFFSET_7 = (64) };
+enum { C_CJ_OFFSET_3_1 = (56) };
+enum { C_CJ_OFFSET_5 = (4) };
+static int32_t dec_rd(int32_t inst) {
+  return ((int32_t)(((int32_t)(inst) & (int32_t)(3968))) >> (7));
 }
 
-static void caddi4spn(CPU* cpu, int32_t inst) {
-  int32_t nzuimm = dec_ciw_imm(inst);
-  int32_t rd = dec_rd_short(inst);
-  CPU_setRegisterU(cpu, rd, ((uint32_t)((CPU_getRegisterU(cpu, 2) + nzuimm)) >> (0)));
+static int32_t dec_rs2(int32_t inst) {
+  return ((int32_t)(((int32_t)(inst) & (int32_t)(124))) >> (2));
 }
 
-static void clw(CPU* cpu, int32_t inst) {
-  int32_t imm = dec_clw_csw_imm(inst);
-  int32_t rs1 = dec_rs1_short(inst);
-  int32_t rd = dec_rd_short(inst);
-  int32_t addr = (CPU_getRegisterU(cpu, rs1) + imm);
-  CPU_setRegisterU(cpu, rd, RP2350_readUint32(cpu->chip, addr));
+static int32_t dec_rd_short(int32_t inst) {
+  return ((int32_t)(((int32_t)(((int32_t)(inst) & (int32_t)(28))) >> (2))) | (int32_t)(8));
 }
 
-static void zcb_100_00(CPU* cpu, int32_t inst) {
-  uint32_t base = CPU_getRegisterU(cpu, dec_rs1_short(inst));
+static int32_t dec_rs1_short(int32_t inst) {
+  return ((int32_t)(((int32_t)(((int32_t)(inst) & (int32_t)(896))) >> (7))) | (int32_t)(8));
+}
+
+static int32_t dec_rs2_short(int32_t inst) {
+  return ((int32_t)(((int32_t)(((int32_t)(inst) & (int32_t)(28))) >> (2))) | (int32_t)(8));
+}
+
+static int32_t sign_extend(int32_t x, int32_t sign_position) {
+  int32_t sign = ((int32_t)(((int32_t)(x) >> (((int32_t)(sign_position)) & 31))) & (int32_t)(1));
+  int32_t r = x;
+  for (
+int32_t i = (sign_position + 1)
+; (i < 32); (++i)) {
+  (r |= ((int32_t)((uint32_t)(sign) << (((int32_t)(i)) & 31))));
+  }
+  return r;
+}
+
+static int64_t decodeC0(int32_t inst) {
+  switch (((int32_t)(((int32_t)(inst) >> (13))) & (int32_t)(7))) {
+  case 0:
+  {
+  int32_t nzuimm = 0;
+  (nzuimm |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CIW_IMM_9_6))) >> (1)));
+  (nzuimm |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CIW_IMM_5_4))) >> (7)));
+  (nzuimm |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CIW_IMM_3))) >> (2)));
+  (nzuimm |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CIW_IMM_2))) >> (4)));
+  return emit(T_ADDI, dec_rd_short(inst), 2, 0, ((int32_t)(nzuimm) & (int32_t)(2097151)), LEN_16);
+  }
+  case 2:
+  {
+  int32_t imm = 0;
+  (imm |= ((int32_t)((uint32_t)(((int32_t)(inst) & (int32_t)(C_CLWSW_IMM_6))) << (1))));
+  (imm |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CLWSW_IMM_5_3))) >> (7)));
+  (imm |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CLWSW_IMM_2))) >> (4)));
+  return emit(T_LW, dec_rd_short(inst), dec_rs1_short(inst), 0, imm, LEN_16);
+  }
+  case 4:
+  {
+  int32_t base = dec_rs1_short(inst);
   int32_t sub = ((int32_t)(((uint32_t)(inst) >> (10))) & (int32_t)(7));
   switch (sub) {
   case 0:
   {
   int32_t uimm = ((int32_t)(((int32_t)((uint32_t)(((int32_t)(((uint32_t)(inst) >> (5))) & (int32_t)(1))) << (1)))) | (int32_t)(((int32_t)(((uint32_t)(inst) >> (6))) & (int32_t)(1))));
-  int32_t rd = dec_rd_short(inst);
-  CPU_setRegister(cpu, rd, RP2350_readUint8(cpu->chip, (base + uimm)));
-  return;
+  return emit(T_LBU, dec_rd_short(inst), base, 0, uimm, LEN_16);
   }
   case 1:
   {
   int32_t uimm = ((int32_t)((uint32_t)(((int32_t)(((uint32_t)(inst) >> (5))) & (int32_t)(1))) << (1)));
-  int32_t rd = dec_rd_short(inst);
-  uint32_t half = RP2350_readUint16(cpu->chip, (base + uimm));
-  if (((int32_t)(((uint32_t)(inst) >> (6))) & (int32_t)(1))) {
-  CPU_setRegister(cpu, rd, sign_extend(half, 15));
-  } else {
-  CPU_setRegister(cpu, rd, half);
-  }
-  return;
+  return emit((((int32_t)(((uint32_t)(inst) >> (6))) & (int32_t)(1)) ? T_LH : T_LHU), dec_rd_short(inst), base, 0, uimm, LEN_16);
   }
   case 2:
   {
   int32_t uimm = ((int32_t)(((int32_t)((uint32_t)(((int32_t)(((uint32_t)(inst) >> (5))) & (int32_t)(1))) << (1)))) | (int32_t)(((int32_t)(((uint32_t)(inst) >> (6))) & (int32_t)(1))));
-  int32_t rs2 = dec_rs2_short(inst);
-  RP2350_writeUint8(cpu->chip, (base + uimm), ((int32_t)(CPU_getRegister(cpu, rs2)) & (int32_t)(255)));
-  return;
+  return emit(T_SB, 0, base, dec_rs2_short(inst), uimm, LEN_16);
   }
   case 3:
   {
@@ -15372,57 +22934,50 @@ static void zcb_100_00(CPU* cpu, int32_t inst) {
   break;
   }
   int32_t uimm = ((int32_t)((uint32_t)(((int32_t)(((uint32_t)(inst) >> (5))) & (int32_t)(1))) << (1)));
-  int32_t rs2 = dec_rs2_short(inst);
-  RP2350_writeUint16(cpu->chip, (base + uimm), ((int32_t)(CPU_getRegister(cpu, rs2)) & (int32_t)(65535)));
-  return;
+  return emit(T_SH, 0, base, dec_rs2_short(inst), uimm, LEN_16);
   }
   }
-  fprintf(stderr, "Error: %s\n", fmtStr("Unsupported Zcb instruction: 0x%x", (unsigned)(inst)));
+  break;
+  }
+  case 6:
+  {
+  int32_t imm = 0;
+  (imm |= ((int32_t)((uint32_t)(((int32_t)(inst) & (int32_t)(C_CLWSW_IMM_6))) << (1))));
+  (imm |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CLWSW_IMM_5_3))) >> (7)));
+  (imm |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CLWSW_IMM_2))) >> (4)));
+  return emit(T_SW, 0, dec_rs1_short(inst), dec_rs2_short(inst), imm, LEN_16);
+  }
+  }
+  fprintf(stderr, "Error: %s\n", fmtStr("Unsupported compressed instruction: 0x%x", (unsigned)(inst)));
   abort();
 }
 
-static void csw(CPU* cpu, int32_t inst) {
-  int32_t imm = dec_clw_csw_imm(inst);
-  int32_t rs1 = dec_rs1_short(inst);
-  int32_t rs2 = dec_rs2_short(inst);
-  RP2350_writeUint32(cpu->chip, (CPU_getRegisterU(cpu, rs1) + imm), CPU_getRegister(cpu, rs2));
-}
-
-static void cnop(void) {
-}
-
-static void caddi(CPU* cpu, int32_t inst) {
-  int32_t rd = dec_rd(inst);
+static int64_t decodeC1(int32_t inst) {
+  switch (((int32_t)(((int32_t)(inst) >> (13))) & (int32_t)(7))) {
+  case 0:
+  {
+  int32_t r = dec_rd(inst);
   int32_t nzimm = 0;
   (nzimm |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CI_MASK_12))) >> (7)));
   (nzimm |= ((int32_t)(((int32_t)(inst) & (int32_t)(((int32_t)(C_CI_MASK_6_4) | (int32_t)(C_CI_MASK_3_2))))) >> (2)));
   (nzimm = sign_extend(nzimm, 5));
-  if ((nzimm == 0)) {
-  return;
+  return emit(T_ADDI, r, r, 0, ((int32_t)(nzimm) & (int32_t)(2097151)), LEN_16);
   }
-  CPU_setRegisterU(cpu, rd, ((uint32_t)((CPU_getRegisterU(cpu, rd) + nzimm)) >> (0)));
-}
-
-static void cjal(CPU* cpu, int32_t inst) {
-  checkTraceMagic(cpu, (cpu->pc + 2));
-  CPU_setRegister(cpu, 1, (cpu->pc + 2));
-  (cpu->next_pc = (cpu->pc + dec_cj_imm(inst)));
-  (cpu->cycles++);
-}
-
-static void cli(CPU* cpu, int32_t inst) {
-  int32_t rd = dec_rd(inst);
+  case 1:
+  return emit(T_JAL, 1, 0, 0, ((int32_t)(decCjImm(inst)) & (int32_t)(2097151)), LEN_16);
+  case 2:
+  {
+  int32_t r = dec_rd(inst);
   int32_t imm = 0;
   (imm |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CI_MASK_12))) >> (7)));
   (imm |= ((int32_t)(((int32_t)(inst) & (int32_t)(((int32_t)(C_CI_MASK_6_4) | (int32_t)(C_CI_MASK_3_2))))) >> (2)));
   (imm = sign_extend(imm, 5));
-  if ((rd == 0)) {
-  return;
+  return emit(T_ADDI, r, 0, 0, ((int32_t)(imm) & (int32_t)(2097151)), LEN_16);
   }
-  CPU_setRegister(cpu, rd, imm);
-}
-
-static void caddi16sp(CPU* cpu, int32_t inst) {
+  case 3:
+  {
+  int32_t r = dec_rd(inst);
+  if ((r == 2)) {
   int32_t nzimm = 0;
   (nzimm |= ((int32_t)(((int32_t)(inst) & (int32_t)(4096))) >> (3)));
   (nzimm |= ((int32_t)((uint32_t)(((int32_t)(inst) & (int32_t)(24))) << (4))));
@@ -15430,482 +22985,174 @@ static void caddi16sp(CPU* cpu, int32_t inst) {
   (nzimm |= ((int32_t)((uint32_t)(((int32_t)(inst) & (int32_t)(4))) << (3))));
   (nzimm |= ((int32_t)(((int32_t)(inst) & (int32_t)(64))) >> (2)));
   (nzimm = sign_extend(nzimm, 9));
-  assert((nzimm != 0));
-  CPU_setRegisterU(cpu, 2, ((uint32_t)((CPU_getRegisterU(cpu, 2) + nzimm)) >> (0)));
-}
-
-static void clui(CPU* cpu, int32_t inst) {
-  int32_t rd = dec_rd(inst);
+  return emit(T_ADDI, 2, 2, 0, ((int32_t)(nzimm) & (int32_t)(2097151)), LEN_16);
+  } else {
   int32_t nzimm = 0;
   (nzimm |= ((int32_t)((uint32_t)(((int32_t)(inst) & (int32_t)(C_CI_MASK_12))) << (5))));
   (nzimm |= ((int32_t)((uint32_t)(((int32_t)(inst) & (int32_t)(((int32_t)(C_CI_MASK_6_4) | (int32_t)(C_CI_MASK_3_2))))) << (10))));
   (nzimm = sign_extend(nzimm, 17));
-  assert((nzimm != 0));
-  if ((rd == 0)) {
-  return;
+  return emit(T_LUI, r, 0, 0, ((int32_t)(((uint32_t)(nzimm) >> (12))) & (int32_t)(2097151)), LEN_16);
   }
-  CPU_setRegisterU(cpu, rd, nzimm);
-}
-
-static void csrli(CPU* cpu, int32_t inst) {
-  int32_t shamt = 0;
-  (shamt |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CI_MASK_12))) >> (7)));
-  assert((shamt == 0));
-  (shamt |= ((int32_t)(((int32_t)(inst) & (int32_t)(((int32_t)(C_CI_MASK_6_4) | (int32_t)(C_CI_MASK_3_2))))) >> (2)));
-  assert((shamt != 0));
-  int32_t rd = dec_rs1_short(inst);
-  CPU_setRegister(cpu, rd, ((uint32_t)(CPU_getRegister(cpu, rd)) >> (((int32_t)(shamt)) & 31)));
-}
-
-static void csrai(CPU* cpu, int32_t inst) {
-  int32_t shamt = 0;
-  (shamt |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CI_MASK_12))) >> (7)));
-  assert((shamt == 0));
-  (shamt |= ((int32_t)(((int32_t)(inst) & (int32_t)(((int32_t)(C_CI_MASK_6_4) | (int32_t)(C_CI_MASK_3_2))))) >> (2)));
-  assert((shamt != 0));
-  int32_t rd = dec_rs1_short(inst);
-  CPU_setRegister(cpu, rd, ((int32_t)(CPU_getRegister(cpu, rd)) >> (((int32_t)(shamt)) & 31)));
-}
-
-static void candi(CPU* cpu, int32_t inst) {
-  int32_t rd = dec_rs1_short(inst);
+  }
+  case 4:
+  {
+  int32_t cb_funct2 = ((int32_t)(((int32_t)(inst) & (int32_t)(3072))) >> (10));
+  int32_t cs_funct6_3_funct2 = ((int32_t)(((int32_t)((uint32_t)(((int32_t)(((uint32_t)(((int32_t)(((int32_t)(inst) & (int32_t)(64512))) >> (10))) >> (2))) & (int32_t)(1))) << (2)))) | (int32_t)(((int32_t)(((int32_t)(inst) & (int32_t)(96))) >> (5))));
+  switch (cb_funct2) {
+  case 0:
+  {
+  int32_t sh = 0;
+  (sh |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CI_MASK_12))) >> (7)));
+  (sh |= ((int32_t)(((int32_t)(inst) & (int32_t)(((int32_t)(C_CI_MASK_6_4) | (int32_t)(C_CI_MASK_3_2))))) >> (2)));
+  return emit(T_SRLI, dec_rs1_short(inst), dec_rs1_short(inst), 0, sh, LEN_16);
+  }
+  case 1:
+  {
+  int32_t sh = 0;
+  (sh |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CI_MASK_12))) >> (7)));
+  (sh |= ((int32_t)(((int32_t)(inst) & (int32_t)(((int32_t)(C_CI_MASK_6_4) | (int32_t)(C_CI_MASK_3_2))))) >> (2)));
+  return emit(T_SRAI, dec_rs1_short(inst), dec_rs1_short(inst), 0, sh, LEN_16);
+  }
+  case 2:
+  {
   int32_t imm = 0;
   (imm |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CI_MASK_12))) >> (7)));
   (imm |= ((int32_t)(((int32_t)(inst) & (int32_t)(((int32_t)(C_CI_MASK_6_4) | (int32_t)(C_CI_MASK_3_2))))) >> (2)));
   (imm = sign_extend(imm, 5));
-  CPU_setRegister(cpu, rd, ((int32_t)(CPU_getRegister(cpu, rd)) & (int32_t)(imm)));
-}
-
-static void csub(CPU* cpu, int32_t inst) {
-  int32_t rd = dec_rs1_short(inst);
-  int32_t rs2 = dec_rs2_short(inst);
-  CPU_setRegister(cpu, rd, (CPU_getRegister(cpu, rd) - CPU_getRegister(cpu, rs2)));
-}
-
-static void cxor(CPU* cpu, int32_t inst) {
-  int32_t rd = dec_rs1_short(inst);
-  int32_t rs2 = dec_rs2_short(inst);
-  CPU_setRegister(cpu, rd, ((int32_t)(CPU_getRegister(cpu, rd)) ^ (int32_t)(CPU_getRegister(cpu, rs2))));
-}
-
-static void cor(CPU* cpu, int32_t inst) {
-  int32_t rd = dec_rs1_short(inst);
-  int32_t rs2 = dec_rs2_short(inst);
-  CPU_setRegister(cpu, rd, ((int32_t)(CPU_getRegister(cpu, rd)) | (int32_t)(CPU_getRegister(cpu, rs2))));
-}
-
-static void cand(CPU* cpu, int32_t inst) {
-  int32_t rd = dec_rs1_short(inst);
-  int32_t rs2 = dec_rs2_short(inst);
-  CPU_setRegister(cpu, rd, ((int32_t)(CPU_getRegister(cpu, rd)) & (int32_t)(CPU_getRegister(cpu, rs2))));
-}
-
-static void cj(CPU* cpu, int32_t inst) {
-  checkTraceMagic(cpu, (cpu->pc + 2));
-  (cpu->next_pc = (cpu->pc + dec_cj_imm(inst)));
-  (cpu->cycles++);
-}
-
-static void cbeqz(CPU* cpu, int32_t inst) {
-  int32_t offset = dec_branch_imm(inst);
-  int32_t rs1 = dec_rs1_short(inst);
-  int32_t taken = (CPU_getRegister(cpu, rs1) == 0);
-  if (taken) {
-  (cpu->next_pc = (cpu->pc + offset));
+  return emit(T_ANDI, dec_rs1_short(inst), dec_rs1_short(inst), 0, ((int32_t)(imm) & (int32_t)(2097151)), LEN_16);
   }
-  CPU_h3_branch_cycles(cpu, taken);
-}
-
-static void cbenz(CPU* cpu, int32_t inst) {
-  int32_t offset = dec_branch_imm(inst);
-  int32_t rs1 = dec_rs1_short(inst);
-  int32_t taken = (CPU_getRegister(cpu, rs1) != 0);
-  if (taken) {
-  (cpu->next_pc = (cpu->pc + offset));
+  case 3:
+  switch (cs_funct6_3_funct2) {
+  case 0:
+  return emit(T_SUB, dec_rs1_short(inst), dec_rs1_short(inst), dec_rs2_short(inst), 0, LEN_16);
+  case 1:
+  return emit(T_XOR, dec_rs1_short(inst), dec_rs1_short(inst), dec_rs2_short(inst), 0, LEN_16);
+  case 2:
+  return emit(T_OR, dec_rs1_short(inst), dec_rs1_short(inst), dec_rs2_short(inst), 0, LEN_16);
+  case 3:
+  return emit(T_AND, dec_rs1_short(inst), dec_rs1_short(inst), dec_rs2_short(inst), 0, LEN_16);
+  case 6:
+  return emit(T_MUL, dec_rs1_short(inst), dec_rs1_short(inst), dec_rs2_short(inst), 0, LEN_16);
+  case 7:
+  {
+  int32_t r = dec_rs1_short(inst);
+  switch (((int32_t)(((uint32_t)(inst) >> (2))) & (int32_t)(7))) {
+  case 0:
+  return emit(T_ANDI, r, r, 0, 255, LEN_16);
+  case 1:
+  return emit(T_SEXT_B, r, r, 0, 0, LEN_16);
+  case 2:
+  return emit(T_ZEXT_H, r, r, 0, 0, LEN_16);
+  case 3:
+  return emit(T_SEXT_H, r, r, 0, 0, LEN_16);
+  case 5:
+  return emit(T_XORI, r, r, 0, ((int32_t)((-1)) & (int32_t)(2097151)), LEN_16);
   }
-  CPU_h3_branch_cycles(cpu, taken);
+  return emit(T_INVALID, 0, 0, 0, 0, LEN_16);
+  }
+  }
+  break;
+  }
+  break;
+  }
+  case 5:
+  return emit(T_JAL, 0, 0, 0, ((int32_t)(decCjImm(inst)) & (int32_t)(2097151)), LEN_16);
+  case 6:
+  return emit(T_BEQ, 0, dec_rs1_short(inst), 0, ((int32_t)(decBranchImm(inst)) & (int32_t)(2097151)), LEN_16);
+  case 7:
+  return emit(T_BNE, 0, dec_rs1_short(inst), 0, ((int32_t)(decBranchImm(inst)) & (int32_t)(2097151)), LEN_16);
+  }
+  fprintf(stderr, "Error: %s\n", fmtStr("Unsupported compressed instruction: 0x%x", (unsigned)(inst)));
+  abort();
 }
 
-static void cslli(CPU* cpu, int32_t inst) {
+static int64_t decodeC2(int32_t inst) {
+  switch (((int32_t)(((int32_t)(inst) >> (13))) & (int32_t)(7))) {
+  case 0:
+  {
   int32_t shamt = 0;
   (shamt |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CI_MASK_12))) >> (7)));
-  assert((shamt == 0));
   (shamt |= ((int32_t)(((int32_t)(inst) & (int32_t)(((int32_t)(C_CI_MASK_6_4) | (int32_t)(C_CI_MASK_3_2))))) >> (2)));
-  assert((shamt != 0));
-  int32_t rd = dec_rd(inst);
-  if ((rd == 0)) {
-  return;
+  int32_t r = dec_rd(inst);
+  return emit(T_SLLI, r, r, 0, shamt, LEN_16);
   }
-  CPU_setRegisterU(cpu, rd, ((int32_t)((uint32_t)(CPU_getRegisterU(cpu, rd)) << (((int32_t)(shamt)) & 31))));
-}
-
-static void clwsp(CPU* cpu, int32_t inst) {
+  case 2:
+  {
   int32_t offset = 0;
   (offset |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CI_MASK_12))) >> (7)));
   (offset |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CI_MASK_6_4))) >> (2)));
   (offset |= ((int32_t)((uint32_t)(((int32_t)(inst) & (int32_t)(C_CI_MASK_3_2))) << (4))));
-  int32_t rd = dec_rd(inst);
-  assert((rd != 0));
-  int32_t addr = (CPU_getRegisterU(cpu, 2) + offset);
-  CPU_setRegisterU(cpu, rd, RP2350_readUint32(cpu->chip, addr));
-}
-
-static void cjr(CPU* cpu, int32_t inst) {
-  int32_t rs1 = dec_rs1(inst);
-  assert((rs1 != 0));
-  (cpu->next_pc = CPU_getRegister(cpu, rs1));
-  (cpu->cycles++);
-}
-
-static void cmv(CPU* cpu, int32_t inst) {
-  int32_t rs2 = dec_rs2(inst);
-  assert((rs2 != 0));
-  int32_t rd = dec_rd(inst);
-  if ((rd == 0)) {
-  return;
+  return emit(T_LW, dec_rd(inst), 2, 0, offset, LEN_16);
   }
-  CPU_setRegister(cpu, rd, CPU_getRegister(cpu, rs2));
-}
-
-static void cebreak(CPU* cpu) {
-  CPU_trapEntry(cpu, 3, true);
-}
-
-static void cjalr(CPU* cpu, int32_t inst) {
-  int32_t rs1 = dec_rs1(inst);
-  assert((rs1 != 0));
-  CPU_setRegister(cpu, 1, (cpu->pc + 2));
-  (cpu->next_pc = CPU_getRegister(cpu, rs1));
-  (cpu->cycles++);
-}
-
-static void cadd(CPU* cpu, int32_t inst) {
-  int32_t rs2 = dec_rs2(inst);
-  assert((rs2 != 0));
-  int32_t rd = dec_rd(inst);
-  if ((rd == 0)) {
-  return;
-  }
-  CPU_setRegister(cpu, rd, (CPU_getRegister(cpu, rd) + CPU_getRegister(cpu, rs2)));
-}
-
-static void cswsp(CPU* cpu, int32_t inst) {
-  int32_t offset = dec_css_imm(inst);
-  int32_t rs2 = dec_rs2(inst);
-  int32_t addr = (CPU_getRegisterU(cpu, 2) + offset);
-  RP2350_writeUint32(cpu->chip, addr, CPU_getRegister(cpu, rs2));
-}
-
-static void parse_011_01(CPU* cpu, int32_t inst) {
-  int32_t rd = dec_rd(inst);
-  if ((rd == 2)) {
-  caddi16sp(cpu, inst);
-  } else {
-  clui(cpu, inst);
-  }
-}
-
-static void parse_100_01(CPU* cpu, int32_t inst) {
-  int32_t cb_funct2 = dec_cb_funct2(inst);
-  int32_t cs_funct6_3_funct2 = ((int32_t)(((int32_t)((uint32_t)(((int32_t)(((uint32_t)(dec_cs_funct6(inst)) >> (2))) & (int32_t)(1))) << (2)))) | (int32_t)(dec_cs_funct2(inst)));
-  switch (cb_funct2) {
-  case 0:
-  csrli(cpu, inst);
-  return;
-  case 1:
-  csrai(cpu, inst);
-  return;
-  case 2:
-  candi(cpu, inst);
-  return;
-  case 3:
-  switch (cs_funct6_3_funct2) {
-  case 0:
-  csub(cpu, inst);
-  return;
-  case 1:
-  cxor(cpu, inst);
-  return;
-  case 2:
-  cor(cpu, inst);
-  return;
-  case 3:
-  cand(cpu, inst);
-  return;
-  case 6:
+  case 4:
   {
-  int32_t rd = dec_rs1_short(inst);
-  int32_t rs2 = dec_rs2_short(inst);
-  CPU_setRegister(cpu, rd, ((int32_t)((CPU_getRegister(cpu, rd) * CPU_getRegister(cpu, rs2))) & (int32_t)(4294967295u)));
-  return;
-  }
-  case 7:
-  {
-  int32_t rd = dec_rs1_short(inst);
-  switch (((int32_t)(((uint32_t)(inst) >> (2))) & (int32_t)(7))) {
-  case 0:
-  CPU_setRegister(cpu, rd, ((int32_t)(CPU_getRegister(cpu, rd)) & (int32_t)(255)));
-  return;
-  case 1:
-  CPU_setRegister(cpu, rd, sign_extend(((int32_t)(CPU_getRegisterU(cpu, rd)) & (int32_t)(255)), 7));
-  return;
-  case 2:
-  CPU_setRegister(cpu, rd, ((int32_t)(CPU_getRegisterU(cpu, rd)) & (int32_t)(65535)));
-  return;
-  case 3:
-  CPU_setRegister(cpu, rd, sign_extend(((int32_t)(CPU_getRegisterU(cpu, rd)) & (int32_t)(65535)), 15));
-  return;
-  case 5:
-  CPU_setRegister(cpu, rd, (~CPU_getRegister(cpu, rd)));
-  return;
-  }
-  return;
-  }
-  }
-  }
-  fprintf(stderr, "Error: %s\n", fmtStr("Unknown compressed instruction: 0x%x", (unsigned)(inst)));
-  abort();
-}
-
-static void parse_100_10(CPU* cpu, int32_t inst) {
-  int32_t cr_funct4 = dec_cr_funct4(inst);
-  int32_t rs1 = dec_rs1(inst);
-  int32_t rs2 = dec_rs2(inst);
+  int32_t cr_funct4 = ((int32_t)(((int32_t)(inst) & (int32_t)(61440))) >> (12));
+  int32_t rs1v = ((int32_t)(((int32_t)(inst) & (int32_t)(3968))) >> (7));
+  int32_t rs2v = ((int32_t)(((int32_t)(inst) & (int32_t)(124))) >> (2));
   if ((cr_funct4 == 8)) {
-  if ((rs2 == 0)) {
-  cjr(cpu, inst);
-  } else {
-  cmv(cpu, inst);
+  if ((rs2v == 0)) {
+  return emit(T_JALR, 0, rs1v, 0, 0, LEN_16);
   }
+  return emit(T_ADD, dec_rd(inst), 0, rs2v, 0, LEN_16);
   } else {
   if ((cr_funct4 == 9)) {
-  if (((rs1 == 0) && (rs2 == 0))) {
-  cebreak(cpu);
+  if (((rs1v == 0) && (rs2v == 0))) {
+  return emit(T_EBREAK, 0, 0, 0, 0, LEN_16);
   } else {
-  if ((rs2 == 0)) {
-  cjalr(cpu, inst);
-  } else {
-  cadd(cpu, inst);
+  if ((rs2v == 0)) {
+  return emit(T_JALR, 1, rs1v, 0, 0, LEN_16);
   }
   }
-  } else {
-  cnop();
+  return emit(T_ADD, dec_rd(inst), dec_rd(inst), rs2v, 0, LEN_16);
   }
   }
-}
-
-static const int32_t xreg_list_0[] = {0};
-static const int32_t xreg_list_1[] = {0};
-static const int32_t xreg_list_2[] = {0};
-static const int32_t xreg_list_3[] = {0};
-static const int32_t xreg_list_4[] = {1};
-static const int32_t xreg_list_5[] = {8, 1};
-static const int32_t xreg_list_6[] = {9, 8, 1};
-static const int32_t xreg_list_7[] = {18, 9, 8, 1};
-static const int32_t xreg_list_8[] = {19, 18, 9, 8, 1};
-static const int32_t xreg_list_9[] = {20, 19, 18, 9, 8, 1};
-static const int32_t xreg_list_10[] = {21, 20, 19, 18, 9, 8, 1};
-static const int32_t xreg_list_11[] = {22, 21, 20, 19, 18, 9, 8, 1};
-static const int32_t xreg_list_12[] = {23, 22, 21, 20, 19, 18, 9, 8, 1};
-static const int32_t xreg_list_13[] = {24, 23, 22, 21, 20, 19, 18, 9, 8, 1};
-static const int32_t xreg_list_14[] = {25, 24, 23, 22, 21, 20, 19, 18, 9, 8, 1};
-static const int32_t xreg_list_15[] = {27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 9, 8, 1};
-static const int32_t* xreg_list[] = {xreg_list_0, xreg_list_1, xreg_list_2, xreg_list_3, xreg_list_4, xreg_list_5, xreg_list_6, xreg_list_7, xreg_list_8, xreg_list_9, xreg_list_10, xreg_list_11, xreg_list_12, xreg_list_13, xreg_list_14, xreg_list_15};
-static const int32_t xreg_list_lens[] = {0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13};
-static const int32_t stack_adj_base[] = {0, 0, 0, 0, 16, 16, 16, 16, 32, 32, 32, 32, 48, 48, 48, 64};
-static void parse_101_10(CPU* cpu, int32_t inst) {
-  switch (((int32_t)(inst) & (int32_t)(65283))) {
-  case 47106:
+  return emit(T_ADDI, 0, 0, 0, 0, LEN_16);
+  }
+  case 5:
   {
+  int32_t masked = ((int32_t)(inst) & (int32_t)(65283));
+  if ((masked == 47106)) {
   int32_t rlist = ((uint32_t)(((int32_t)(inst) & (int32_t)(240))) >> (4));
-  int32_t spimm = ((int32_t)((uint32_t)(((int32_t)(inst) & (int32_t)(12))) << (2)));
-  int32_t stack_adj = (stack_adj_base[rlist] + spimm);
-  uint32_t sp = CPU_getRegisterU(cpu, 2);
-  int32_t addr = (sp - 4);
-  {
-    int32_t __forof_idx = rlist;
-    for (int32_t __forof_i = 0; __forof_i < xreg_list_lens[__forof_idx]; __forof_i++) {
-      int32_t reg = xreg_list[__forof_idx][__forof_i];
-  RP2350_writeUint32(cpu->chip, addr, CPU_getRegisterU(cpu, reg));
-  (addr -= 4);
-  (cpu->cycles++);
-    }
+  return emit(T_CM_PUSH, 0, 0, rlist, ((int32_t)((uint32_t)(((int32_t)(inst) & (int32_t)(12))) << (2))), LEN_16);
   }
-  CPU_setRegisterU(cpu, 2, (sp - stack_adj));
-  return;
-  }
-  case 47618:
-  {
+  if ((masked == 47618)) {
   int32_t rlist = ((uint32_t)(((int32_t)(inst) & (int32_t)(240))) >> (4));
-  int32_t spimm = ((int32_t)((uint32_t)(((int32_t)(inst) & (int32_t)(12))) << (2)));
-  int32_t stack_adj = (stack_adj_base[rlist] + spimm);
-  uint32_t sp = CPU_getRegisterU(cpu, 2);
-  int32_t addr = ((sp + stack_adj) - 4);
-  {
-    int32_t __forof_idx = rlist;
-    for (int32_t __forof_i = 0; __forof_i < xreg_list_lens[__forof_idx]; __forof_i++) {
-      int32_t reg = xreg_list[__forof_idx][__forof_i];
-  CPU_setRegisterU(cpu, reg, RP2350_readUint32(cpu->chip, addr));
-  (addr -= 4);
-  (cpu->cycles++);
-    }
+  return emit(T_CM_POP, 0, 0, rlist, ((int32_t)((uint32_t)(((int32_t)(inst) & (int32_t)(12))) << (2))), LEN_16);
   }
-  CPU_setRegisterU(cpu, 2, (sp + stack_adj));
-  return;
-  }
-  case 48130:
-  {
+  if ((masked == 48130)) {
   int32_t rlist = ((uint32_t)(((int32_t)(inst) & (int32_t)(240))) >> (4));
-  int32_t spimm = ((int32_t)((uint32_t)(((int32_t)(inst) & (int32_t)(12))) << (2)));
-  int32_t stack_adj = (stack_adj_base[rlist] + spimm);
-  uint32_t sp = CPU_getRegisterU(cpu, 2);
-  int32_t addr = ((sp + stack_adj) - 4);
-  {
-    int32_t __forof_idx = rlist;
-    for (int32_t __forof_i = 0; __forof_i < xreg_list_lens[__forof_idx]; __forof_i++) {
-      int32_t reg = xreg_list[__forof_idx][__forof_i];
-  CPU_setRegisterU(cpu, reg, RP2350_readUint32(cpu->chip, addr));
-  (addr -= 4);
-  (cpu->cycles++);
-    }
+  return emit(T_CM_POPRETZ, 0, 0, rlist, ((int32_t)((uint32_t)(((int32_t)(inst) & (int32_t)(12))) << (2))), LEN_16);
   }
-  CPU_setRegisterU(cpu, 2, (sp + stack_adj));
-  CPU_setRegister(cpu, 10, 0);
-  (cpu->next_pc = CPU_getRegister(cpu, 1));
-  (cpu->cycles++);
-  return;
-  }
-  case 48642:
-  {
+  if ((masked == 48642)) {
   int32_t rlist = ((uint32_t)(((int32_t)(inst) & (int32_t)(240))) >> (4));
-  int32_t spimm = ((int32_t)((uint32_t)(((int32_t)(inst) & (int32_t)(12))) << (2)));
-  int32_t stack_adj = (stack_adj_base[rlist] + spimm);
-  uint32_t sp = CPU_getRegisterU(cpu, 2);
-  int32_t addr = ((sp + stack_adj) - 4);
-  {
-    int32_t __forof_idx = rlist;
-    for (int32_t __forof_i = 0; __forof_i < xreg_list_lens[__forof_idx]; __forof_i++) {
-      int32_t reg = xreg_list[__forof_idx][__forof_i];
-  CPU_setRegisterU(cpu, reg, RP2350_readUint32(cpu->chip, addr));
-  (addr -= 4);
-  (cpu->cycles++);
-    }
+  return emit(T_CM_POPRET, 0, 0, rlist, ((int32_t)((uint32_t)(((int32_t)(inst) & (int32_t)(12))) << (2))), LEN_16);
   }
-  CPU_setRegisterU(cpu, 2, (sp + stack_adj));
-  (cpu->next_pc = CPU_getRegister(cpu, 1));
-  (cpu->cycles++);
-  return;
-  }
-  }
-  switch (((int32_t)(inst) & (int32_t)(64611))) {
-  case 44066:
-  {
+  int32_t masked2 = ((int32_t)(inst) & (int32_t)(64611));
+  if ((masked2 == 44066)) {
   int32_t r1s = (8 + ((int32_t)(((uint32_t)(inst) >> (7))) & (int32_t)(1)));
   int32_t r2s = (8 + ((int32_t)(((uint32_t)(inst) >> (2))) & (int32_t)(1)));
-  CPU_setRegister(cpu, r1s, CPU_getRegister(cpu, 10));
-  CPU_setRegister(cpu, r2s, CPU_getRegister(cpu, 11));
-  return;
+  return emit(T_CM_MVSA01, r1s, r2s, 10, 11, LEN_16);
   }
-  case 44130:
-  {
+  if ((masked2 == 44130)) {
   int32_t r1s = (8 + ((int32_t)(((uint32_t)(inst) >> (7))) & (int32_t)(1)));
   int32_t r2s = (8 + ((int32_t)(((uint32_t)(inst) >> (2))) & (int32_t)(1)));
-  CPU_setRegister(cpu, 10, CPU_getRegister(cpu, r1s));
-  CPU_setRegister(cpu, 11, CPU_getRegister(cpu, r2s));
-  return;
+  return emit(T_CM_MVA01S, 10, 11, r1s, r2s, LEN_16);
+  }
+  break;
+  }
+  case 6:
+  {
+  int32_t offset = 0;
+  (offset |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CSS_IMM_7_6))) >> (1)));
+  (offset |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CSS_IMM_5_2))) >> (7)));
+  return emit(T_SW, 0, 2, dec_rs2(inst), offset, LEN_16);
   }
   }
-  fprintf(stderr, "Error: %s\n", fmtStr("Unsupported instruction: 0x%x", (unsigned)(inst)));
+  fprintf(stderr, "Error: %s\n", fmtStr("Unsupported compressed instruction: 0x%x", (unsigned)(inst)));
   abort();
 }
 
-static int32_t dec_rd(int32_t inst) {
-  return ((int32_t)(((int32_t)(inst) & (int32_t)(C_C_RD))) >> (7));
-}
-
-static int32_t dec_rs1(int32_t inst) {
-  return ((int32_t)(((int32_t)(inst) & (int32_t)(C_C_RS1))) >> (7));
-}
-
-static int32_t dec_rs2(int32_t inst) {
-  return ((int32_t)(((int32_t)(inst) & (int32_t)(C_C_RS2))) >> (2));
-}
-
-static int32_t dec_rd_short(int32_t inst) {
-  return ((int32_t)(((int32_t)(((int32_t)(inst) & (int32_t)(C_C_RD_S))) >> (2))) | (int32_t)(8));
-}
-
-static int32_t dec_rs1_short(int32_t inst) {
-  return ((int32_t)(((int32_t)(((int32_t)(inst) & (int32_t)(C_C_RS1_S))) >> (7))) | (int32_t)(8));
-}
-
-static int32_t dec_rs2_short(int32_t inst) {
-  return ((int32_t)(((int32_t)(((int32_t)(inst) & (int32_t)(C_C_RS2_S))) >> (2))) | (int32_t)(8));
-}
-
-static int32_t sign_extend(int32_t x, int32_t sign_position) {
-  int32_t sign = ((int32_t)(((int32_t)(x) >> (((int32_t)(sign_position)) & 31))) & (int32_t)(1));
-  for (
-int32_t i = (sign_position + 1)
-; (i < 32); (++i)) {
-  (x |= ((int32_t)((uint32_t)(sign) << (((int32_t)(i)) & 31))));
-  }
-  return x;
-}
-
-static int32_t dec_cr_funct4(int32_t inst) {
-  return ((int32_t)(((int32_t)(inst) & (int32_t)(C_CR_FUNCT4))) >> (12));
-}
-
-static int32_t dec_css_imm(int32_t inst) {
-  int32_t imm = 0;
-  (imm |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CSS_IMM_7_6))) >> (1)));
-  (imm |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CSS_IMM_5_2))) >> (7)));
-  return imm;
-}
-
-static int32_t dec_ciw_imm(int32_t inst) {
-  int32_t imm = 0;
-  (imm |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CIW_IMM_9_6))) >> (1)));
-  (imm |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CIW_IMM_5_4))) >> (7)));
-  (imm |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CIW_IMM_3))) >> (2)));
-  (imm |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CIW_IMM_2))) >> (4)));
-  assert((imm != 0));
-  return imm;
-}
-
-static int32_t dec_clw_csw_imm(int32_t inst) {
-  int32_t imm = 0;
-  (imm |= ((int32_t)((uint32_t)(((int32_t)(inst) & (int32_t)(C_CLWSW_IMM_6))) << (1))));
-  (imm |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CLWSW_IMM_5_3))) >> (7)));
-  (imm |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CLWSW_IMM_2))) >> (4)));
-  return imm;
-}
-
-static int32_t dec_cs_funct6(int32_t inst) {
-  return ((int32_t)(((int32_t)(inst) & (int32_t)(C_CS_FUNCT6))) >> (10));
-}
-
-static int32_t dec_cs_funct2(int32_t inst) {
-  return ((int32_t)(((int32_t)(inst) & (int32_t)(C_CS_FUNCT2))) >> (5));
-}
-
-static int32_t dec_cb_funct2(int32_t inst) {
-  return ((int32_t)(((int32_t)(inst) & (int32_t)(C_CB_FUNCT2))) >> (10));
-}
-
-static int32_t dec_branch_imm(int32_t inst) {
-  int32_t imm = 0;
-  (imm |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CB_OFFSET_8))) >> (4)));
-  (imm |= ((int32_t)((uint32_t)(((int32_t)(inst) & (int32_t)(C_CB_OFFSET_7_6))) << (1))));
-  (imm |= ((int32_t)((uint32_t)(((int32_t)(inst) & (int32_t)(C_CB_OFFSET_5))) << (3))));
-  (imm |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CB_OFFSET_4_3))) >> (7)));
-  (imm |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CB_OFFSET_2_1))) >> (2)));
-  (imm = sign_extend(imm, 8));
-  return imm;
-}
-
-static int32_t dec_cj_imm(int32_t inst) {
+static int32_t decCjImm(int32_t inst) {
   int32_t imm = 0;
   (imm |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CJ_OFFSET_11))) >> (1)));
   (imm |= ((int32_t)((uint32_t)(((int32_t)(inst) & (int32_t)(C_CJ_OFFSET_10))) << (2))));
@@ -15915,23 +23162,493 @@ static int32_t dec_cj_imm(int32_t inst) {
   (imm |= ((int32_t)((uint32_t)(((int32_t)(inst) & (int32_t)(C_CJ_OFFSET_5))) << (3))));
   (imm |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CJ_OFFSET_4))) >> (7)));
   (imm |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CJ_OFFSET_3_1))) >> (2)));
-  (imm = sign_extend(imm, 11));
-  return imm;
+  return sign_extend(imm, 11);
 }
 
-// ─── rp2350.ts ───
-static const char* LOG_NAME = "RP2350";
+static int32_t decBranchImm(int32_t inst) {
+  int32_t imm = 0;
+  (imm |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CB_OFFSET_8))) >> (4)));
+  (imm |= ((int32_t)((uint32_t)(((int32_t)(inst) & (int32_t)(C_CB_OFFSET_7_6))) << (1))));
+  (imm |= ((int32_t)((uint32_t)(((int32_t)(inst) & (int32_t)(C_CB_OFFSET_5))) << (3))));
+  (imm |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CB_OFFSET_4_3))) >> (7)));
+  (imm |= ((int32_t)(((int32_t)(inst) & (int32_t)(C_CB_OFFSET_2_1))) >> (2)));
+  return sign_extend(imm, 8);
+}
+
+// ─── index.ts ───
+// ─── rp2040.ts ───
+static const char* LOG_NAME = "RP2040";
 enum { KB = (1024) };
 enum { MB = (1048576) }; /* (1024 * KB) */
 enum { MHz = (1000000) };
-enum { FLASH_SIZE = (16777216) }; /* (16 * MB) */
+static void RP2040_onTrace_default(void* __ctx, int32_t coreNumber, int32_t pc, const char* tag) {
+  RP2040* self = (RP2040*)__ctx;
+}
+
+static void RP2040_invalidateFlashDecode(RP2040* self, int32_t address, int32_t len) {
+}
+
+static CortexM0Core* RP2040_core0_get(RP2040* self) {
+  return self->core[0];
+}
+
+static CortexM0Core* RP2040_core1_get(RP2040* self) {
+  return self->core[1];
+}
+
+static RP2040* RP2040_new(RP2040Options* options) {
+  RP2040* self = calloc(1, sizeof(RP2040));
+  (self)->__vtable_IRPChip = &RP2040_IRPChip_vtable;
+  self->bootrom = calloc((4 * KB), sizeof(uint32_t));
+  self->sram = calloc((264 * KB), sizeof(uint8_t));
+  self->sramView = (uint8_t*)(self->sram);
+  self->flash = calloc((16 * MB), sizeof(uint8_t));
+  self->flash16 = (uint16_t*)(self->flash);
+  self->flashView = (uint8_t*)(self->flash);
+  self->usbDPRAM = calloc((4 * KB), sizeof(uint8_t));
+  self->usbDPRAMView = (uint8_t*)(self->usbDPRAM);
+  self->identifier = "rp2040";
+  self->core[0] = CortexM0Core_new(self, "CortexM0Core0", 0);
+  self->core[1] = CortexM0Core_new(self, "CortexM0Core1", 1);
+  self->clock = SimulationClock_new(125e6);
+  self->clkSys = (125 * MHz);
+  self->clkPeri = (125 * MHz);
+  self->ppb = RPPPB_new(self, "PPB");
+  self->sio = RPSIO_new(self, IRQ_SIO_PROC0, IRQ_SIO_PROC1);
+  self->uart[0] = RPUART__RP2040_new(self, "UART0", IRQ_UART0, memcpy(malloc(sizeof(IUARTDMAChannels)), &(IUARTDMAChannels){ .rx = DREQChannel_DREQ_UART0_RX, .tx = DREQChannel_DREQ_UART0_TX }, sizeof(IUARTDMAChannels)));
+  self->uart[1] = RPUART__RP2040_new(self, "UART1", IRQ_UART1, memcpy(malloc(sizeof(IUARTDMAChannels)), &(IUARTDMAChannels){ .rx = DREQChannel_DREQ_UART1_RX, .tx = DREQChannel_DREQ_UART1_TX }, sizeof(IUARTDMAChannels)));
+  self->i2c[0] = RPI2C__RP2040_new(self, "I2C0", IRQ_I2C0);
+  self->i2c[1] = RPI2C__RP2040_new(self, "I2C1", IRQ_I2C1);
+  self->pwm = RPPWM__RP2040_new(self, "PWM_BASE", IRQ_PWM_WRAP, DREQChannel_DREQ_PWM_WRAP0);
+  self->adc = RPADC__RP2040_new(self, "ADC", IRQ_ADC_FIFO, DREQChannel_DREQ_ADC);
+  for (int32_t i = 0; i < 30; i++) {
+    self->gpio[i] = GPIOPin__RP2040_new(self, i, 0);
+  }
+  self->qspi[0] = GPIOPin__RP2040_new(self, 0, "SCLK");
+  self->qspi[1] = GPIOPin__RP2040_new(self, 1, "SS");
+  self->qspi[2] = GPIOPin__RP2040_new(self, 2, "SD0");
+  self->qspi[3] = GPIOPin__RP2040_new(self, 3, "SD1");
+  self->qspi[4] = GPIOPin__RP2040_new(self, 4, "SD2");
+  self->qspi[5] = GPIOPin__RP2040_new(self, 5, "SD3");
+  self->dma = RPDMA_new(self, "DMA", IRQ_DMA_IRQ0);
+  self->pio[0] = RPPIO__RP2040_new(self, "PIO0", IRQ_PIO0_IRQ0, 0, DREQChannel_DREQ_PIO0_RX0, DREQChannel_DREQ_PIO0_TX0);
+  self->pio[1] = RPPIO__RP2040_new(self, "PIO1", IRQ_PIO1_IRQ0, 1, DREQChannel_DREQ_PIO1_RX0, DREQChannel_DREQ_PIO1_TX0);
+  self->usbCtrl = RPUSBController__RP2040_new(self, "USB", IRQ_USBCTRL);
+  self->spi[0] = RPSPI__RP2040_new(self, "SPI0", IRQ_SPI0, memcpy(malloc(sizeof(ISPIDMAChannels)), &(ISPIDMAChannels){ .rx = DREQChannel_DREQ_SPI0_RX, .tx = DREQChannel_DREQ_SPI0_TX }, sizeof(ISPIDMAChannels)));
+  self->spi[1] = RPSPI__RP2040_new(self, "SPI1", IRQ_SPI1, memcpy(malloc(sizeof(ISPIDMAChannels)), &(ISPIDMAChannels){ .rx = DREQChannel_DREQ_SPI1_RX, .tx = DREQChannel_DREQ_SPI1_TX }, sizeof(ISPIDMAChannels)));
+  self->logger = ConsoleLogger_new(LogLevel_Debug, true);
+  self->peripherals = calloc(328449, sizeof(Peripheral));
+  self->peripherals[98304] = (Peripheral){ .obj = (void*)(RPSSI_new(self, "SSI")), .vtable = &RPSSI_Peripheral_vtable };
+  self->peripherals[262144] = (Peripheral){ .obj = (void*)(RP2040SysInfo_new(self, "SYSINFO_BASE")), .vtable = &RP2040SysInfo_Peripheral_vtable };
+  self->peripherals[262148] = (Peripheral){ .obj = (void*)(RP2040SysCfg_new(self, "SYSCFG")), .vtable = &RP2040SysCfg_Peripheral_vtable };
+  self->peripherals[262152] = (Peripheral){ .obj = (void*)(RPClocks__RP2040_new(self, "CLOCKS_BASE")), .vtable = &RPClocks__RP2040_Peripheral_vtable };
+  self->peripherals[262156] = (Peripheral){ .obj = (void*)(RPReset__RP2040_new(self, "RESETS_BASE")), .vtable = &RPReset__RP2040_Peripheral_vtable };
+  self->peripherals[262160] = (Peripheral){ .obj = (void*)(UnimplementedPeripheral_new((RP2350*)(self), "PSM_BASE")), .vtable = &UnimplementedPeripheral_Peripheral_vtable };
+  self->peripherals[262164] = (Peripheral){ .obj = (void*)(RPIO_new(self, "IO_BANK0_BASE")), .vtable = &RPIO_Peripheral_vtable };
+  self->peripherals[262168] = (Peripheral){ .obj = (void*)(UnimplementedPeripheral_new((RP2350*)(self), "IO_QSPI_BASE")), .vtable = &UnimplementedPeripheral_Peripheral_vtable };
+  self->peripherals[262172] = (Peripheral){ .obj = (void*)(RPPADS_new(self, "PADS_BANK0_BASE", "bank0")), .vtable = &RPPADS_Peripheral_vtable };
+  self->peripherals[262176] = (Peripheral){ .obj = (void*)(RPPADS_new(self, "PADS_QSPI_BASE", "qspi")), .vtable = &RPPADS_Peripheral_vtable };
+  self->peripherals[262180] = (Peripheral){ .obj = (void*)(UnimplementedPeripheral_new((RP2350*)(self), "XOSC_BASE")), .vtable = &UnimplementedPeripheral_Peripheral_vtable };
+  self->peripherals[262184] = (Peripheral){ .obj = (void*)(UnimplementedPeripheral_new((RP2350*)(self), "PLL_SYS_BASE")), .vtable = &UnimplementedPeripheral_Peripheral_vtable };
+  self->peripherals[262188] = (Peripheral){ .obj = (void*)(UnimplementedPeripheral_new((RP2350*)(self), "PLL_USB_BASE")), .vtable = &UnimplementedPeripheral_Peripheral_vtable };
+  self->peripherals[262192] = (Peripheral){ .obj = (void*)(RPBUSCTRL__RP2040_new(self, "BUSCTRL_BASE")), .vtable = &RPBUSCTRL__RP2040_Peripheral_vtable };
+  self->peripherals[262196] = (Peripheral){ .obj = (void*)(self->uart[0]), .vtable = &RPUART__RP2040_Peripheral_vtable };
+  self->peripherals[262200] = (Peripheral){ .obj = (void*)(self->uart[1]), .vtable = &RPUART__RP2040_Peripheral_vtable };
+  self->peripherals[262204] = (Peripheral){ .obj = (void*)(self->spi[0]), .vtable = &RPSPI__RP2040_Peripheral_vtable };
+  self->peripherals[262208] = (Peripheral){ .obj = (void*)(self->spi[1]), .vtable = &RPSPI__RP2040_Peripheral_vtable };
+  self->peripherals[262212] = (Peripheral){ .obj = (void*)(self->i2c[0]), .vtable = &RPI2C__RP2040_Peripheral_vtable };
+  self->peripherals[262216] = (Peripheral){ .obj = (void*)(self->i2c[1]), .vtable = &RPI2C__RP2040_Peripheral_vtable };
+  self->peripherals[262220] = (Peripheral){ .obj = (void*)(self->adc), .vtable = &RPADC__RP2040_Peripheral_vtable };
+  self->peripherals[262224] = (Peripheral){ .obj = (void*)(self->pwm), .vtable = &RPPWM__RP2040_Peripheral_vtable };
+  self->peripherals[262228] = (Peripheral){ .obj = (void*)(RPTimer__RP2040_new(self, "TIMER_BASE", IRQ_TIMER_0)), .vtable = &RPTimer__RP2040_Peripheral_vtable };
+  self->peripherals[262232] = (Peripheral){ .obj = (void*)(RPWatchdog__RP2040_new(self, "WATCHDOG_BASE")), .vtable = &RPWatchdog__RP2040_Peripheral_vtable };
+  self->peripherals[262236] = (Peripheral){ .obj = (void*)(RP2040RTC_new(self, "RTC_BASE")), .vtable = &RP2040RTC_Peripheral_vtable };
+  self->peripherals[262240] = (Peripheral){ .obj = (void*)(UnimplementedPeripheral_new((RP2350*)(self), "ROSC_BASE")), .vtable = &UnimplementedPeripheral_Peripheral_vtable };
+  self->peripherals[262244] = (Peripheral){ .obj = (void*)(RP2040VregAndChipReset_new((RP2350*)(self), "VREG_AND_CHIP_RESET_BASE")), .vtable = &RP2040VregAndChipReset_Peripheral_vtable };
+  self->peripherals[262252] = (Peripheral){ .obj = (void*)(RPTBMAN__RP2040_new(self, "TBMAN_BASE")), .vtable = &RPTBMAN__RP2040_Peripheral_vtable };
+  self->peripherals[327680] = (Peripheral){ .obj = (void*)(self->dma), .vtable = &RPDMA_Peripheral_vtable };
+  self->peripherals[327952] = (Peripheral){ .obj = (void*)(self->usbCtrl), .vtable = &RPUSBController__RP2040_Peripheral_vtable };
+  self->peripherals[328192] = (Peripheral){ .obj = (void*)(self->pio[0]), .vtable = &RPPIO__RP2040_Peripheral_vtable };
+  self->peripherals[328448] = (Peripheral){ .obj = (void*)(self->pio[1]), .vtable = &RPPIO__RP2040_Peripheral_vtable };
+  self->onTrace_fn = RP2040_onTrace_default;
+  self->onTrace_ctx = self;
+  self->currentCore = 0;
+  self->disassembly = "";
+  self->pioActiveSmCount = 0;
+  self->pioActivePioCount = 0;
+  memcpy(self->bootrom, bootromB1, sizeof(bootromB1));
+  /* memset */ memset(self->flash, 255, ((16 * MB)) * sizeof(uint8_t));
+  RP2040_reset(self);
+  CortexM0Core_setOtherCore(self->core[0], (ICpuCore){ .obj = (void*)(self->core[1]), .vtable = &CortexM0Core_ICpuCore_vtable });
+  CortexM0Core_setOtherCore(self->core[1], (ICpuCore){ .obj = (void*)(self->core[0]), .vtable = &CortexM0Core_ICpuCore_vtable });
+  if (options->loadFirmware) {
+  RP2040_loadFirmware(self, options->loadFirmware, 0);
+  }
+  return self;
+}
+
+static void RP2040_loadBootrom(RP2040* self, uint32_t* bootromData) {
+  /* TODO: .set() [src/rp2040.ts:194: this.bootrom.set(bootromData);] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", ".set() [src/rp2040.ts:194: this.bootrom.set(bootromData);]"); abort(); 0; }));
+  RP2040_reset(self);
+}
+
+static void RP2040_loadDisassembly(RP2040* self, const char* dis) {
+  (self->disassembly = dis);
+}
+
+static LoadFirmwareResult* RP2040_loadFirmware(RP2040* self, const char* path, LoadFirmwareOptions* options) {
+  return loadFirmware__RP2040(self, path, options);
+}
+
+static void RP2040_reset(RP2040* self) {
+  {
+    int32_t __forof_n = 2;
+    for (int32_t __forof_i = 0; __forof_i < __forof_n; __forof_i++) {
+      CortexM0Core* c = self->core[__forof_i];
+  CortexM0Core_reset(c);
+    }
+  }
+  RPPWM__RP2040_reset(self->pwm);
+  (self->qspi[1]->padValue = 86);
+  GPIOPin__RP2040_setInputValue(self->qspi[1], true);
+}
+
+static uint32_t RP2040_readUint32(RP2040* self, uint32_t address) {
+  (address = ((uint32_t)(address) >> (0)));
+  if (((int32_t)(address) & (int32_t)(3))) {
+  /* TODO: log [src/rp2040.ts:224: this.logger.error(] */ 0;
+  }
+  RP2040* __destruct_tmp_1 = self;
+  uint32_t* bootrom = __destruct_tmp_1->bootrom;
+  if ((address < ((4 * KB) * 4))) {
+  return bootrom[(address / 4)];
+  } else {
+  if (((address >= FLASH_START_ADDRESS) && (address < FLASH_END_ADDRESS))) {
+  int32_t offset = ((int32_t)(address) & (int32_t)(16777215));
+  return (*(uint32_t*)((self->flashView) + (offset)));
+  } else {
+  if (((address >= RAM_START_ADDRESS) && (address < (RAM_START_ADDRESS + (264 * KB))))) {
+  return (*(uint32_t*)((self->sramView) + ((address - RAM_START_ADDRESS))));
+  } else {
+  if (((address >= DPRAM_START_ADDRESS) && (address < (DPRAM_START_ADDRESS + (4 * KB))))) {
+  return (*(uint32_t*)((self->usbDPRAMView) + ((address - DPRAM_START_ADDRESS))));
+  } else {
+  if ((((uint32_t)(address) >> (12)) == 917518)) {
+  return RPPPB_readUint32ViaCore(self->ppb, ((int32_t)(address) & (int32_t)(4095)), self->currentCore);
+  } else {
+  if (((address >= SIO_START_ADDRESS) && (address < (SIO_START_ADDRESS + 268435456)))) {
+  return RPSIO_readUint32(self->sio, (address - SIO_START_ADDRESS), self->currentCore);
+  }
+  }
+  }
+  }
+  }
+  }
+  Peripheral peripheral = RP2040_findPeripheral(self, address);
+  if ((peripheral).obj) {
+  return Peripheral_readUint32(peripheral, ((int32_t)(address) & (int32_t)(16383)));
+  }
+  /* TODO: log [src/rp2040.ts:259: this.logger.warn(LOG_NAME, `Read from invalid memory address: ${address.toString] */ 0;
+  return 4294967295u;
+}
+
+static Peripheral RP2040_findPeripheral(RP2040* self, uint32_t address) {
+  return self->peripherals[((int32_t)((uint32_t)(((uint32_t)(address) >> (14))) << (2)))];
+}
+
+static uint32_t RP2040_readUint16(RP2040* self, uint32_t address) {
+  if (((address >= FLASH_START_ADDRESS) && (address < (FLASH_START_ADDRESS + (16 * MB))))) {
+  return (*(uint16_t*)((self->flashView) + ((address - FLASH_START_ADDRESS))));
+  } else {
+  if (((address >= RAM_START_ADDRESS) && (address < (RAM_START_ADDRESS + (264 * KB))))) {
+  return (*(uint16_t*)((self->sramView) + ((address - RAM_START_ADDRESS))));
+  }
+  }
+  uint32_t value = RP2040_readUint32(self, ((int32_t)(address) & (int32_t)(4294967292u)));
+  return (((int32_t)(address) & (int32_t)(2)) ? ((uint32_t)(((int32_t)(value) & (int32_t)(4294901760u))) >> (16)) : ((int32_t)(value) & (int32_t)(65535)));
+}
+
+static uint32_t RP2040_readUint8(RP2040* self, uint32_t address) {
+  if (((address >= FLASH_START_ADDRESS) && (address < (FLASH_START_ADDRESS + (16 * MB))))) {
+  return self->flash[(address - FLASH_START_ADDRESS)];
+  } else {
+  if (((address >= RAM_START_ADDRESS) && (address < (RAM_START_ADDRESS + (264 * KB))))) {
+  return self->sram[(address - RAM_START_ADDRESS)];
+  }
+  }
+  uint32_t value = RP2040_readUint16(self, ((int32_t)(address) & (int32_t)(4294967294u)));
+  return ((uint32_t)((((int32_t)(address) & (int32_t)(1)) ? ((uint32_t)(((int32_t)(value) & (int32_t)(65280))) >> (8)) : ((int32_t)(value) & (int32_t)(255)))) >> (0));
+}
+
+static void RP2040_writeUint32(RP2040* self, uint32_t address, uint32_t value) {
+  (address = ((uint32_t)(address) >> (0)));
+  RP2040* __destruct_tmp_1 = self;
+  uint32_t* bootrom = __destruct_tmp_1->bootrom;
+  if ((address < ((4 * KB) * 4))) {
+  (bootrom[(address / 4)] = value);
+  } else {
+  if (((address >= FLASH_START_ADDRESS) && (address < (FLASH_START_ADDRESS + (16 * MB))))) {
+  (*(uint32_t*)((self->flashView) + ((address - FLASH_START_ADDRESS))) = (uint32_t)(value));
+  } else {
+  if (((address >= RAM_START_ADDRESS) && (address < (RAM_START_ADDRESS + (264 * KB))))) {
+  (*(uint32_t*)((self->sramView) + ((address - RAM_START_ADDRESS))) = (uint32_t)(value));
+  } else {
+  if (((address >= DPRAM_START_ADDRESS) && (address < (DPRAM_START_ADDRESS + (4 * KB))))) {
+  int32_t offset = (address - DPRAM_START_ADDRESS);
+  (*(uint32_t*)((self->usbDPRAMView) + (offset)) = (uint32_t)(value));
+  RPUSBController__RP2040_DPRAMUpdated(self->usbCtrl, offset, value);
+  } else {
+  if (((address >= SIO_START_ADDRESS) && (address < (SIO_START_ADDRESS + 268435456)))) {
+  RPSIO_writeUint32(self->sio, (address - SIO_START_ADDRESS), value, self->currentCore);
+  } else {
+  if ((((uint32_t)(address) >> (12)) == 917518)) {
+  RPPPB_writeUint32ViaCore(self->ppb, ((int32_t)(address) & (int32_t)(4095)), value, self->currentCore);
+  } else {
+  Peripheral peripheral = RP2040_findPeripheral(self, address);
+  if ((peripheral).obj) {
+  int32_t atomicType = ((int32_t)(((int32_t)(address) & (int32_t)(12288))) >> (12));
+  int32_t offset = ((int32_t)(address) & (int32_t)(4095));
+  Peripheral_writeUint32Atomic(peripheral, offset, value, atomicType);
+  } else {
+  /* TODO: log [src/rp2040.ts:326: this.logger.warn(LOG_NAME, `Write to undefined address: ${address.toString(16)}`] */ 0;
+  }
+  }
+  }
+  }
+  }
+  }
+  }
+}
+
+static void RP2040_writeUint8(RP2040* self, uint32_t address, uint32_t value) {
+  if (((address >= RAM_START_ADDRESS) && (address < (RAM_START_ADDRESS + (264 * KB))))) {
+  (self->sram[(address - RAM_START_ADDRESS)] = value);
+  return;
+  }
+  int32_t alignedAddress = ((uint32_t)(((int32_t)(address) & (int32_t)(4294967292u))) >> (0));
+  Peripheral peripheral = RP2040_findPeripheral(self, address);
+  if ((peripheral).obj) {
+  int32_t atomicType = ((int32_t)(((int32_t)(alignedAddress) & (int32_t)(12288))) >> (12));
+  int32_t offset = ((int32_t)(alignedAddress) & (int32_t)(4095));
+  Peripheral_writeUint32Atomic(peripheral, offset, ((int32_t)(((int32_t)(((int32_t)(((int32_t)(value) & (int32_t)(255))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(value) & (int32_t)(255))) << (8)))))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(value) & (int32_t)(255))) << (16)))))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(value) & (int32_t)(255))) << (24))))), atomicType);
+  return;
+  }
+  if ((address >= SIO_START_ADDRESS)) {
+  RP2040_writeUint32(self, alignedAddress, ((int32_t)(((int32_t)(((int32_t)(((int32_t)(value) & (int32_t)(255))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(value) & (int32_t)(255))) << (8)))))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(value) & (int32_t)(255))) << (16)))))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(value) & (int32_t)(255))) << (24))))));
+  return;
+  }
+  int32_t shift = ((int32_t)((uint32_t)(((int32_t)(address) & (int32_t)(3))) << (3)));
+  uint32_t originalValue = RP2040_readUint32(self, alignedAddress);
+  RP2040_writeUint32(self, alignedAddress, ((int32_t)(((int32_t)(originalValue) & (int32_t)((~((int32_t)((uint32_t)(255) << (((int32_t)(shift)) & 31))))))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(value) & (int32_t)(255))) << (((int32_t)(shift)) & 31))))));
+}
+
+static void RP2040_writeUint16(RP2040* self, uint32_t address, uint32_t value) {
+  if (((address >= RAM_START_ADDRESS) && (address < (RAM_START_ADDRESS + (264 * KB))))) {
+  (*(uint16_t*)((self->sramView) + ((address - RAM_START_ADDRESS))) = (uint16_t)(value));
+  return;
+  }
+  int32_t alignedAddress = ((uint32_t)(((int32_t)(address) & (int32_t)(4294967292u))) >> (0));
+  Peripheral peripheral = RP2040_findPeripheral(self, address);
+  if ((peripheral).obj) {
+  int32_t atomicType = ((int32_t)(((int32_t)(alignedAddress) & (int32_t)(12288))) >> (12));
+  int32_t offset = ((int32_t)(alignedAddress) & (int32_t)(4095));
+  Peripheral_writeUint32Atomic(peripheral, offset, ((int32_t)(((int32_t)(value) & (int32_t)(65535))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(value) & (int32_t)(65535))) << (16))))), atomicType);
+  return;
+  }
+  if ((address >= SIO_START_ADDRESS)) {
+  RP2040_writeUint32(self, alignedAddress, ((int32_t)(((int32_t)(value) & (int32_t)(65535))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(value) & (int32_t)(65535))) << (16))))));
+  return;
+  }
+  int32_t shift = ((int32_t)((uint32_t)(((int32_t)(address) & (int32_t)(3))) << (3)));
+  uint32_t originalValue = RP2040_readUint32(self, alignedAddress);
+  RP2040_writeUint32(self, alignedAddress, ((int32_t)(((int32_t)(originalValue) & (int32_t)((~((int32_t)((uint32_t)(65535) << (((int32_t)(shift)) & 31))))))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(value) & (int32_t)(65535))) << (((int32_t)(shift)) & 31))))));
+}
+
+static void RP2040_dma_clearDREQ(RP2040* self, int32_t dreq) {
+  RPDMA_clearDREQ(self->dma, dreq);
+}
+
+static void RP2040_dma_setDREQ(RP2040* self, int32_t dreq) {
+  RPDMA_setDREQ(self->dma, dreq);
+}
+
+static int32_t RP2040_cycles_get(RP2040* self) {
+  return CortexM0Core_getCycles(self->core[0]);
+}
+
+static int32_t RP2040_gpioValues(RP2040* self, int32_t start_index) {
+  RP2040* __destruct_tmp_1 = self;
+  GPIOPin__RP2040** gpio = __destruct_tmp_1->gpio;
+  int32_t result = 0;
+  for (
+int32_t gpioIndex = start_index
+; (gpioIndex < 30); (gpioIndex++)) {
+  if (GPIOPin__RP2040_inputValue_get(gpio[gpioIndex])) {
+  (result |= ((int32_t)((uint32_t)(1) << (((int32_t)(gpioIndex)) & 31))));
+  }
+  }
+  return result;
+}
+
+static bool RP2040_gpioRawOutputValue(RP2040* self, int32_t index) {
+  int32_t functionSelect = GPIOPin__RP2040_functionSelect_get(self->gpio[index]);
+  int32_t mask = ((int32_t)((uint32_t)(1) << (((int32_t)(index)) & 31)));
+  switch (functionSelect) {
+  case FUNCTION_PWM:
+  return (!(!((int32_t)(self->pwm->gpioValue) & (int32_t)(mask))));
+  case FUNCTION_SIO:
+  return (!(!((int32_t)(self->sio->gpioValue) & (int32_t)(mask))));
+  case FUNCTION_PIO0:
+  return RPPIO__RP2040_getPinValue(self->pio[0], index);
+  case FUNCTION_PIO1:
+  return RPPIO__RP2040_getPinValue(self->pio[1], index);
+  default:
+  return false;
+  }
+  return (bool){0};
+}
+
+static bool RP2040_gpioRawOutputEnable(RP2040* self, int32_t index) {
+  int32_t functionSelect = GPIOPin__RP2040_functionSelect_get(self->gpio[index]);
+  int32_t mask = ((int32_t)((uint32_t)(1) << (((int32_t)(index)) & 31)));
+  switch (functionSelect) {
+  case FUNCTION_PWM:
+  return (!(!((int32_t)(self->pwm->gpioDirection) & (int32_t)(mask))));
+  case FUNCTION_SIO:
+  return (!(!((int32_t)(self->sio->gpioOutputEnable) & (int32_t)(mask))));
+  case FUNCTION_PIO0:
+  return RPPIO__RP2040_getPinOutputEnabled(self->pio[0], index);
+  case FUNCTION_PIO1:
+  return RPPIO__RP2040_getPinOutputEnabled(self->pio[1], index);
+  default:
+  return false;
+  }
+  return (bool){0};
+}
+
+static void RP2040_gpioInputValueHasBeenSet(RP2040* self, int32_t index) {
+  if ((GPIOPin__RP2040_functionSelect_get(self->gpio[index]) == FUNCTION_PWM)) {
+  RPPWM__RP2040_gpioOnInput(self->pwm, index);
+  }
+  {
+    int32_t __forof_n = 2;
+    for (int32_t __forof_i = 0; __forof_i < __forof_n; __forof_i++) {
+      RPPIO__RP2040* pio = self->pio[__forof_i];
+  {
+    int32_t __forof_n = 4;
+    for (int32_t __forof_i = 0; __forof_i < __forof_n; __forof_i++) {
+      StateMachine__RP2040* machine = pio->machines[__forof_i];
+  if ((((StateMachine__RP2040_enabled_get(machine) && machine->waiting) && (machine->waitType == WaitType_Pin)) && (machine->waitIndex == index))) {
+  StateMachine__RP2040_checkWait(machine);
+  }
+    }
+  }
+    }
+  }
+}
+
+static void RP2040_setInterrupt(RP2040* self, int32_t irq, bool value) {
+  CortexM0Core_setInterrupt(RP2040_core0_get(self), irq, value);
+  CortexM0Core_setInterrupt(RP2040_core1_get(self), irq, value);
+}
+
+static void RP2040_setInterruptCore(RP2040* self, int32_t irq, bool value, int32_t core) {
+  CortexM0Core_setInterrupt(self->core[core], irq, value);
+}
+
+static void RP2040_updateIOInterrupt(RP2040* self) {
+  int32_t interruptValue = false;
+  {
+    int32_t __forof_n = 30;
+    for (int32_t __forof_i = 0; __forof_i < __forof_n; __forof_i++) {
+      GPIOPin__RP2040* pin = self->gpio[__forof_i];
+  if (GPIOPin__RP2040_irqValue_get(pin)) {
+  (interruptValue = true);
+  }
+    }
+  }
+  RP2040_setInterrupt(self, IRQ_IO_BANK0, interruptValue);
+}
+
+static int32_t RP2040_stepCores(RP2040* self) {
+  int64_t core0StartCycles = CortexM0Core_getCycles(self->core[0]);
+  (self->currentCore = 0);
+  CortexM0Core_executeInstruction(self->core[0]);
+  (self->currentCore = 1);
+  int64_t core0Cycles = CortexM0Core_getCycles(self->core[0]);
+  CortexM0Core_executeInstructionsUpTo(self->core[1], core0Cycles);
+  return (core0Cycles - core0StartCycles);
+}
+
+static void RP2040_updatePioActiveLists(RP2040* self) {
+  int32_t smCount = 0;
+  int32_t pioCount = 0;
+  {
+    int32_t __forof_n = 2;
+    for (int32_t __forof_i = 0; __forof_i < __forof_n; __forof_i++) {
+      RPPIO__RP2040* pio = self->pio[__forof_i];
+  if (pio->machinesRunning) {
+  (self->pioActivePios[pioCount] = pio);
+  (pioCount++);
+  for (
+int32_t i = 0
+; (i < 4); (i++)) {
+  if (((int32_t)(pio->machinesRunning) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(i)) & 31)))))) {
+  (self->pioActiveSms[smCount] = pio->machines[i]);
+  (smCount++);
+  }
+  }
+  }
+    }
+  }
+  (self->pioActiveSmCount = smCount);
+  (self->pioActivePioCount = pioCount);
+}
+
+__attribute__((noinline)) static void RP2040_stepPios(RP2040* self, int32_t cycles) {
+  for (
+int32_t cycle = 0
+; (cycle < cycles); (cycle++)) {
+  for (
+int32_t i = 0
+; (i < self->pioActiveSmCount); (i++)) {
+  StateMachine__RP2040_stepUnchecked(self->pioActiveSms[i]);
+  }
+  for (
+int32_t i = 0
+; (i < self->pioActivePioCount); (i++)) {
+  RPPIO__RP2040_checkChangedPins(self->pioActivePios[i]);
+  }
+  }
+}
+
+static void RP2040_stepThings(RP2040* self, int32_t cycles) {
+  if (self->pioActiveSmCount) {
+  RP2040_stepPios(self, cycles);
+  }
+  int32_t cycleNanos = ((double)(1e9) / (double)(self->clkSys));
+  SimulationClock_tick(self->clock, (cycles * cycleNanos));
+}
+
+static void RP2040_step(RP2040* self) {
+  RP2040_stepThings(self, RP2040_stepCores(self));
+}
+
+static void RP2040_stop(RP2040* self) {
+}
+
+static void RP2040_execute(RP2040* self) {
+}
+
+// ─── rp2350.ts ───
+enum { FLASH_SIZE__rp2350 = (16777216) }; /* (16 * MB) */
 static void RP2350_onTrace_default(void* __ctx, int32_t coreNumber, int32_t pc, const char* tag) {
   RP2350* self = (RP2350*)__ctx;
 }
 
 static void RP2350_watchdog_onWatchdogTrigger_closure0(void* __ctx) {
   RP2350* self = (RP2350*)__ctx;
-  /* TODO: log [src/rp2350.ts:336: this.logger.warn('WATCHDOG', 'Watchdog fired — resetting chip');] */ 0;
+  /* TODO: log [src/rp2350.ts:347: this.logger.warn('WATCHDOG', 'Watchdog fired — resetting chip');] */ 0;
   RP2350_reset(self, false);
   RPWatchdog_reset(self->watchdog);
 }
@@ -15965,19 +23682,21 @@ static RP2350* RP2350_new(RP2350Options* options) {
   (self)->__vtable_IRPChip = &RP2350_IRPChip_vtable;
   self->bootrom = calloc((((uint32_t)(32) >> (2)) * KB), sizeof(uint32_t));
   self->bootromBytes = ((((uint32_t)(32) >> (2)) * KB) * 4);
-  self->sram = calloc((((256 * 2) + 8) * KB), sizeof(uint8_t));
+  self->sram = calloc((((256 * 2) + 8) * 1024), sizeof(uint8_t));
   self->sram32 = (uint32_t*)(self->sram);
   self->sram16 = (uint16_t*)(self->sram);
-  self->flash = calloc(FLASH_SIZE, sizeof(uint8_t));
+  self->flash = calloc(FLASH_SIZE__rp2350, sizeof(uint8_t));
   self->flash16 = (uint16_t*)(self->flash);
   self->flash32 = (uint32_t*)(self->flash);
   self->usbDPRAM = calloc((4 * KB), sizeof(uint8_t));
   self->usbDPRAMView = (uint8_t*)(self->usbDPRAM);
+  self->sramDecode = calloc(((double)((((256 * 2) + 8) * 1024)) / (double)(2)), sizeof(uint64_t));
+  self->flashDecode = calloc(((double)(FLASH_SIZE__rp2350) / (double)(2)), sizeof(uint64_t));
   self->identifier = "rp2350";
-  self->clock = SimulationClock_new(125000000);
+  self->clock = SimulationClock_new(125e6);
   self->clkSys = (125 * MHz);
   self->clkPeri = (125 * MHz);
-  self->sio = RPSIO_new(self, IRQ2350_SIO_IRQ_FIFO, IRQ2350_SIO_IRQ_FIFO, IRQ2350_SIO_IRQ_MTIMECMP);
+  self->sio = RP2350SIO_new(self, IRQ2350_SIO_IRQ_FIFO, IRQ2350_SIO_IRQ_FIFO, IRQ2350_SIO_IRQ_MTIMECMP);
   self->otp = RP2350OTP_new(self, "OTP_BASE");
   self->watchdog = RPWatchdog_new(self, "WATCHDOG_BASE");
   self->uart[0] = RPUART_new(self, "UART0", IRQ2350_UART0_IRQ, memcpy(malloc(sizeof(IUARTDMAChannels)), &(IUARTDMAChannels){ .rx = DREQChannel_DREQ_UART0_RX, .tx = DREQChannel_DREQ_UART0_TX }, sizeof(IUARTDMAChannels)));
@@ -15995,7 +23714,7 @@ static RP2350* RP2350_new(RP2350Options* options) {
   self->qspi[3] = GPIOPin_new(self, 3, "SD1");
   self->qspi[4] = GPIOPin_new(self, 4, "SD2");
   self->qspi[5] = GPIOPin_new(self, 5, "SD3");
-  self->dma = RPDMA_new(self, "DMA", IRQ2350_DMA_IRQ_0);
+  self->dma = RP2350DMA_new(self, "DMA", IRQ2350_DMA_IRQ_0);
   self->pio[0] = RPPIO_new(self, "PIO0", IRQ2350_PIO0_IRQ_0, 0, DREQChannel_DREQ_PIO0_RX0, DREQChannel_DREQ_PIO0_TX0);
   self->pio[1] = RPPIO_new(self, "PIO1", IRQ2350_PIO1_IRQ_0, 1, DREQChannel_DREQ_PIO1_RX0, DREQChannel_DREQ_PIO1_TX0);
   self->pio[2] = RPPIO_new(self, "PIO2", IRQ2350_PIO2_IRQ_0, 2, DREQChannel_DREQ_PIO2_RX0, DREQChannel_DREQ_PIO2_TX0);
@@ -16003,16 +23722,18 @@ static RP2350* RP2350_new(RP2350Options* options) {
   self->spi[0] = RPSPI_new(self, "SPI0", IRQ2350_SPI0_IRQ, memcpy(malloc(sizeof(ISPIDMAChannels)), &(ISPIDMAChannels){ .rx = DREQChannel_DREQ_SPI0_RX, .tx = DREQChannel_DREQ_SPI0_TX }, sizeof(ISPIDMAChannels)));
   self->spi[1] = RPSPI_new(self, "SPI1", IRQ2350_SPI1_IRQ, memcpy(malloc(sizeof(ISPIDMAChannels)), &(ISPIDMAChannels){ .rx = DREQChannel_DREQ_SPI1_RX, .tx = DREQChannel_DREQ_SPI1_TX }, sizeof(ISPIDMAChannels)));
   self->logger = ConsoleLogger_new(LogLevel_Debug, true);
+  self->ioQspi = RPIOQSPI_new(self, "IO_QSPI_BASE");
+  self->xipQmi = RPXIPQMI_new(self, "XIP_QMI_BASE");
   self->peripherals = calloc(328705, sizeof(Peripheral));
   self->peripherals[262144] = (Peripheral){ .obj = (void*)(RP2350SysInfo_new(self, "SYSINFO_BASE")), .vtable = &RP2350SysInfo_Peripheral_vtable };
   self->peripherals[262152] = (Peripheral){ .obj = (void*)(RP2350SysCfg_new(self, "SYSCFG")), .vtable = &RP2350SysCfg_Peripheral_vtable };
   self->peripherals[262160] = (Peripheral){ .obj = (void*)(RPClocks_new(self, "CLOCKS_BASE")), .vtable = &RPClocks_Peripheral_vtable };
   self->peripherals[262168] = (Peripheral){ .obj = (void*)(RP2350PSM_new(self, "PSM_BASE")), .vtable = &RP2350PSM_Peripheral_vtable };
   self->peripherals[262176] = (Peripheral){ .obj = (void*)(RPReset_new(self, "RESETS_BASE")), .vtable = &RPReset_Peripheral_vtable };
-  self->peripherals[262184] = (Peripheral){ .obj = (void*)(RPIO_new(self, "IO_BANK0_BASE")), .vtable = &RPIO_Peripheral_vtable };
-  self->peripherals[262192] = (Peripheral){ .obj = (void*)(UnimplementedPeripheral_new(self, "IO_QSPI_BASE")), .vtable = &UnimplementedPeripheral_Peripheral_vtable };
-  self->peripherals[262200] = (Peripheral){ .obj = (void*)(RPPADS_new(self, "PADS_BANK0_BASE", "bank0")), .vtable = &RPPADS_Peripheral_vtable };
-  self->peripherals[262208] = (Peripheral){ .obj = (void*)(RPPADS_new(self, "PADS_QSPI_BASE", "qspi")), .vtable = &RPPADS_Peripheral_vtable };
+  self->peripherals[262184] = (Peripheral){ .obj = (void*)(RP2350IO_new(self, "IO_BANK0_BASE")), .vtable = &RP2350IO_Peripheral_vtable };
+  self->peripherals[262192] = (Peripheral){ .obj = (void*)(self->ioQspi), .vtable = &RPIOQSPI_Peripheral_vtable };
+  self->peripherals[262200] = (Peripheral){ .obj = (void*)(RP2350PADS_new(self, "PADS_BANK0_BASE", "bank0")), .vtable = &RP2350PADS_Peripheral_vtable };
+  self->peripherals[262208] = (Peripheral){ .obj = (void*)(RP2350PADS_new(self, "PADS_QSPI_BASE", "qspi")), .vtable = &RP2350PADS_Peripheral_vtable };
   self->peripherals[262216] = (Peripheral){ .obj = (void*)(UnimplementedPeripheral_new(self, "XOSC_BASE")), .vtable = &UnimplementedPeripheral_Peripheral_vtable };
   self->peripherals[262224] = (Peripheral){ .obj = (void*)(RP2350PLL_new(self, "PLL_SYS_BASE")), .vtable = &RP2350PLL_Peripheral_vtable };
   self->peripherals[262232] = (Peripheral){ .obj = (void*)(UnimplementedPeripheral_new(self, "PLL_USB_BASE")), .vtable = &UnimplementedPeripheral_Peripheral_vtable };
@@ -16030,7 +23751,7 @@ static RP2350* RP2350_new(RP2350Options* options) {
   self->peripherals[262328] = (Peripheral){ .obj = (void*)(RPTimer_new(self, "TIMER1_BASE", IRQ2350_TIMER1_IRQ_0)), .vtable = &RPTimer_Peripheral_vtable };
   self->peripherals[262336] = (Peripheral){ .obj = (void*)(UnimplementedPeripheral_new(self, "HSTX_CTRL_BASE")), .vtable = &UnimplementedPeripheral_Peripheral_vtable };
   self->peripherals[262344] = (Peripheral){ .obj = (void*)(UnimplementedPeripheral_new(self, "XIP_CTRL_BASE")), .vtable = &UnimplementedPeripheral_Peripheral_vtable };
-  self->peripherals[262352] = (Peripheral){ .obj = (void*)(RPXIPQMI_new(self, "XIP_QMI_BASE")), .vtable = &RPXIPQMI_Peripheral_vtable };
+  self->peripherals[262352] = (Peripheral){ .obj = (void*)(self->xipQmi), .vtable = &RPXIPQMI_Peripheral_vtable };
   self->peripherals[262360] = (Peripheral){ .obj = (void*)(self->watchdog), .vtable = &RPWatchdog_Peripheral_vtable };
   self->peripherals[262364] = (Peripheral){ .obj = (void*)(self->watchdog), .vtable = &RPWatchdog_Peripheral_vtable };
   self->peripherals[262368] = (Peripheral){ .obj = (void*)(RPBootRAM_new(self, "BOOTRAM_BASE")), .vtable = &RPBootRAM_Peripheral_vtable };
@@ -16045,7 +23766,7 @@ static RP2350* RP2350_new(RP2350Options* options) {
   self->peripherals[262456] = (Peripheral){ .obj = (void*)(RP2350OTPData_new(self, "OTP_DATA", self->otp)), .vtable = &RP2350OTPData_Peripheral_vtable };
   self->peripherals[262460] = (Peripheral){ .obj = (void*)(RP2350OTPData_new(self, "OTP_DATA", self->otp)), .vtable = &RP2350OTPData_Peripheral_vtable };
   self->peripherals[262496] = (Peripheral){ .obj = (void*)(RPTBMAN_new(self, "TBMAN_BASE")), .vtable = &RPTBMAN_Peripheral_vtable };
-  self->peripherals[327680] = (Peripheral){ .obj = (void*)(self->dma), .vtable = &RPDMA_Peripheral_vtable };
+  self->peripherals[327680] = (Peripheral){ .obj = (void*)(self->dma), .vtable = &RP2350DMA_Peripheral_vtable };
   self->peripherals[327952] = (Peripheral){ .obj = (void*)(self->usbCtrl), .vtable = &RPUSBController_Peripheral_vtable };
   self->peripherals[328192] = (Peripheral){ .obj = (void*)(self->pio[0]), .vtable = &RPPIO_Peripheral_vtable };
   self->peripherals[328448] = (Peripheral){ .obj = (void*)(self->pio[1]), .vtable = &RPPIO_Peripheral_vtable };
@@ -16056,6 +23777,7 @@ static RP2350* RP2350_new(RP2350Options* options) {
   self->disassembly = "";
   self->pioActiveSmCount = 0;
   self->pioActivePioCount = 0;
+  (self->xipQmi->ioQspi = self->ioQspi);
   (self->coreArch = (options->coreArch ? options->coreArch : "riscv"));
   (self->isArmCore = (strcmp(self->coreArch, "arm") == 0));
   if (self->isArmCore) {
@@ -16070,7 +23792,7 @@ static RP2350* RP2350_new(RP2350Options* options) {
   RP2350OTP_writeUint32(self->otp, 344, archsel);
   RP2350OTP_writeUint32(self->otp, 348, archsel);
   memcpy(self->bootrom, bootrom_rp2350_A2, sizeof(bootrom_rp2350_A2));
-  /* memset */ memset(self->flash, 255, (FLASH_SIZE) * sizeof(uint8_t));
+  /* memset */ memset(self->flash, 255, (FLASH_SIZE__rp2350) * sizeof(uint8_t));
   RP2350_reset(self, false);
   ICpuCore_setOtherCore(self->core[0], self->core[1]);
   ICpuCore_setOtherCore(self->core[1], self->core[0]);
@@ -16084,7 +23806,7 @@ static RP2350* RP2350_new(RP2350Options* options) {
 }
 
 static void RP2350_loadBootrom(RP2350* self, uint32_t* bootromData) {
-  /* TODO: .set() [src/rp2350.ts:348: this.bootrom.set(bootromData);] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", ".set() [src/rp2350.ts:348: this.bootrom.set(bootromData);]"); abort(); 0; }));
+  /* TODO: .set() [src/rp2350.ts:359: this.bootrom.set(bootromData);] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", ".set() [src/rp2350.ts:359: this.bootrom.set(bootromData);]"); abort(); 0; }));
   RP2350_reset(self, false);
 }
 
@@ -16093,6 +23815,7 @@ static void RP2350_loadDisassembly(RP2350* self, const char* dis) {
 }
 
 static LoadFirmwareResult* RP2350_loadFirmware(RP2350* self, const char* path, LoadFirmwareOptions* options) {
+  RP2350_invalidateDecodeCache(self);
   return loadFirmware__RP2350(self, path, options);
 }
 
@@ -16120,18 +23843,18 @@ static void RP2350_reset(RP2350* self, bool enableCoprocessors) {
 static uint32_t RP2350_readUint32(RP2350* self, uint32_t address) {
   (address = ((uint32_t)(address) >> (0)));
   if (((int32_t)(address) & (int32_t)(3))) {
-  int32_t pc = ((int32_t)(/* TODO: OptionalMemberExpression [src/rp2350.ts:403: const pc = this.core[this.currentCore]?.PC;] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "OptionalMemberExpression [src/rp2350.ts:403: const pc = this.core[this.currentCore]?.PC;]"); abort(); 0; }))));
-  fprintf(stderr, "Error: %s\n", fmtStr("%s unaligned word read from address %x at PC=%d (core%d)", LOG_NAME, (unsigned)(address), ((pc != 0) ? ((const char*)(/* TODO: dispatch toString [src/rp2350.ts:406: pc !== undefined ? pc.toString(16) : 'unknown'] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "dispatch toString [src/rp2350.ts:406: pc !== undefined ? pc.toString(16) : 'unknown']"); abort(); 0; })))) : "unknown"), self->currentCore));
+  int32_t pc = ((int32_t)(/* TODO: OptionalMemberExpression [src/rp2350.ts:418: const pc = this.core[this.currentCore]?.PC;] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "OptionalMemberExpression [src/rp2350.ts:418: const pc = this.core[this.currentCore]?.PC;]"); abort(); 0; }))));
+  fprintf(stderr, "Error: %s\n", fmtStr("%s unaligned word read from address %x at PC=%d (core%d)", LOG_NAME, (unsigned)(address), ((pc != 0) ? ((const char*)(/* TODO: dispatch toString [src/rp2350.ts:421: pc !== undefined ? pc.toString(16) : 'unknown'] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "dispatch toString [src/rp2350.ts:421: pc !== undefined ? pc.toString(16) : 'unknown']"); abort(); 0; })))) : "unknown"), self->currentCore));
   abort();
   }
-  if (((address >= RAM_START_ADDRESS) && (address < (RAM_START_ADDRESS + (((256 * 2) + 8) * KB))))) {
+  if (((address >= RAM_START_ADDRESS) && (address < (RAM_START_ADDRESS + (((256 * 2) + 8) * 1024))))) {
   return self->sram32[((uint32_t)((address - RAM_START_ADDRESS)) >> (2))];
   } else {
   if (((address >= FLASH_START_ADDRESS) && (address < RAM_START_ADDRESS))) {
-  return self->flash32[((uint32_t)(((int32_t)(address) & (int32_t)((FLASH_SIZE - 1)))) >> (2))];
+  return self->flash32[((uint32_t)(((int32_t)(address) & (int32_t)((FLASH_SIZE__rp2350 - 1)))) >> (2))];
   } else {
   if (((address >= SIO_START_ADDRESS) && (address < (SIO_START_ADDRESS + 268435456)))) {
-  return RPSIO_readUint32(self->sio, (address - SIO_START_ADDRESS), self->currentCore);
+  return RP2350SIO_readUint32(self->sio, (address - SIO_START_ADDRESS), self->currentCore);
   } else {
   if (((self->isArmCore && (address >= 3758227456u)) && (address < 3758292992u))) {
   return RPPPB2350_readUint32ViaCore(self->ppb, ((int32_t)(((int32_t)(address) & (int32_t)(4294836223u))) & (int32_t)(16777215)), self->currentCore);
@@ -16155,8 +23878,8 @@ static uint32_t RP2350_readUint32(RP2350* self, uint32_t address) {
   }
   }
   {
-  int32_t pc = ((int32_t)(/* TODO: OptionalMemberExpression [src/rp2350.ts:444: const pc = this.core[this.currentCore]?.PC;] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "OptionalMemberExpression [src/rp2350.ts:444: const pc = this.core[this.currentCore]?.PC;]"); abort(); 0; }))));
-  fprintf(stderr, "Error: %s\n", fmtStr("%s Read from invalid memory address: %x at PC=%d (core%d)", LOG_NAME, (unsigned)(address), ((pc != 0) ? ((const char*)(/* TODO: dispatch toString [src/rp2350.ts:447: pc !== undefined ? pc.toString(16) : 'unknown'] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "dispatch toString [src/rp2350.ts:447: pc !== undefined ? pc.toString(16) : 'unknown']"); abort(); 0; })))) : "unknown"), self->currentCore));
+  int32_t pc = ((int32_t)(/* TODO: OptionalMemberExpression [src/rp2350.ts:459: const pc = this.core[this.currentCore]?.PC;] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "OptionalMemberExpression [src/rp2350.ts:459: const pc = this.core[this.currentCore]?.PC;]"); abort(); 0; }))));
+  fprintf(stderr, "Error: %s\n", fmtStr("%s Read from invalid memory address: %x at PC=%d (core%d)", LOG_NAME, (unsigned)(address), ((pc != 0) ? ((const char*)(/* TODO: dispatch toString [src/rp2350.ts:462: pc !== undefined ? pc.toString(16) : 'unknown'] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "dispatch toString [src/rp2350.ts:462: pc !== undefined ? pc.toString(16) : 'unknown']"); abort(); 0; })))) : "unknown"), self->currentCore));
   abort();
   }
   return (uint32_t){0};
@@ -16167,11 +23890,11 @@ static Peripheral RP2350_findPeripheral(RP2350* self, uint32_t address) {
 }
 
 static uint32_t RP2350_readUint16(RP2350* self, uint32_t address) {
-  if (((address >= RAM_START_ADDRESS) && (address < (RAM_START_ADDRESS + (((256 * 2) + 8) * KB))))) {
+  if (((address >= RAM_START_ADDRESS) && (address < (RAM_START_ADDRESS + (((256 * 2) + 8) * 1024))))) {
   return self->sram16[((uint32_t)((address - RAM_START_ADDRESS)) >> (1))];
   } else {
   if (((address >= FLASH_START_ADDRESS) && (address < RAM_START_ADDRESS))) {
-  return self->flash16[((uint32_t)(((int32_t)(address) & (int32_t)((FLASH_SIZE - 1)))) >> (1))];
+  return self->flash16[((uint32_t)(((int32_t)(address) & (int32_t)((FLASH_SIZE__rp2350 - 1)))) >> (1))];
   }
   }
   uint32_t value = RP2350_readUint32(self, ((int32_t)(address) & (int32_t)(4294967292u)));
@@ -16180,9 +23903,9 @@ static uint32_t RP2350_readUint16(RP2350* self, uint32_t address) {
 
 static uint32_t RP2350_readUint8(RP2350* self, uint32_t address) {
   if (((address >= FLASH_START_ADDRESS) && (address < RAM_START_ADDRESS))) {
-  return self->flash[((int32_t)(address) & (int32_t)((FLASH_SIZE - 1)))];
+  return self->flash[((int32_t)(address) & (int32_t)((FLASH_SIZE__rp2350 - 1)))];
   } else {
-  if (((address >= RAM_START_ADDRESS) && (address < (RAM_START_ADDRESS + (((256 * 2) + 8) * KB))))) {
+  if (((address >= RAM_START_ADDRESS) && (address < (RAM_START_ADDRESS + (((256 * 2) + 8) * 1024))))) {
   return self->sram[(address - RAM_START_ADDRESS)];
   }
   }
@@ -16190,18 +23913,50 @@ static uint32_t RP2350_readUint8(RP2350* self, uint32_t address) {
   return ((uint32_t)((((int32_t)(address) & (int32_t)(1)) ? ((uint32_t)(((int32_t)(value) & (int32_t)(65280))) >> (8)) : ((int32_t)(value) & (int32_t)(255)))) >> (0));
 }
 
+static void RP2350_invalidateSramDecode(RP2350* self, uint32_t address, int32_t len) {
+  int32_t startIdx = ((uint32_t)((address - RAM_START_ADDRESS)) >> (1));
+  int32_t endIdx = ((uint32_t)((((address + len) - 1) - RAM_START_ADDRESS)) >> (1));
+  if ((startIdx > 0)) {
+  (self->sramDecode[(startIdx - 1)] = 0);
+  }
+  for (
+int32_t i = startIdx
+; (i <= endIdx); (i++)) {
+  (self->sramDecode[i] = 0);
+  }
+}
+
+static void RP2350_invalidateDecodeCache(RP2350* self) {
+  /* memset */ memset(self->sramDecode, 0, (((double)((((256 * 2) + 8) * 1024)) / (double)(2))) * sizeof(uint64_t));
+  /* memset */ memset(self->flashDecode, 0, (((double)(FLASH_SIZE__rp2350) / (double)(2))) * sizeof(uint64_t));
+}
+
+static void RP2350_invalidateFlashDecode(RP2350* self, uint32_t address, int32_t len) {
+  int32_t startIdx = ((uint32_t)(((int32_t)(address) & (int32_t)((FLASH_SIZE__rp2350 - 1)))) >> (1));
+  int32_t endIdx = ((uint32_t)(((int32_t)(((address + len) - 1)) & (int32_t)((FLASH_SIZE__rp2350 - 1)))) >> (1));
+  if ((startIdx > 0)) {
+  (self->flashDecode[(startIdx - 1)] = 0);
+  }
+  for (
+int32_t i = startIdx
+; (i <= endIdx); (i++)) {
+  (self->flashDecode[i] = 0);
+  }
+}
+
 static void RP2350_writeUint32(RP2350* self, uint32_t address, uint32_t value) {
   (address = ((uint32_t)(address) >> (0)));
   if (((int32_t)(address) & (int32_t)(3))) {
-  int32_t pc = ((int32_t)(/* TODO: OptionalMemberExpression [src/rp2350.ts:485: const pc = this.core[this.currentCore]?.PC;] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "OptionalMemberExpression [src/rp2350.ts:485: const pc = this.core[this.currentCore]?.PC;]"); abort(); 0; }))));
-  fprintf(stderr, "Error: %s\n", fmtStr("%s unaligned word write to address %x at PC=%d (core%d)", LOG_NAME, (unsigned)(address), ((pc != 0) ? ((const char*)(/* TODO: dispatch toString [src/rp2350.ts:488: pc !== undefined ? pc.toString(16) : 'unknown'] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "dispatch toString [src/rp2350.ts:488: pc !== undefined ? pc.toString(16) : 'unknown']"); abort(); 0; })))) : "unknown"), self->currentCore));
+  int32_t pc = ((int32_t)(/* TODO: OptionalMemberExpression [src/rp2350.ts:533: const pc = this.core[this.currentCore]?.PC;] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "OptionalMemberExpression [src/rp2350.ts:533: const pc = this.core[this.currentCore]?.PC;]"); abort(); 0; }))));
+  fprintf(stderr, "Error: %s\n", fmtStr("%s unaligned word write to address %x at PC=%d (core%d)", LOG_NAME, (unsigned)(address), ((pc != 0) ? ((const char*)(/* TODO: dispatch toString [src/rp2350.ts:536: pc !== undefined ? pc.toString(16) : 'unknown'] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "dispatch toString [src/rp2350.ts:536: pc !== undefined ? pc.toString(16) : 'unknown']"); abort(); 0; })))) : "unknown"), self->currentCore));
   abort();
   }
-  if (((address >= RAM_START_ADDRESS) && (address < (RAM_START_ADDRESS + (((256 * 2) + 8) * KB))))) {
+  if (((address >= RAM_START_ADDRESS) && (address < (RAM_START_ADDRESS + (((256 * 2) + 8) * 1024))))) {
   (self->sram32[((uint32_t)((address - RAM_START_ADDRESS)) >> (2))] = value);
+  RP2350_invalidateSramDecode(self, address, 4);
   } else {
   if (((address >= SIO_START_ADDRESS) && (address < (SIO_START_ADDRESS + 268435456)))) {
-  RPSIO_writeUint32(self->sio, (address - SIO_START_ADDRESS), value, self->currentCore);
+  RP2350SIO_writeUint32(self->sio, (address - SIO_START_ADDRESS), value, self->currentCore);
   } else {
   if (((self->isArmCore && (address >= 3758227456u)) && (address < 3758292992u))) {
   RPPPB2350_writeUint32ViaCore(self->ppb, ((int32_t)(((int32_t)(address) & (int32_t)(4294836223u))) & (int32_t)(16777215)), value, self->currentCore);
@@ -16226,8 +23981,8 @@ static void RP2350_writeUint32(RP2350* self, uint32_t address, uint32_t value) {
   (*(uint32_t*)((self->usbDPRAMView) + (offset)) = (uint32_t)(value));
   RPUSBController_DPRAMUpdated(self->usbCtrl, offset, value);
   } else {
-  int32_t pc = ((int32_t)(/* TODO: OptionalMemberExpression [src/rp2350.ts:520: const pc = this.core[this.currentCore]?.PC;] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "OptionalMemberExpression [src/rp2350.ts:520: const pc = this.core[this.currentCore]?.PC;]"); abort(); 0; }))));
-  fprintf(stderr, "Error: %s\n", fmtStr("%s Write to invalid memory address: %x at PC=%d (core%d)", LOG_NAME, (unsigned)(address), ((pc != 0) ? ((const char*)(/* TODO: dispatch toString [src/rp2350.ts:523: pc !== undefined ? pc.toString(16) : 'unknown'] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "dispatch toString [src/rp2350.ts:523: pc !== undefined ? pc.toString(16) : 'unknown']"); abort(); 0; })))) : "unknown"), self->currentCore));
+  int32_t pc = ((int32_t)(/* TODO: OptionalMemberExpression [src/rp2350.ts:569: const pc = this.core[this.currentCore]?.PC;] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "OptionalMemberExpression [src/rp2350.ts:569: const pc = this.core[this.currentCore]?.PC;]"); abort(); 0; }))));
+  fprintf(stderr, "Error: %s\n", fmtStr("%s Write to invalid memory address: %x at PC=%d (core%d)", LOG_NAME, (unsigned)(address), ((pc != 0) ? ((const char*)(/* TODO: dispatch toString [src/rp2350.ts:572: pc !== undefined ? pc.toString(16) : 'unknown'] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "dispatch toString [src/rp2350.ts:572: pc !== undefined ? pc.toString(16) : 'unknown']"); abort(); 0; })))) : "unknown"), self->currentCore));
   abort();
   }
   }
@@ -16240,8 +23995,9 @@ static void RP2350_writeUint32(RP2350* self, uint32_t address, uint32_t value) {
 }
 
 static void RP2350_writeUint8(RP2350* self, uint32_t address, uint32_t value) {
-  if (((address >= RAM_START_ADDRESS) && (address < (RAM_START_ADDRESS + (((256 * 2) + 8) * KB))))) {
+  if (((address >= RAM_START_ADDRESS) && (address < (RAM_START_ADDRESS + (((256 * 2) + 8) * 1024))))) {
   (self->sram[(address - RAM_START_ADDRESS)] = value);
+  RP2350_invalidateSramDecode(self, address, 1);
   return;
   }
   if (((address >= FLASH_START_ADDRESS) && (address < RAM_START_ADDRESS))) {
@@ -16268,8 +24024,9 @@ static void RP2350_writeUint8(RP2350* self, uint32_t address, uint32_t value) {
 }
 
 static void RP2350_writeUint16(RP2350* self, uint32_t address, uint32_t value) {
-  if (((address >= RAM_START_ADDRESS) && (address < (RAM_START_ADDRESS + (((256 * 2) + 8) * KB))))) {
+  if (((address >= RAM_START_ADDRESS) && (address < (RAM_START_ADDRESS + (((256 * 2) + 8) * 1024))))) {
   (self->sram16[((uint32_t)((address - RAM_START_ADDRESS)) >> (1))] = value);
+  RP2350_invalidateSramDecode(self, address, 2);
   return;
   }
   if (((address >= FLASH_START_ADDRESS) && (address < RAM_START_ADDRESS))) {
@@ -16296,11 +24053,11 @@ static void RP2350_writeUint16(RP2350* self, uint32_t address, uint32_t value) {
 }
 
 static void RP2350_dma_clearDREQ(RP2350* self, int32_t dreq) {
-  RPDMA_clearDREQ(self->dma, dreq);
+  RP2350DMA_clearDREQ(self->dma, dreq);
 }
 
 static void RP2350_dma_setDREQ(RP2350* self, int32_t dreq) {
-  RPDMA_setDREQ(self->dma, dreq);
+  RP2350DMA_setDREQ(self->dma, dreq);
 }
 
 static int64_t RP2350_cycles_get(RP2350* self) {
@@ -16329,7 +24086,7 @@ static bool RP2350_gpioRawOutputValue(RP2350* self, int32_t index) {
   case FUNCTION_PWM:
   return (!(!((int32_t)(self->pwm->gpioValue) & (int32_t)(mask))));
   case FUNCTION_SIO:
-  return RPSIO_getPinValue(self->sio, index);
+  return RP2350SIO_getPinValue(self->sio, index);
   case FUNCTION_PIO0:
   return RPPIO_getPinValue(self->pio[0], index);
   case FUNCTION_PIO1:
@@ -16349,7 +24106,7 @@ static bool RP2350_gpioRawOutputEnable(RP2350* self, int32_t index) {
   case FUNCTION_PWM:
   return (!(!((int32_t)(self->pwm->gpioDirection) & (int32_t)(mask))));
   case FUNCTION_SIO:
-  return RPSIO_getOutputEnabled(self->sio, index);
+  return RP2350SIO_getOutputEnabled(self->sio, index);
   case FUNCTION_PIO0:
   return RPPIO_getPinOutputEnabled(self->pio[0], index);
   case FUNCTION_PIO1:
@@ -16469,7 +24226,7 @@ static void RP2350_stepThings(RP2350* self, int32_t cycles) {
   if (self->pioActiveSmCount) {
   RP2350_stepPios(self, cycles);
   }
-  double cycleNanos = ((double)(1000000000) / (double)(self->clkSys));
+  double cycleNanos = ((double)(1e9) / (double)(self->clkSys));
   SimulationClock_tick(self->clock, (cycles * cycleNanos));
 }
 
@@ -16531,9 +24288,9 @@ enum { FIFO_ST_ROE_BITS = (8) };
 enum { FIFO_ST = (80) };
 enum { FIFO_WR = (84) };
 enum { FIFO_RD = (88) };
-static RPSIOCore* RPSIOCore_new(RP2350* rp2040, FIFO* rxFIFO, FIFO* txFIFO, int32_t sio_interrupt, int32_t sio_interrupt_other_core, int32_t cpuCore, int32_t cpuCoreOther) {
+static RPSIOCore* RPSIOCore_new(RP2350* rpchip, FIFO* rxFIFO, FIFO* txFIFO, int32_t sio_interrupt, int32_t sio_interrupt_other_core, int32_t cpuCore, int32_t cpuCoreOther) {
   RPSIOCore* self = calloc(1, sizeof(RPSIOCore));
-  self->rp2040 = rp2040;
+  self->rpchip = rpchip;
   self->rxFIFO = rxFIFO;
   self->txFIFO = txFIFO;
   self->sio_interrupt = sio_interrupt;
@@ -16673,7 +24430,7 @@ static int32_t RPSIOCore_readUint32(RPSIOCore* self, int32_t offset) {
   case FIFO_RD:
   if (FIFO_empty_get(self->rxFIFO)) {
   (self->ROE = true);
-  RP2350_setInterruptCore(self->rp2040, self->sio_interrupt, true, self->cpuCore);
+  RP2350_setInterruptCore(self->rpchip, self->sio_interrupt, true, self->cpuCore);
   return 0;
   }
   return FIFO_pull(self->rxFIFO);
@@ -16796,16 +24553,16 @@ static void RPSIOCore_writeUint32(RPSIOCore* self, int32_t offset, int32_t value
   (self->ROE = false);
   }
   if ((((!self->WOF) && (!self->ROE)) && FIFO_empty_get(self->rxFIFO))) {
-  RP2350_setInterruptCore(self->rp2040, self->sio_interrupt, false, self->cpuCore);
+  RP2350_setInterruptCore(self->rpchip, self->sio_interrupt, false, self->cpuCore);
   }
   break;
   case FIFO_WR:
   if (FIFO_full_get(self->txFIFO)) {
   (self->WOF = true);
-  RP2350_setInterruptCore(self->rp2040, self->sio_interrupt, true, self->cpuCore);
+  RP2350_setInterruptCore(self->rpchip, self->sio_interrupt, true, self->cpuCore);
   } else {
   FIFO_push(self->txFIFO, value);
-  RP2350_setInterruptCore(self->rp2040, self->sio_interrupt_other_core, true, self->cpuCoreOther);
+  RP2350_setInterruptCore(self->rpchip, self->sio_interrupt_other_core, true, self->cpuCoreOther);
   }
   break;
   default:
@@ -16828,7 +24585,307 @@ static void RPSIOCore_updateHardwareDivider(RPSIOCore* self, bool signed_) {
   }
   }
   (self->divCSR = 3);
-  ICpuCore_addCycles(self->rp2040->core[self->cpuCore], 8);
+  ICpuCore_addCycles(self->rpchip->core[self->cpuCore], 8);
+}
+
+static RPSIOCore__RP2040* RPSIOCore__RP2040_new(RP2040* rpchip, FIFO* rxFIFO, FIFO* txFIFO, int32_t sio_interrupt, int32_t sio_interrupt_other_core, int32_t cpuCore, int32_t cpuCoreOther) {
+  RPSIOCore__RP2040* self = calloc(1, sizeof(RPSIOCore__RP2040));
+  self->rpchip = rpchip;
+  self->rxFIFO = rxFIFO;
+  self->txFIFO = txFIFO;
+  self->sio_interrupt = sio_interrupt;
+  self->sio_interrupt_other_core = sio_interrupt_other_core;
+  self->cpuCore = cpuCore;
+  self->cpuCoreOther = cpuCoreOther;
+  self->divDividend = 0;
+  self->divDivisor = 1;
+  self->divQuotient = 0;
+  self->divRemainder = 0;
+  self->divCSR = 0;
+  self->interp0 = Interpolator_new(0);
+  self->interp1 = Interpolator_new(1);
+  self->ROE = false;
+  self->WOF = false;
+  return self;
+}
+
+static int32_t RPSIOCore__RP2040_readUint32(RPSIOCore__RP2040* self, int32_t offset) {
+  switch (offset) {
+  case DIV_UDIVIDEND:
+  return self->divDividend;
+  case DIV_SDIVIDEND:
+  return self->divDividend;
+  case DIV_UDIVISOR:
+  return self->divDivisor;
+  case DIV_SDIVISOR:
+  return self->divDivisor;
+  case DIV_QUOTIENT:
+  (self->divCSR &= (~2));
+  return self->divQuotient;
+  case DIV_REMAINDER:
+  return self->divRemainder;
+  case DIV_CSR:
+  return self->divCSR;
+  case INTERP0_ACCUM0:
+  return self->interp0->accum0;
+  case INTERP0_ACCUM1:
+  return self->interp0->accum1;
+  case INTERP0_BASE0:
+  return self->interp0->base0;
+  case INTERP0_BASE1:
+  return self->interp0->base1;
+  case INTERP0_BASE2:
+  return self->interp0->base2;
+  case INTERP0_CTRL_LANE0:
+  return self->interp0->ctrl0;
+  case INTERP0_CTRL_LANE1:
+  return self->interp0->ctrl1;
+  case INTERP0_PEEK_LANE0:
+  return self->interp0->result0;
+  case INTERP0_PEEK_LANE1:
+  return self->interp0->result1;
+  case INTERP0_PEEK_FULL:
+  return self->interp0->result2;
+  case INTERP0_POP_LANE0:
+  {
+  int32_t value = self->interp0->result0;
+  Interpolator_writeback(self->interp0);
+  return value;
+  }
+  case INTERP0_POP_LANE1:
+  {
+  int32_t value = self->interp0->result1;
+  Interpolator_writeback(self->interp0);
+  return value;
+  }
+  case INTERP0_POP_FULL:
+  {
+  int32_t value = self->interp0->result2;
+  Interpolator_writeback(self->interp0);
+  return value;
+  }
+  case INTERP0_ACCUM0_ADD:
+  return self->interp0->smresult0;
+  case INTERP0_ACCUM1_ADD:
+  return self->interp0->smresult1;
+  case INTERP1_ACCUM0:
+  return self->interp1->accum0;
+  case INTERP1_ACCUM1:
+  return self->interp1->accum1;
+  case INTERP1_BASE0:
+  return self->interp1->base0;
+  case INTERP1_BASE1:
+  return self->interp1->base1;
+  case INTERP1_BASE2:
+  return self->interp1->base2;
+  case INTERP1_CTRL_LANE0:
+  return self->interp1->ctrl0;
+  case INTERP1_CTRL_LANE1:
+  return self->interp1->ctrl1;
+  case INTERP1_PEEK_LANE0:
+  return self->interp1->result0;
+  case INTERP1_PEEK_LANE1:
+  return self->interp1->result1;
+  case INTERP1_PEEK_FULL:
+  return self->interp1->result2;
+  case INTERP1_POP_LANE0:
+  {
+  int32_t value = self->interp1->result0;
+  Interpolator_writeback(self->interp1);
+  return value;
+  }
+  case INTERP1_POP_LANE1:
+  {
+  int32_t value = self->interp1->result1;
+  Interpolator_writeback(self->interp1);
+  return value;
+  }
+  case INTERP1_POP_FULL:
+  {
+  int32_t value = self->interp1->result2;
+  Interpolator_writeback(self->interp1);
+  return value;
+  }
+  case INTERP1_ACCUM0_ADD:
+  return self->interp1->smresult0;
+  case INTERP1_ACCUM1_ADD:
+  return self->interp1->smresult1;
+  case FIFO_ST:
+  {
+  int32_t value = 0;
+  if ((!FIFO_empty_get(self->rxFIFO))) {
+  (value |= FIFO_ST_VLD_BITS);
+  }
+  if ((!FIFO_full_get(self->txFIFO))) {
+  (value |= FIFO_ST_RDY_BITS);
+  }
+  if (self->WOF) {
+  (value |= FIFO_ST_WOF_BITS);
+  }
+  if (self->ROE) {
+  (value |= FIFO_ST_ROE_BITS);
+  }
+  return value;
+  }
+  case FIFO_RD:
+  if (FIFO_empty_get(self->rxFIFO)) {
+  (self->ROE = true);
+  RP2040_setInterruptCore(self->rpchip, self->sio_interrupt, true, self->cpuCore);
+  return 0;
+  }
+  return FIFO_pull(self->rxFIFO);
+  default:
+  /* TODO: console.warn [src/sio-core.ts:500: console.warn(`Read from invalid SIO address: ${offset.toString(16)} (${this.cpuC] */ 0;
+  return 4294967295u;
+  }
+  return (int32_t){0};
+}
+
+static void RPSIOCore__RP2040_writeUint32(RPSIOCore__RP2040* self, int32_t offset, int32_t value) {
+  switch (offset) {
+  case DIV_UDIVIDEND:
+  (self->divDividend = value);
+  RPSIOCore__RP2040_updateHardwareDivider(self, false);
+  break;
+  case DIV_SDIVIDEND:
+  (self->divDividend = value);
+  RPSIOCore__RP2040_updateHardwareDivider(self, true);
+  break;
+  case DIV_UDIVISOR:
+  (self->divDivisor = value);
+  RPSIOCore__RP2040_updateHardwareDivider(self, false);
+  break;
+  case DIV_SDIVISOR:
+  (self->divDivisor = value);
+  RPSIOCore__RP2040_updateHardwareDivider(self, true);
+  break;
+  case DIV_QUOTIENT:
+  (self->divQuotient = value);
+  (self->divCSR = 3);
+  break;
+  case DIV_REMAINDER:
+  (self->divRemainder = value);
+  (self->divCSR = 3);
+  break;
+  case INTERP0_ACCUM0:
+  (self->interp0->accum0 = value);
+  Interpolator_update(self->interp0);
+  break;
+  case INTERP0_ACCUM1:
+  (self->interp0->accum1 = value);
+  Interpolator_update(self->interp0);
+  break;
+  case INTERP0_BASE0:
+  (self->interp0->base0 = value);
+  Interpolator_update(self->interp0);
+  break;
+  case INTERP0_BASE1:
+  (self->interp0->base1 = value);
+  Interpolator_update(self->interp0);
+  break;
+  case INTERP0_BASE2:
+  (self->interp0->base2 = value);
+  Interpolator_update(self->interp0);
+  break;
+  case INTERP0_CTRL_LANE0:
+  (self->interp0->ctrl0 = value);
+  Interpolator_update(self->interp0);
+  break;
+  case INTERP0_CTRL_LANE1:
+  (self->interp0->ctrl1 = value);
+  Interpolator_update(self->interp0);
+  break;
+  case INTERP0_ACCUM0_ADD:
+  (self->interp0->accum0 += value);
+  Interpolator_update(self->interp0);
+  break;
+  case INTERP0_ACCUM1_ADD:
+  (self->interp0->accum1 += value);
+  Interpolator_update(self->interp0);
+  break;
+  case INTERP0_BASE_1AND0:
+  Interpolator_setBase01(self->interp0, value);
+  break;
+  case INTERP1_ACCUM0:
+  (self->interp1->accum0 = value);
+  Interpolator_update(self->interp1);
+  break;
+  case INTERP1_ACCUM1:
+  (self->interp1->accum1 = value);
+  Interpolator_update(self->interp1);
+  break;
+  case INTERP1_BASE0:
+  (self->interp1->base0 = value);
+  Interpolator_update(self->interp1);
+  break;
+  case INTERP1_BASE1:
+  (self->interp1->base1 = value);
+  Interpolator_update(self->interp1);
+  break;
+  case INTERP1_BASE2:
+  (self->interp1->base2 = value);
+  Interpolator_update(self->interp1);
+  break;
+  case INTERP1_CTRL_LANE0:
+  (self->interp1->ctrl0 = value);
+  Interpolator_update(self->interp1);
+  break;
+  case INTERP1_CTRL_LANE1:
+  (self->interp1->ctrl1 = value);
+  Interpolator_update(self->interp1);
+  break;
+  case INTERP1_ACCUM0_ADD:
+  (self->interp1->accum0 += value);
+  Interpolator_update(self->interp1);
+  break;
+  case INTERP1_ACCUM1_ADD:
+  (self->interp1->accum1 += value);
+  Interpolator_update(self->interp1);
+  break;
+  case INTERP1_BASE_1AND0:
+  Interpolator_setBase01(self->interp1, value);
+  break;
+  case FIFO_ST:
+  if (((int32_t)(value) | (int32_t)(FIFO_ST_WOF_BITS))) {
+  (self->WOF = false);
+  }
+  if (((int32_t)(value) | (int32_t)(FIFO_ST_ROE_BITS))) {
+  (self->ROE = false);
+  }
+  if ((((!self->WOF) && (!self->ROE)) && FIFO_empty_get(self->rxFIFO))) {
+  RP2040_setInterruptCore(self->rpchip, self->sio_interrupt, false, self->cpuCore);
+  }
+  break;
+  case FIFO_WR:
+  if (FIFO_full_get(self->txFIFO)) {
+  (self->WOF = true);
+  RP2040_setInterruptCore(self->rpchip, self->sio_interrupt, true, self->cpuCore);
+  } else {
+  FIFO_push(self->txFIFO, value);
+  RP2040_setInterruptCore(self->rpchip, self->sio_interrupt_other_core, true, self->cpuCoreOther);
+  }
+  break;
+  default:
+  /* TODO: console.warn [src/sio-core.ts:630: console.warn(] */ 0;
+  break;
+  }
+}
+
+static void RPSIOCore__RP2040_updateHardwareDivider(RPSIOCore__RP2040* self, bool signed_) {
+  if ((self->divDivisor == 0)) {
+  (self->divQuotient = ((self->divDividend > 0) ? (-1) : 1));
+  (self->divRemainder = self->divDividend);
+  } else {
+  if (signed_) {
+  (self->divQuotient = ((double)(((int32_t)(self->divDividend) | (int32_t)(0))) / (double)(((int32_t)(self->divDivisor) | (int32_t)(0)))));
+  (self->divRemainder = (((int32_t)(self->divDividend) | (int32_t)(0)) % ((int32_t)(self->divDivisor) | (int32_t)(0))));
+  } else {
+  (self->divQuotient = ((double)(((uint32_t)(self->divDividend) >> (0))) / (double)(((uint32_t)(self->divDivisor) >> (0)))));
+  (self->divRemainder = (((uint32_t)(self->divDividend) >> (0)) % ((uint32_t)(self->divDivisor) >> (0))));
+  }
+  }
+  (self->divCSR = 3);
+  CortexM0Core_addCycles(self->rpchip->core[self->cpuCore], 8);
 }
 
 // ─── sio_rp2350.ts ───
@@ -16862,22 +24919,22 @@ enum { GPIO_MASK = (1073741823) };
 enum { SPINLOCK_ST = (92) };
 enum { SPINLOCK0 = (256) };
 enum { SPINLOCK31 = (380) };
-static MtimecmpAlarmCallback* MtimecmpAlarmCallback_new(RP2350* rp2040, int32_t sio_mtimecmp_irq, int32_t core) {
+static MtimecmpAlarmCallback* MtimecmpAlarmCallback_new(RP2350* rpchip, int32_t sio_mtimecmp_irq, int32_t core) {
   MtimecmpAlarmCallback* self = calloc(1, sizeof(MtimecmpAlarmCallback));
   (self)->__vtable_AlarmCallback = &MtimecmpAlarmCallback_AlarmCallback_vtable;
-  self->rp2040 = rp2040;
+  self->rpchip = rpchip;
   self->sio_mtimecmp_irq = sio_mtimecmp_irq;
   self->core = core;
   return self;
 }
 
 static void MtimecmpAlarmCallback_fire(MtimecmpAlarmCallback* self) {
-  RP2350_setInterruptCore(self->rp2040, self->sio_mtimecmp_irq, true, self->core);
+  RP2350_setInterruptCore(self->rpchip, self->sio_mtimecmp_irq, true, self->core);
 }
 
-static RPSIO* RPSIO_new(RP2350* rp2040, int32_t sio_proc0_irq, int32_t sio_proc1_irq, int32_t sio_mtimecmp_irq) {
-  RPSIO* self = calloc(1, sizeof(RPSIO));
-  self->rp2040 = rp2040;
+static RP2350SIO* RP2350SIO_new(RP2350* rpchip, int32_t sio_proc0_irq, int32_t sio_proc1_irq, int32_t sio_mtimecmp_irq) {
+  RP2350SIO* self = calloc(1, sizeof(RP2350SIO));
+  self->rpchip = rpchip;
   self->sio_proc0_irq = sio_proc0_irq;
   self->sio_proc1_irq = sio_proc1_irq;
   self->sio_mtimecmp_irq = sio_mtimecmp_irq;
@@ -16891,23 +24948,23 @@ static RPSIO* RPSIO_new(RP2350* rp2040, int32_t sio_proc0_irq, int32_t sio_proc1
   self->mtimecmpHigh[1] = 0;
   FIFO* rxFIFO = FIFO_new(8);
   FIFO* txFIFO = FIFO_new(8);
-  self->sioCore[0] = RPSIOCore_new(rp2040, rxFIFO, txFIFO, sio_proc0_irq, sio_proc1_irq, 0, 1);
-  self->sioCore[1] = RPSIOCore_new(rp2040, txFIFO, rxFIFO, sio_proc1_irq, sio_proc0_irq, 1, 0);
-  (self->mtimeTimer = Timer32_new("SIO_mtime", rp2040->clock, MTIME_FREQUENCY));
+  self->sioCore[0] = RPSIOCore_new(rpchip, rxFIFO, txFIFO, sio_proc0_irq, sio_proc1_irq, 0, 1);
+  self->sioCore[1] = RPSIOCore_new(rpchip, txFIFO, rxFIFO, sio_proc1_irq, sio_proc0_irq, 1, 0);
+  (self->mtimeTimer = Timer32_new("SIO_mtime", rpchip->clock, MTIME_FREQUENCY));
   Timer32_mode_set(self->mtimeTimer, TimerMode_Increment);
-  self->mtimecmpAlarm[0] = RPSIO_createMtimecmpAlarm(self, rp2040, sio_mtimecmp_irq, 0);
-  self->mtimecmpAlarm[1] = RPSIO_createMtimecmpAlarm(self, rp2040, sio_mtimecmp_irq, 1);
+  self->mtimecmpAlarm[0] = RP2350SIO_createMtimecmpAlarm(self, rpchip, sio_mtimecmp_irq, 0);
+  self->mtimecmpAlarm[1] = RP2350SIO_createMtimecmpAlarm(self, rpchip, sio_mtimecmp_irq, 1);
   return self;
 }
 
-static Timer32PeriodicAlarm* RPSIO_createMtimecmpAlarm(RPSIO* self, RP2350* rp2040, int32_t sio_mtimecmp_irq, int32_t core) {
-  Timer32PeriodicAlarm* alarm = Timer32PeriodicAlarm_new(fmtStr("SIO_mtimecmp_core%d", core), self->mtimeTimer, (AlarmCallback){ .obj = (void*)(MtimecmpAlarmCallback_new(rp2040, sio_mtimecmp_irq, core)), .vtable = &MtimecmpAlarmCallback_AlarmCallback_vtable });
+static Timer32PeriodicAlarm* RP2350SIO_createMtimecmpAlarm(RP2350SIO* self, RP2350* rpchip, int32_t sio_mtimecmp_irq, int32_t core) {
+  Timer32PeriodicAlarm* alarm = Timer32PeriodicAlarm_new(fmtStr("SIO_mtimecmp_core%d", core), self->mtimeTimer, (AlarmCallback){ .obj = (void*)(MtimecmpAlarmCallback_new(rpchip, sio_mtimecmp_irq, core)), .vtable = &MtimecmpAlarmCallback_AlarmCallback_vtable });
   Timer32PeriodicAlarm_target_set(alarm, 4294967295u);
   Timer32PeriodicAlarm_enable_set(alarm, true);
   return alarm;
 }
 
-static int32_t RPSIO_readUint32(RPSIO* self, int32_t offset, int32_t cpuCore) {
+static int32_t RP2350SIO_readUint32(RP2350SIO* self, int32_t offset, int32_t cpuCore) {
   if (((offset >= SPINLOCK0) && (offset <= SPINLOCK31))) {
   int32_t bitIndexMask = ((int32_t)((uint32_t)(1) << (((int32_t)(((offset - SPINLOCK0) / 4))) & 31)));
   if (((int32_t)(self->spinLock) & (int32_t)(bitIndexMask))) {
@@ -16919,10 +24976,10 @@ static int32_t RPSIO_readUint32(RPSIO* self, int32_t offset, int32_t cpuCore) {
   }
   switch (offset) {
   case GPIO_IN:
-  return RP2350_gpioValues(self->rp2040, 0);
+  return RP2350_gpioValues(self->rpchip, 0);
   case GPIO_HI_IN:
   {
-  RP2350* __destruct_tmp_1 = self->rp2040;
+  RP2350* __destruct_tmp_1 = self->rpchip;
   GPIOPin** qspi = __destruct_tmp_1->qspi;
   int32_t result = 0;
   for (
@@ -16933,7 +24990,7 @@ int32_t qspiIndex = 0
   }
   }
   (result = (int32_t)((uint32_t)(result) << (26)));
-  (result |= RP2350_gpioValues(self->rp2040, 32));
+  (result |= RP2350_gpioValues(self->rpchip, 32));
   return result;
   }
   case GPIO_OUT:
@@ -16975,7 +25032,7 @@ int32_t qspiIndex = 0
   return RPSIOCore_readUint32(self->sioCore[cpuCore], offset);
 }
 
-static void RPSIO_writeUint32(RPSIO* self, int32_t offset, int32_t value, int32_t cpuCore) {
+static void RP2350SIO_writeUint32(RP2350SIO* self, int32_t offset, int32_t value, int32_t cpuCore) {
   if (((offset >= SPINLOCK0) && (offset <= SPINLOCK31))) {
   int32_t bitIndexMask = (~((int32_t)((uint32_t)(1) << (((int32_t)(((offset - SPINLOCK0) / 4))) & 31))));
   (self->spinLock &= bitIndexMask);
@@ -17047,14 +25104,14 @@ static void RPSIO_writeUint32(RPSIO* self, int32_t offset, int32_t value, int32_
   (self->mtimecmpHigh[cpuCore] = ((uint32_t)(value) >> (0)));
   break;
   case MTIMECMP:
-  RP2350_setInterruptCore(self->rp2040, self->sio_mtimecmp_irq, false, cpuCore);
+  RP2350_setInterruptCore(self->rpchip, self->sio_mtimecmp_irq, false, cpuCore);
   Timer32PeriodicAlarm_target_set(self->mtimecmpAlarm[cpuCore], ((uint32_t)(value) >> (0)));
   break;
   default:
   RPSIOCore_writeUint32(self->sioCore[cpuCore], offset, value);
   }
   int32_t pinsToUpdate = ((int32_t)(((int32_t)(self->gpioValue) ^ (int32_t)(prevGpioValue))) | (int32_t)(((int32_t)(self->gpioOutputEnable) ^ (int32_t)(prevGpioOutputEnable))));
-  RP2350* __destruct_tmp_1 = self->rp2040;
+  RP2350* __destruct_tmp_1 = self->rpchip;
   GPIOPin** gpio = __destruct_tmp_1->gpio;
   if (pinsToUpdate) {
   for (
@@ -17077,7 +25134,7 @@ int32_t gpioIndex = 32
   }
 }
 
-static int32_t RPSIO_getPinValue(RPSIO* self, int32_t index) {
+static int32_t RP2350SIO_getPinValue(RP2350SIO* self, int32_t index) {
   if ((index < 32)) {
   return (!(!((int32_t)(self->gpioValue) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(index)) & 31)))))));
   } else {
@@ -17088,7 +25145,7 @@ static int32_t RPSIO_getPinValue(RPSIO* self, int32_t index) {
   return false;
 }
 
-static int32_t RPSIO_getOutputEnabled(RPSIO* self, int32_t index) {
+static int32_t RP2350SIO_getOutputEnabled(RP2350SIO* self, int32_t index) {
   if ((index < 32)) {
   return (!(!((int32_t)(self->gpioOutputEnable) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(index)) & 31)))))));
   } else {
@@ -17115,6 +25172,153 @@ enum { GPIO_HI_OUT_XOR__sio = (60) };
 enum { GPIO_HI_OE__sio = (64) };
 enum { GPIO_HI_OE_SET__sio = (68) };
 enum { GPIO_HI_OE_CLR__sio = (72) };
+static RPSIO* RPSIO_new(RP2040* rpchip, int32_t sio_proc0_irq, int32_t sio_proc1_irq) {
+  RPSIO* self = calloc(1, sizeof(RPSIO));
+  self->rpchip = rpchip;
+  self->sio_proc0_irq = sio_proc0_irq;
+  self->sio_proc1_irq = sio_proc1_irq;
+  self->gpioValue = 0;
+  self->gpioOutputEnable = 0;
+  self->qspiGpioValue = 0;
+  self->qspiGpioOutputEnable = 0;
+  self->spinLock = 0;
+  FIFO* rxFIFO = FIFO_new(8);
+  FIFO* txFIFO = FIFO_new(8);
+  self->sioCore[0] = RPSIOCore__RP2040_new(rpchip, rxFIFO, txFIFO, sio_proc0_irq, sio_proc1_irq, 0, 1);
+  self->sioCore[1] = RPSIOCore__RP2040_new(rpchip, txFIFO, rxFIFO, sio_proc1_irq, sio_proc0_irq, 1, 0);
+  return self;
+}
+
+static int32_t RPSIO_readUint32(RPSIO* self, int32_t offset, int32_t cpuCore) {
+  if (((offset >= SPINLOCK0) && (offset <= SPINLOCK31))) {
+  int32_t bitIndexMask = ((int32_t)((uint32_t)(1) << (((int32_t)(((offset - SPINLOCK0) / 4))) & 31)));
+  if (((int32_t)(self->spinLock) & (int32_t)(bitIndexMask))) {
+  return 0;
+  } else {
+  (self->spinLock |= bitIndexMask);
+  return bitIndexMask;
+  }
+  }
+  switch (offset) {
+  case GPIO_IN:
+  return RP2040_gpioValues(self->rpchip, 0);
+  case GPIO_HI_IN:
+  {
+  RP2040* __destruct_tmp_1 = self->rpchip;
+  GPIOPin__RP2040** qspi = __destruct_tmp_1->qspi;
+  int32_t result = 0;
+  for (
+int32_t qspiIndex = 0
+; (qspiIndex < 6); (qspiIndex++)) {
+  if (GPIOPin__RP2040_inputValue_get(qspi[qspiIndex])) {
+  (result |= ((int32_t)((uint32_t)(1) << (((int32_t)(qspiIndex)) & 31))));
+  }
+  }
+  return result;
+  }
+  case GPIO_OUT:
+  return self->gpioValue;
+  case GPIO_OE__sio:
+  return self->gpioOutputEnable;
+  case GPIO_HI_OUT__sio:
+  return self->qspiGpioValue;
+  case GPIO_HI_OE__sio:
+  return self->qspiGpioOutputEnable;
+  case GPIO_OUT_SET__sio:
+  case GPIO_OUT_CLR__sio:
+  case GPIO_OUT_XOR__sio:
+  case GPIO_OE_SET__sio:
+  case GPIO_OE_CLR__sio:
+  case GPIO_OE_XOR__sio:
+  case GPIO_HI_OUT_SET__sio:
+  case GPIO_HI_OUT_CLR__sio:
+  case GPIO_HI_OUT_XOR__sio:
+  case GPIO_HI_OE_SET__sio:
+  case GPIO_HI_OE_CLR__sio:
+  case GPIO_HI_OE_XOR:
+  return 0;
+  case CPUID__sio:
+  return cpuCore;
+  case SPINLOCK_ST:
+  return self->spinLock;
+  }
+  return RPSIOCore__RP2040_readUint32(self->sioCore[cpuCore], offset);
+}
+
+static void RPSIO_writeUint32(RPSIO* self, int32_t offset, int32_t value, int32_t cpuCore) {
+  if (((offset >= SPINLOCK0) && (offset <= SPINLOCK31))) {
+  int32_t bitIndexMask = (~((int32_t)((uint32_t)(1) << (((int32_t)(((offset - SPINLOCK0) / 4))) & 31))));
+  (self->spinLock &= bitIndexMask);
+  return;
+  }
+  int32_t prevGpioValue = self->gpioValue;
+  int32_t prevGpioOutputEnable = self->gpioOutputEnable;
+  switch (offset) {
+  case GPIO_OUT:
+  (self->gpioValue = ((int32_t)(value) & (int32_t)(GPIO_MASK)));
+  break;
+  case GPIO_OUT_SET__sio:
+  (self->gpioValue |= ((int32_t)(value) & (int32_t)(GPIO_MASK)));
+  break;
+  case GPIO_OUT_CLR__sio:
+  (self->gpioValue &= (~value));
+  break;
+  case GPIO_OUT_XOR__sio:
+  (self->gpioValue ^= ((int32_t)(value) & (int32_t)(GPIO_MASK)));
+  break;
+  case GPIO_OE__sio:
+  (self->gpioOutputEnable = ((int32_t)(value) & (int32_t)(GPIO_MASK)));
+  break;
+  case GPIO_OE_SET__sio:
+  (self->gpioOutputEnable |= ((int32_t)(value) & (int32_t)(GPIO_MASK)));
+  break;
+  case GPIO_OE_CLR__sio:
+  (self->gpioOutputEnable &= (~value));
+  break;
+  case GPIO_OE_XOR__sio:
+  (self->gpioOutputEnable ^= ((int32_t)(value) & (int32_t)(GPIO_MASK)));
+  break;
+  case GPIO_HI_OUT__sio:
+  (self->qspiGpioValue = ((int32_t)(value) & (int32_t)(GPIO_MASK)));
+  break;
+  case GPIO_HI_OUT_SET__sio:
+  (self->qspiGpioValue |= ((int32_t)(value) & (int32_t)(GPIO_MASK)));
+  break;
+  case GPIO_HI_OUT_CLR__sio:
+  (self->qspiGpioValue &= (~value));
+  break;
+  case GPIO_HI_OUT_XOR__sio:
+  (self->qspiGpioValue ^= ((int32_t)(value) & (int32_t)(GPIO_MASK)));
+  break;
+  case GPIO_HI_OE__sio:
+  (self->qspiGpioOutputEnable = ((int32_t)(value) & (int32_t)(GPIO_MASK)));
+  break;
+  case GPIO_HI_OE_SET__sio:
+  (self->qspiGpioOutputEnable |= ((int32_t)(value) & (int32_t)(GPIO_MASK)));
+  break;
+  case GPIO_HI_OE_CLR__sio:
+  (self->qspiGpioOutputEnable &= (~value));
+  break;
+  case GPIO_HI_OE_XOR:
+  (self->qspiGpioOutputEnable ^= ((int32_t)(value) & (int32_t)(GPIO_MASK)));
+  break;
+  default:
+  RPSIOCore__RP2040_writeUint32(self->sioCore[cpuCore], offset, value);
+  }
+  int32_t pinsToUpdate = ((int32_t)(((int32_t)(self->gpioValue) ^ (int32_t)(prevGpioValue))) | (int32_t)(((int32_t)(self->gpioOutputEnable) ^ (int32_t)(prevGpioOutputEnable))));
+  if (pinsToUpdate) {
+  RP2040* __destruct_tmp_1 = self->rpchip;
+  GPIOPin__RP2040** gpio = __destruct_tmp_1->gpio;
+  for (
+int32_t gpioIndex = 0
+; (gpioIndex < 30); (gpioIndex++)) {
+  if (((int32_t)(pinsToUpdate) & (int32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(gpioIndex)) & 31)))))) {
+  GPIOPin__RP2040_checkForUpdates(gpio[gpioIndex]);
+  }
+  }
+  }
+}
+
 // ─── cdc.ts ───
 enum { CDC_REQUEST_SET_CONTROL_LINE_STATE = (34) };
 enum { CDC_DTR = (1) }; /* ((int32_t)((uint32_t)(1) << (0))) */
@@ -17124,13 +25328,16 @@ enum { ENDPOINT_BULK = (2) };
 enum { TX_FIFO_SIZE = (512) };
 enum { ENDPOINT_ZERO = (0) };
 enum { CONFIGURATION_DESCRIPTOR_SIZE = (9) };
-static EndpointNumbers* extractEndpointNumbers(int32_t* descriptors) {
+enum { MAX_DESCRIPTOR_SIZE = (256) };
+enum { MAX_PACKET_SIZE = (1024) };
+static int32_t extractEndpointNumbers(uint8_t* descriptors, int32_t count) {
   int32_t index = 0;
   int32_t foundInterface = false;
-  EndpointNumbers* result = ((EndpointNumbers*)(/* TODO: ObjectExpression [src/usb/cdc.ts:34: const result: EndpointNumbers = {] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "ObjectExpression [src/usb/cdc.ts:34: const result: EndpointNumbers = {]"); abort(); 0; }))));
-  while ((index < /* TODO: .length [src/usb/cdc.ts:38: while (index < descriptors.length) {] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", ".length [src/usb/cdc.ts:38: while (index < descriptors.length) {]"); abort(); 0; })))) {
+  int32_t inEndpoint = (-1);
+  int32_t outEndpoint = (-1);
+  while ((index < count)) {
   int32_t len = descriptors[index];
-  if (((len < 2) || (/* TODO: .length [src/usb/cdc.ts:40: if (len < 2 || descriptors.length < index + len) {] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", ".length [src/usb/cdc.ts:40: if (len < 2 || descriptors.length < index + len) {]"); abort(); 0; })) < (index + len)))) {
+  if (((len < 2) || (count < (index + len)))) {
   break;
   }
   int32_t type = descriptors[(index + 1)];
@@ -17144,15 +25351,15 @@ static EndpointNumbers* extractEndpointNumbers(int32_t* descriptors) {
   int32_t attributes = descriptors[(index + 3)];
   if ((((int32_t)(attributes) & (int32_t)(3)) == ENDPOINT_BULK)) {
   if (((int32_t)(address) & (int32_t)(128))) {
-  (result->in = ((int32_t)(address) & (int32_t)(15)));
+  (inEndpoint = ((int32_t)(address) & (int32_t)(15)));
   } else {
-  (result->out = ((int32_t)(address) & (int32_t)(15)));
+  (outEndpoint = ((int32_t)(address) & (int32_t)(15)));
   }
   }
   }
   (index += descriptors[index]);
   }
-  return result;
+  return ((int32_t)(((int32_t)(inEndpoint) & (int32_t)(255))) | (int32_t)(((int32_t)((uint32_t)(((int32_t)(outEndpoint) & (int32_t)(255))) << (8)))));
 }
 
 static void USBCDC_usb_onUSBEnabled_closure0(void* __ctx) {
@@ -17165,36 +25372,40 @@ static void USBCDC_usb_onResetReceived_closure1(void* __ctx) {
   RPUSBController_sendSetupPacket(self->usb, setDeviceAddressPacket(1));
 }
 
-static void USBCDC_usb_onEndpointWrite_closure2(void* __ctx, int32_t endpoint, uint8_t* buffer) {
+static void USBCDC_usb_onEndpointWrite_closure2(void* __ctx, int32_t endpoint, uint8_t* buffer, int32_t length) {
   USBCDC* self = (USBCDC*)__ctx;
-  if (((endpoint == ENDPOINT_ZERO) && (/* TODO: .length [src/usb/cdc.ts:89: if (endpoint === ENDPOINT_ZERO && buffer.length === 0) {] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", ".length [src/usb/cdc.ts:89: if (endpoint === ENDPOINT_ZERO && buffer.length === 0) {]"); abort(); 0; })) == 0))) {
+  if (((endpoint == ENDPOINT_ZERO) && (length == 0))) {
   if ((self->descriptorsSize == 0)) {
   RPUSBController_sendSetupPacket(self->usb, getDescriptorPacket(DescriptorType_Configration, CONFIGURATION_DESCRIPTOR_SIZE, 0));
   } else {
   if ((!self->initialized)) {
-  USBCDC_cdcSetControlLineState(self, 0, 0);
+  USBCDC_cdcSetControlLineState(self, ((int32_t)(CDC_DTR) | (int32_t)(CDC_RTS)), 0);
   ((self)->onDeviceConnected_fn ? (self)->onDeviceConnected_fn((self)->onDeviceConnected_ctx) : (void)0);
   }
   }
   }
-  if (((endpoint == ENDPOINT_ZERO) && (/* TODO: .length [src/usb/cdc.ts:101: if (endpoint === ENDPOINT_ZERO && buffer.length > 1) {] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", ".length [src/usb/cdc.ts:101: if (endpoint === ENDPOINT_ZERO && buffer.length > 1) {]"); abort(); 0; })) > 1))) {
-  if ((((/* TODO: .length [src/usb/cdc.ts:103: buffer.length === CONFIGURATION_DESCRIPTOR_SIZE &&] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", ".length [src/usb/cdc.ts:103: buffer.length === CONFIGURATION_DESCRIPTOR_SIZE &&]"); abort(); 0; })) == CONFIGURATION_DESCRIPTOR_SIZE) && (buffer[1] == DescriptorType_Configration)) && (self->descriptorsSize == 0))) {
+  if (((endpoint == ENDPOINT_ZERO) && (length > 1))) {
+  if ((((length == CONFIGURATION_DESCRIPTOR_SIZE) && (buffer[1] == DescriptorType_Configration)) && (self->descriptorsSize == 0))) {
   (self->descriptorsSize = ((int32_t)(((int32_t)((uint32_t)(buffer[3]) << (8)))) | (int32_t)(buffer[2])));
   RPUSBController_sendSetupPacket(self->usb, getDescriptorPacket(DescriptorType_Configration, self->descriptorsSize, 0));
   } else {
-  if (((self->descriptorsSize != 0) && (self->descriptors_count < self->descriptorsSize))) {
-  (__extension__({ if (self->descriptors_count < 8) { self->descriptors[self->descriptors_count++] = /* TODO: SpreadElement [src/usb/cdc.ts:112: this.descriptors.push(...buffer);] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "SpreadElement [src/usb/cdc.ts:112: this.descriptors.push(...buffer);]"); abort(); 0; })); } else { fprintf(stderr, "cts2c: %s capacity (%d) exceeded\n", "descriptors", 8); abort(); } }));
+  if (((self->descriptorsSize != 0) && (self->descriptorsCount < self->descriptorsSize))) {
+  for (
+int32_t i = 0
+; ((i < length) && (self->descriptorsCount < MAX_DESCRIPTOR_SIZE)); (i++)) {
+  (self->descriptors[(self->descriptorsCount++)] = buffer[i]);
   }
   }
-  if ((self->descriptorsSize == self->descriptors_count)) {
-  EndpointNumbers* endpoints = extractEndpointNumbers(self->descriptors);
-  (self->inEndpoint = endpoints->in);
-  (self->outEndpoint = endpoints->out);
+  }
+  if (((self->descriptorsSize != 0) && (self->descriptorsCount == self->descriptorsSize))) {
+  int32_t endpoints = extractEndpointNumbers(self->descriptors, self->descriptorsCount);
+  (self->inEndpoint = ((int32_t)(endpoints) & (int32_t)(255)));
+  (self->outEndpoint = ((int32_t)(((uint32_t)(endpoints) >> (8))) & (int32_t)(255)));
   RPUSBController_sendSetupPacket(self->usb, setDeviceConfigurationPacket(1));
   }
   }
   if ((endpoint == self->inEndpoint)) {
-  ((self)->onSerialData_fn ? (self)->onSerialData_fn((self)->onSerialData_ctx, buffer) : (void)0);
+  ((self)->onSerialData_fn ? (self)->onSerialData_fn((self)->onSerialData_ctx, buffer, length) : (void)0);
   }
 }
 
@@ -17215,11 +25426,12 @@ static USBCDC* USBCDC_new(RPUSBController* usb) {
   self->txFIFO = FIFO_new(TX_FIFO_SIZE);
   self->initialized = false;
   self->descriptorsSize = 0;
-  self->descriptors = calloc(8, sizeof(int32_t));
-  self->descriptors_count = 0;
+  self->descriptors = calloc(MAX_DESCRIPTOR_SIZE, sizeof(uint8_t));
+  self->descriptorsCount = 0;
   self->outEndpoint = (-1);
   self->inEndpoint = (-1);
   self->pendingOutReadSize = 0;
+  self->outScratch = calloc(MAX_PACKET_SIZE, sizeof(uint8_t));
   (__extension__({ self->usb->onUSBEnabled_fn = USBCDC_usb_onUSBEnabled_closure0; self->usb->onUSBEnabled_ctx = (void*)self; }));
   (__extension__({ self->usb->onResetReceived_fn = USBCDC_usb_onResetReceived_closure1; self->usb->onResetReceived_ctx = (void*)self; }));
   (__extension__({ self->usb->onEndpointWrite_fn = USBCDC_usb_onEndpointWrite_closure2; self->usb->onEndpointWrite_ctx = (void*)self; }));
@@ -17233,13 +25445,13 @@ static void USBCDC_cdcSetControlLineState(USBCDC* self, int32_t value, int32_t i
 }
 
 static void USBCDC_deliverOutData(USBCDC* self, int32_t size) {
-  uint8_t* buffer = calloc(min(size, FIFO_itemCount_get(self->txFIFO)), sizeof(uint8_t));
+  int32_t length = min(size, FIFO_itemCount_get(self->txFIFO));
   for (
 int32_t i = 0
-; (i < /* TODO: .length [src/usb/cdc.ts:155: for (let i = 0; i < buffer.length; i++) {] */ (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", ".length [src/usb/cdc.ts:155: for (let i = 0; i < buffer.length; i++) {]"); abort(); 0; }))); (i++)) {
-  (buffer[i] = FIFO_pull(self->txFIFO));
+; (i < length); (i++)) {
+  (self->outScratch[i] = FIFO_pull(self->txFIFO));
   }
-  RPUSBController_endpointReadDone(self->usb, self->outEndpoint, buffer, 0);
+  RPUSBController_endpointReadDone(self->usb, self->outEndpoint, self->outScratch, length, self->usb->readDelayMicroseconds);
 }
 
 static void USBCDC_sendSerialByte(USBCDC* self, int32_t data) {
@@ -17248,6 +25460,107 @@ static void USBCDC_sendSerialByte(USBCDC* self, int32_t data) {
   int32_t size = self->pendingOutReadSize;
   (self->pendingOutReadSize = 0);
   USBCDC_deliverOutData(self, size);
+  }
+}
+
+static void USBCDC__RP2040_usb_onUSBEnabled_closure0(void* __ctx) {
+  USBCDC__RP2040* self = (USBCDC__RP2040*)__ctx;
+  RPUSBController__RP2040_resetDevice(self->usb);
+}
+
+static void USBCDC__RP2040_usb_onResetReceived_closure1(void* __ctx) {
+  USBCDC__RP2040* self = (USBCDC__RP2040*)__ctx;
+  RPUSBController__RP2040_sendSetupPacket(self->usb, setDeviceAddressPacket(1));
+}
+
+static void USBCDC__RP2040_usb_onEndpointWrite_closure2(void* __ctx, int32_t endpoint, uint8_t* buffer, int32_t length) {
+  USBCDC__RP2040* self = (USBCDC__RP2040*)__ctx;
+  if (((endpoint == ENDPOINT_ZERO) && (length == 0))) {
+  if ((self->descriptorsSize == 0)) {
+  RPUSBController__RP2040_sendSetupPacket(self->usb, getDescriptorPacket(DescriptorType_Configration, CONFIGURATION_DESCRIPTOR_SIZE, 0));
+  } else {
+  if ((!self->initialized)) {
+  USBCDC__RP2040_cdcSetControlLineState(self, ((int32_t)(CDC_DTR) | (int32_t)(CDC_RTS)), 0);
+  ((self)->onDeviceConnected_fn ? (self)->onDeviceConnected_fn((self)->onDeviceConnected_ctx) : (void)0);
+  }
+  }
+  }
+  if (((endpoint == ENDPOINT_ZERO) && (length > 1))) {
+  if ((((length == CONFIGURATION_DESCRIPTOR_SIZE) && (buffer[1] == DescriptorType_Configration)) && (self->descriptorsSize == 0))) {
+  (self->descriptorsSize = ((int32_t)(((int32_t)((uint32_t)(buffer[3]) << (8)))) | (int32_t)(buffer[2])));
+  RPUSBController__RP2040_sendSetupPacket(self->usb, getDescriptorPacket(DescriptorType_Configration, self->descriptorsSize, 0));
+  } else {
+  if (((self->descriptorsSize != 0) && (self->descriptorsCount < self->descriptorsSize))) {
+  for (
+int32_t i = 0
+; ((i < length) && (self->descriptorsCount < MAX_DESCRIPTOR_SIZE)); (i++)) {
+  (self->descriptors[(self->descriptorsCount++)] = buffer[i]);
+  }
+  }
+  }
+  if (((self->descriptorsSize != 0) && (self->descriptorsCount == self->descriptorsSize))) {
+  int32_t endpoints = extractEndpointNumbers(self->descriptors, self->descriptorsCount);
+  (self->inEndpoint = ((int32_t)(endpoints) & (int32_t)(255)));
+  (self->outEndpoint = ((int32_t)(((uint32_t)(endpoints) >> (8))) & (int32_t)(255)));
+  RPUSBController__RP2040_sendSetupPacket(self->usb, setDeviceConfigurationPacket(1));
+  }
+  }
+  if ((endpoint == self->inEndpoint)) {
+  ((self)->onSerialData_fn ? (self)->onSerialData_fn((self)->onSerialData_ctx, buffer, length) : (void)0);
+  }
+}
+
+static void USBCDC__RP2040_usb_onEndpointRead_closure3(void* __ctx, int32_t endpoint, int32_t size) {
+  USBCDC__RP2040* self = (USBCDC__RP2040*)__ctx;
+  if ((endpoint == self->outEndpoint)) {
+  if ((FIFO_itemCount_get(self->txFIFO) > 0)) {
+  USBCDC__RP2040_deliverOutData(self, size);
+  } else {
+  (self->pendingOutReadSize = size);
+  }
+  }
+}
+
+static USBCDC__RP2040* USBCDC__RP2040_new(RPUSBController__RP2040* usb) {
+  USBCDC__RP2040* self = calloc(1, sizeof(USBCDC__RP2040));
+  self->usb = usb;
+  self->txFIFO = FIFO_new(TX_FIFO_SIZE);
+  self->initialized = false;
+  self->descriptorsSize = 0;
+  self->descriptors = calloc(MAX_DESCRIPTOR_SIZE, sizeof(uint8_t));
+  self->descriptorsCount = 0;
+  self->outEndpoint = (-1);
+  self->inEndpoint = (-1);
+  self->pendingOutReadSize = 0;
+  self->outScratch = calloc(MAX_PACKET_SIZE, sizeof(uint8_t));
+  (__extension__({ self->usb->onUSBEnabled_fn = USBCDC__RP2040_usb_onUSBEnabled_closure0; self->usb->onUSBEnabled_ctx = (void*)self; }));
+  (__extension__({ self->usb->onResetReceived_fn = USBCDC__RP2040_usb_onResetReceived_closure1; self->usb->onResetReceived_ctx = (void*)self; }));
+  (__extension__({ self->usb->onEndpointWrite_fn = USBCDC__RP2040_usb_onEndpointWrite_closure2; self->usb->onEndpointWrite_ctx = (void*)self; }));
+  (__extension__({ self->usb->onEndpointRead_fn = USBCDC__RP2040_usb_onEndpointRead_closure3; self->usb->onEndpointRead_ctx = (void*)self; }));
+  return self;
+}
+
+static void USBCDC__RP2040_cdcSetControlLineState(USBCDC__RP2040* self, int32_t value, int32_t interfaceNumber) {
+  RPUSBController__RP2040_sendSetupPacket(self->usb, createSetupPacket(memcpy(malloc(sizeof(ISetupPacketParams)), &(ISetupPacketParams){ .dataDirection = DataDirection_HostToDevice, .type = SetupType_Class, .recipient = SetupRecipient_Device, .bRequest = CDC_REQUEST_SET_CONTROL_LINE_STATE, .wValue = value, .wIndex = interfaceNumber, .wLength = 0 }, sizeof(ISetupPacketParams))));
+  (self->initialized = true);
+}
+
+static void USBCDC__RP2040_deliverOutData(USBCDC__RP2040* self, int32_t size) {
+  int32_t length = min(size, FIFO_itemCount_get(self->txFIFO));
+  for (
+int32_t i = 0
+; (i < length); (i++)) {
+  (self->outScratch[i] = FIFO_pull(self->txFIFO));
+  }
+  RPUSBController__RP2040_endpointReadDone(self->usb, self->outEndpoint, self->outScratch, length, self->usb->readDelayMicroseconds);
+}
+
+static void USBCDC__RP2040_sendSerialByte(USBCDC__RP2040* self, int32_t data) {
+  FIFO_push(self->txFIFO, data);
+  if ((self->pendingOutReadSize > 0)) {
+  int32_t size = self->pendingOutReadSize;
+  (self->pendingOutReadSize = 0);
+  USBCDC__RP2040_deliverOutData(self, size);
   }
 }
 
@@ -17920,7 +26233,7 @@ static int32_t Timer32_rawCounter_get(Timer32* self) {
   return self->baseValue;
   }
   int32_t zigzag = (timerMode == TimerMode_ZigZag);
-  int32_t ticks = (((double)((SimulationClock_nanos_get(self->clock) - baseNanos)) / (double)(1000000000)) * ((double)(baseFreq) / (double)(prescalerValue)));
+  int32_t ticks = (((double)((SimulationClock_nanos_get(self->clock) - baseNanos)) / (double)(1e9)) * ((double)(baseFreq) / (double)(prescalerValue)));
   int32_t topModulo = (zigzag ? (self->topValue * 2) : (self->topValue + 1));
   int32_t delta = ((timerMode == TimerMode_Decrement) ? ((topModulo == 0) ? (-ticks) : (topModulo - (ticks % topModulo))) : ticks);
   int32_t currentValue = round((baseValue + delta));
@@ -17976,7 +26289,7 @@ static double Timer32_toNanos(Timer32* self, uint32_t cycles) {
   Timer32* __destruct_tmp_1 = self;
   int32_t baseFreq = __destruct_tmp_1->baseFreq;
   int32_t prescalerValue = __destruct_tmp_1->prescalerValue;
-  double nanosPerCycle = ((double)(1000000000) / (double)(((double)(baseFreq) / (double)(prescalerValue))));
+  double nanosPerCycle = ((double)(1e9) / (double)(((double)(baseFreq) / (double)(prescalerValue))));
   return (cycles * nanosPerCycle);
 }
 
@@ -18136,7 +26449,42 @@ static void Timer32PeriodicAlarm_cancel(Timer32PeriodicAlarm* self) {
 }
 
 // ─── types.ts ───
+static int64_t int53Pack(int32_t low, int32_t high) {
+  return (((uint32_t)(low) >> (0)) + (high * 4294967296));
+}
+
 // ─── ChipType-generic instantiations ───
+static LoadFirmwareResult* loadFirmware__RP2040(RP2040* chip, const char* path, LoadFirmwareOptions* options) {
+  LoadFirmwareResult* result = 0;
+  if (((((int32_t)strlen(path)) >= 4) && (strcmp(strSubstring(path, (((int32_t)strlen(path)) - 4), (int32_t)strlen(path)), ".uf2") == 0))) {
+  (result = loadFirmwareFromUF2__RP2040(chip, path));
+  } else {
+  (result = loadFirmwareFromHex__RP2040(chip, readFileSync(path, "utf-8"), path));
+  }
+  int32_t initChip = (options ? (options->initChip ? options->initChip : true) : true);
+  int32_t entryPc = (options ? options->entryPc : 0);
+  if ((!initChip)) {
+  return result;
+  }
+  if ((entryPc != 0)) {
+  RP2040_reset(chip);
+  int32_t pc = ((uint32_t)(entryPc) >> (0));
+  CortexM0Core_PC_set(chip->core[0], pc);
+  CortexM0Core_PC_set(chip->core[1], pc);
+  return result;
+  }
+  if ((result->useSram && (strcmp(chip->identifier, "rp2350") == 0))) {
+  setupVectoredRamBoot__RP2040(chip, result->loadBase, (options ? (options->ramWindowSize ? options->ramWindowSize : 262144) : 262144));
+  }
+  if ((result->useSram && (strcmp(chip->identifier, "rp2040") == 0))) {
+  RP2040_reset(chip);
+  CortexM0Core_PC_set(chip->core[0], result->loadBase);
+  return result;
+  }
+  RP2040_reset(chip);
+  return result;
+}
+
 static LoadFirmwareResult* loadFirmware__RP2350(RP2350* chip, const char* path, LoadFirmwareOptions* options) {
   LoadFirmwareResult* result = 0;
   if (((((int32_t)strlen(path)) >= 4) && (strcmp(strSubstring(path, (((int32_t)strlen(path)) - 4), (int32_t)strlen(path)), ".uf2") == 0))) {
@@ -18152,15 +26500,57 @@ static LoadFirmwareResult* loadFirmware__RP2350(RP2350* chip, const char* path, 
   if ((entryPc != 0)) {
   RP2350_reset(chip, false);
   int32_t pc = ((uint32_t)(entryPc) >> (0));
-  (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "iface assign [src/utils/load-firmware.ts:255: chip.core[0].PC = pc;]"); abort(); 0; }));
-  (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "iface assign [src/utils/load-firmware.ts:256: chip.core[1].PC = pc;]"); abort(); 0; }));
+  (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "iface assign [src/utils/load-firmware.ts:253: chip.core[0].PC = pc;]"); abort(); 0; }));
+  (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "iface assign [src/utils/load-firmware.ts:254: chip.core[1].PC = pc;]"); abort(); 0; }));
   return result;
   }
   if ((result->useSram && (strcmp(chip->identifier, "rp2350") == 0))) {
   setupVectoredRamBoot__RP2350(chip, result->loadBase, (options ? (options->ramWindowSize ? options->ramWindowSize : 262144) : 262144));
   }
+  if ((result->useSram && (strcmp(chip->identifier, "rp2040") == 0))) {
+  RP2350_reset(chip, false);
+  (__extension__({ fprintf(stderr, "cts2c: unsupported: %s\n", "iface assign [src/utils/load-firmware.ts:269: chip.core[0].PC = result.loadBase;]"); abort(); 0; }));
+  return result;
+  }
   RP2350_reset(chip, false);
   return result;
+}
+
+static LoadFirmwareResult* loadFirmwareFromUF2__RP2040(RP2040* chip, const char* path) {
+  bool useSram = false;
+  uint32_t loadBase = 0;
+  cts2c_loadUF2(path, chip->flash, FLASH_START_ADDRESS, chip->sram, RAM_START_ADDRESS, &useSram, &loadBase);
+  tryLoadDisassembly__RP2040(path, chip, "uf2");
+  return memcpy(malloc(sizeof(LoadFirmwareResult)), &(LoadFirmwareResult){ .format = "uf2", .useSram = useSram, .loadBase = (int32_t)loadBase }, sizeof(LoadFirmwareResult));
+}
+
+static LoadFirmwareResult* loadFirmwareFromHex__RP2040(RP2040* chip, const char* hex, const char* path) {
+  int32_t useSram = inspectHex(hex)->useSram;
+  int32_t loadBase = inspectHex(hex)->loadBase;
+  if (useSram) {
+  loadHex(hex, chip->sram, RAM_START_ADDRESS);
+  } else {
+  loadHex(hex, chip->flash, FLASH_START_ADDRESS);
+  }
+  if (path) {
+  tryLoadDisassembly__RP2040(path, chip, "hex");
+  }
+  return memcpy(malloc(sizeof(LoadFirmwareResult)), &(LoadFirmwareResult){ .format = "hex", .useSram = useSram, .loadBase = loadBase }, sizeof(LoadFirmwareResult));
+}
+
+static void setupVectoredRamBoot__RP2040(RP2040* chip, int32_t windowBase, int32_t windowSize) {
+  if ((strcmp(chip->identifier, "rp2350") != 0)) {
+  return;
+  }
+  int32_t w(int32_t i) {
+  return (WATCHDOG_SCRATCH0 + (i * 4));
+  }
+  RP2040_writeUint32(chip, w(2), ((uint32_t)(windowBase) >> (0)));
+  RP2040_writeUint32(chip, w(3), ((uint32_t)(windowSize) >> (0)));
+  RP2040_writeUint32(chip, w(4), VECTORED_BOOT_MAGIC);
+  RP2040_writeUint32(chip, w(5), ((uint32_t)(((int32_t)(REBOOT_TO_MAGIC_PC) ^ (int32_t)(NEG_MAGIC))) >> (0)));
+  RP2040_writeUint32(chip, w(6), BOOT_TYPE_RAM_IMAGE);
+  RP2040_writeUint32(chip, w(7), REBOOT_TO_MAGIC_PC);
 }
 
 static LoadFirmwareResult* loadFirmwareFromUF2__RP2350(RP2350* chip, const char* path) {
@@ -18200,8 +26590,19 @@ static void setupVectoredRamBoot__RP2350(RP2350* chip, int32_t windowBase, int32
   RP2350_writeUint32(chip, w(7), REBOOT_TO_MAGIC_PC);
 }
 
+static void tryLoadDisassembly__RP2040(const char* path, RP2040* chip, const char* ext) {
+  const char* disPath = strConcat2(strSubstring(path, 0, ((((int32_t)strlen(path)) - ((int32_t)strlen(ext))) - 1)), ".dis");
+  if ((!existsSync(disPath))) {
+  return;
+  }
+  RP2040_loadDisassembly(chip, readFileSync(disPath, "utf-8"));
+}
+
 static void tryLoadDisassembly__RP2350(const char* path, RP2350* chip, const char* ext) {
   const char* disPath = strConcat2(strSubstring(path, 0, ((((int32_t)strlen(path)) - ((int32_t)strlen(ext))) - 1)), ".dis");
+  if ((!existsSync(disPath))) {
+  return;
+  }
   RP2350_loadDisassembly(chip, readFileSync(disPath, "utf-8"));
 }
 
