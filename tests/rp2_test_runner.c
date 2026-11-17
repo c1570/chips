@@ -24,7 +24,9 @@ extern void c64_print_screen(void);
 extern void c64_load_cartridge(const char* filename);
 extern uint8_t c64_ram_read(uint16_t addr);
 
-#define FIRMWARE_PATH "../rp2040/build/c1541.uf2"
+#ifndef FIRMWARE_PATH
+#define FIRMWARE_PATH "../../sd2iec/obj-rp2350-rppico-direct/sd2iec.uf2"
+#endif
 
 /* IEC GPIO pins on RP2 */
 #define IEC_GPIO_ATN 2
@@ -48,15 +50,15 @@ extern uint8_t c64_ram_read(uint16_t addr);
 #define C64_TICKS_PER_SECOND 985249.0
 #define C64_FRAMES_PER_SECOND 25.0
 #define C1541_TICKS_PER_SECOND 1000000.0
+#define RP2_CYCLES_PER_SECOND 150000000.0
+
+/* One C1541 tick is 1us, i.e. 150 cycles of the 150MHz RP2 */
+#define RP2_CYCLES_PER_C1541_TICK ((int64_t)(RP2_CYCLES_PER_SECOND / C1541_TICKS_PER_SECOND))
 
 #define STOP_AFTER_SYSTEM_SECONDS 20.0
 #define CONSOLE_FRAMES_PER_SECOND 1.0
 
 static RP2350* mcu;
-
-/* Set by the onTrace callback when the firmware reaches its "tick " marker; see
- * cycle_info() in the firmware's cycle_tracing.h. This is the runner's clock. */
-static bool c1541_tick_done = false;
 
 /* ── UART ───────────────────────────────────────────────────────────────────── */
 static void on_uart_byte(void* ctx, int32_t value) {
@@ -68,12 +70,8 @@ static void on_uart_byte(void* ctx, int32_t value) {
 static void on_trace(void* ctx, int32_t core_number, int32_t pc, const char* tag) {
   (void)ctx;
   (void)core_number;
-  if (tag != NULL && strcmp(tag, "tick ") == 0) {
-    c1541_tick_done = true;
-  } else {
-    printf("%" PRId64 " PC 0x%x tag %s\n", (int64_t)RP2350_cycles_get(mcu), (unsigned)pc,
-           tag ? tag : "");
-  }
+  printf("%" PRId64 " PC 0x%x tag %s\n", (int64_t)RP2350_cycles_get(mcu), (unsigned)pc,
+         tag ? tag : "");
 }
 
 /* ── Milliseconds since an arbitrary epoch, matching the JS `+new Date()` use ── */
@@ -142,6 +140,17 @@ static void tick_c64(void) {
   GPIOPin_setInputValue(mcu->gpio[IEC_GPIO_RESET], (bus_state & IECLINE_RESET) != 0);
 }
 
+/* Model the rppico-direct board's external pull-ups. The simulator defaults
+ * raw GPIO inputs to low, which would make the address jumpers look closed
+ * (device address 11 instead of 8). */
+static void init_board_inputs(void) {
+  GPIOPin_setInputValue(mcu->gpio[10], true); /* BUTTON_NEXT */
+  GPIOPin_setInputValue(mcu->gpio[11], true); /* BUTTON_PREV */
+  GPIOPin_setInputValue(mcu->gpio[20], true); /* ADDR_PIN_A */
+  GPIOPin_setInputValue(mcu->gpio[21], true); /* ADDR_PIN_B */
+  GPIOPin_setInputValue(mcu->gpio[22], true); /* SD detect, no card */
+}
+
 int main(void) {
   static const char* const motor_anim[] = {"b", "d", "q", "p"};
   const size_t motor_anim_len = sizeof(motor_anim) / sizeof(motor_anim[0]);
@@ -155,9 +164,16 @@ int main(void) {
 #endif
 
   printf("Initializing RP2...\n");
-  RP2350Options options = {.coreArch = "riscv", .loadFirmware = NULL};
+  RP2350Options options = {.coreArch = "arm", .loadFirmware = NULL};
   mcu = RP2350_new(&options);
-  RP2350_loadFirmware(mcu, FIRMWARE_PATH, NULL);
+  init_board_inputs();
+
+  const char* firmware_path = getenv("SD2IEC_UF2");
+  if (firmware_path == NULL) {
+    firmware_path = FIRMWARE_PATH;
+  }
+  printf("Loading firmware %s\n", firmware_path);
+  RP2350_loadFirmware(mcu, firmware_path, NULL);
 
   mcu->uart[0]->onByte_fn = on_uart_byte;
   mcu->onTrace_fn = on_trace;
@@ -278,9 +294,10 @@ int main(void) {
 #endif
 
     if (must_tick_c1541) {
-      c1541_tick_done = false;
+      /* The sd2iec firmware has no "tick done" trace marker, so run the
+       * simulated RP2 for one C1541 microsecond (150 cycles at 150MHz). */
       const int64_t start_cycles = RP2350_cycles_get(mcu);
-      while (!c1541_tick_done) {
+      while ((RP2350_cycles_get(mcu) - start_cycles) < RP2_CYCLES_PER_C1541_TICK) {
         RP2350_step(mcu);
       }
       const int64_t elapsed = RP2350_cycles_get(mcu) - start_cycles;
