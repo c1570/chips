@@ -3780,6 +3780,10 @@ static bool conditionPassed(M33Registers* regs, int32_t cond);
 static int32_t coprocessorExecute(CortexM33Core* core, int32_t hw0, int32_t hw1);
 static bool isMrcMcr(int32_t hw0, int32_t hw1);
 static void writeMrcResult(CortexM33Core* core, int32_t Rt, int32_t value);
+static int32_t gpiocBaseOffset(int32_t CRm);
+static int32_t gpiocRead(CortexM33Core* core, int32_t base, bool hi);
+static void gpiocWrite(CortexM33Core* core, int32_t base, bool hi, int32_t op, int32_t value);
+static void gpiocWriteBit(CortexM33Core* core, int32_t base, int32_t pin, int32_t op);
 static int32_t cp0Gpioc(CortexM33Core* core, int32_t hw0, int32_t hw1);
 static int32_t f64ToI32Sat(double d);
 static int32_t f64ToU32Sat(double d);
@@ -6276,7 +6280,6 @@ static bool conditionPassed(M33Registers* regs, int32_t cond) {
 }
 
 // ─── coprocessor.ts ───
-enum { PIN_MASK = (1073741823) };
 static int32_t coprocessorExecute(CortexM33Core* core, int32_t hw0, int32_t hw1) {
   int32_t coproc = ((int32_t)(((uint32_t)(hw1) >> (8))) & (int32_t)(15));
   int32_t access = ((int32_t)(((uint32_t)(CortexM33Core_ppb(core)->cpacr) >> (((int32_t)((coproc * 2))) & 31))) & (int32_t)(3));
@@ -6313,99 +6316,118 @@ static void writeMrcResult(CortexM33Core* core, int32_t Rt, int32_t value) {
   }
 }
 
+enum { GPIOC_SIO_IN = (4) };
+enum { GPIOC_SIO_OUT = (16) };
+enum { GPIOC_SIO_OE = (48) };
+enum { GPIOC_SIO_SET = (8) };
+enum { GPIOC_SIO_CLR = (16) };
+enum { GPIOC_SIO_XOR = (24) };
+enum { GPIOC_OP_PUT = (0) };
+enum { GPIOC_OP_XOR = (1) };
+enum { GPIOC_OP_SET = (2) };
+enum { GPIOC_OP_CLR = (3) };
+static int32_t gpiocBaseOffset(int32_t CRm) {
+  switch (((int32_t)(CRm) & (int32_t)(14))) {
+  case 0:
+  return GPIOC_SIO_OUT;
+  case 4:
+  return GPIOC_SIO_OE;
+  case 8:
+  return GPIOC_SIO_IN;
+  default:
+  return (-1);
+  }
+  return (int32_t){0};
+}
+
+static int32_t gpiocRead(CortexM33Core* core, int32_t base, bool hi) {
+  if ((base < 0)) {
+  return 0;
+  }
+  return ((uint32_t)(RP2350SIO_readUint32(core->chip->sio, (base + (hi ? 4 : 0)), core->coreIndex)) >> (0));
+}
+
+static void gpiocWrite(CortexM33Core* core, int32_t base, bool hi, int32_t op, int32_t value) {
+  if (((base != GPIOC_SIO_OUT) && (base != GPIOC_SIO_OE))) {
+  return;
+  }
+  int32_t offset = (base + (hi ? 4 : 0));
+  switch (op) {
+  case GPIOC_OP_XOR:
+  (offset += GPIOC_SIO_XOR);
+  break;
+  case GPIOC_OP_SET:
+  (offset += GPIOC_SIO_SET);
+  break;
+  case GPIOC_OP_CLR:
+  (offset += GPIOC_SIO_CLR);
+  break;
+  default:
+  break;
+  }
+  RP2350SIO_writeUint32(core->chip->sio, offset, ((uint32_t)(value) >> (0)), core->coreIndex);
+}
+
+static void gpiocWriteBit(CortexM33Core* core, int32_t base, int32_t pin, int32_t op) {
+  int32_t index = ((int32_t)(pin) & (int32_t)(63));
+  int32_t hi = (index >= 32);
+  gpiocWrite(core, base, hi, op, ((uint32_t)(((int32_t)((uint32_t)(1) << (((int32_t)(((int32_t)(index) & (int32_t)(31)))) & 31)))) >> (0)));
+}
+
 static int32_t cp0Gpioc(CortexM33Core* core, int32_t hw0, int32_t hw1) {
+  M33Registers* regs = core->regs;
+  int32_t hw0Hi = ((int32_t)(((uint32_t)(hw0) >> (8))) & (int32_t)(255));
+  int32_t CRm = ((int32_t)(hw1) & (int32_t)(15));
+  int32_t Rt = ((int32_t)(((uint32_t)(hw1) >> (12))) & (int32_t)(15));
+  int32_t base = gpiocBaseOffset(CRm);
+  int32_t isRead = (((int32_t)(((uint32_t)(hw0) >> (4))) & (int32_t)(1)) != 0);
+  if (((hw0Hi == 236) || (hw0Hi == 252))) {
+  int32_t opc1 = ((int32_t)(((uint32_t)(hw1) >> (4))) & (int32_t)(15));
+  int32_t Rt2 = ((int32_t)(hw0) & (int32_t)(15));
+  if (isRead) {
+  (regs->r[Rt] = gpiocRead(core, base, false));
+  (regs->r[Rt2] = gpiocRead(core, base, true));
+  return 1;
+  }
+  int32_t lo = ((uint32_t)(regs->r[Rt]) >> (0));
+  int32_t hi = ((uint32_t)(regs->r[Rt2]) >> (0));
+  if ((opc1 <= 3)) {
+  gpiocWrite(core, base, false, opc1, lo);
+  gpiocWrite(core, base, true, opc1, hi);
+  } else {
+  if ((opc1 == 4)) {
+  gpiocWriteBit(core, base, lo, (((int32_t)(hi) & (int32_t)(1)) ? GPIOC_OP_SET : GPIOC_OP_CLR));
+  } else {
+  if ((opc1 <= 7)) {
+  if (((int32_t)(hi) & (int32_t)(1))) {
+  gpiocWriteBit(core, base, lo, (opc1 - 4));
+  }
+  } else {
+  if ((opc1 <= 11)) {
+  if ((hi <= 1)) {
+  gpiocWrite(core, base, (hi == 1), (opc1 - 8), lo);
+  }
+  }
+  }
+  }
+  }
+  return 1;
+  }
   if ((!isMrcMcr(hw0, hw1))) {
   return 1;
   }
   int32_t opc1 = ((int32_t)(((uint32_t)(hw0) >> (5))) & (int32_t)(7));
-  int32_t CRn = ((int32_t)(hw0) & (int32_t)(15));
-  int32_t opc2 = ((int32_t)(((uint32_t)(hw1) >> (5))) & (int32_t)(7));
-  int32_t CRm = ((int32_t)(hw1) & (int32_t)(15));
-  int32_t Rt = ((int32_t)(((uint32_t)(hw1) >> (12))) & (int32_t)(15));
-  int32_t isRead = (((int32_t)(((uint32_t)(hw0) >> (4))) & (int32_t)(1)) != 0);
-  M33Registers* regs = core->regs;
-  int32_t isInput = ((opc1 == 2) ? (opc1 == 2) : (opc1 == 6));
-  int32_t isOe = ((opc1 == 1) ? (opc1 == 1) : (opc1 == 5));
-  int32_t isHi = (opc1 >= 4);
-  (void)isHi;
-  RP2350SIO* sio = core->chip->sio;
-  int32_t GPIO_OUT = 16;
-  int32_t GPIO_OUT_SET = 24;
-  int32_t GPIO_OUT_CLR = 32;
-  int32_t GPIO_OUT_XOR = 40;
-  int32_t GPIO_OE = 48;
-  int32_t GPIO_OE_SET = 56;
-  int32_t GPIO_OE_CLR = 64;
-  int32_t GPIO_OE_XOR = 72;
-  int32_t GPIO_IN = 4;
-  int32_t baseOffset = (isInput ? GPIO_IN : (isOe ? GPIO_OE : GPIO_OUT));
-  int32_t isBulk = ((CRn == 0) ? (CRm == 0) : (CRn == 0));
-  if (isBulk) {
+  int32_t hiBank = (((int32_t)(CRm) & (int32_t)(1)) != 0);
   if (isRead) {
-  if (isInput) {
-  writeMrcResult(core, Rt, ((int32_t)(RP2350SIO_readUint32(sio, GPIO_IN, core->coreIndex)) & (int32_t)(PIN_MASK)));
-  } else {
-  if ((!isHi)) {
-  writeMrcResult(core, Rt, ((int32_t)(RP2350SIO_readUint32(sio, baseOffset, core->coreIndex)) & (int32_t)(PIN_MASK)));
-  } else {
-  writeMrcResult(core, Rt, 0);
-  }
-  }
-  } else {
-  int32_t val = ((int32_t)(regs->r[Rt]) & (int32_t)(PIN_MASK));
-  if (((!isInput) && (!isHi))) {
-  switch (opc2) {
-  case 0:
-  RP2350SIO_writeUint32(sio, baseOffset, val, core->coreIndex);
-  break;
-  case 1:
-  RP2350SIO_writeUint32(sio, (isOe ? GPIO_OE_SET : GPIO_OUT_SET), val, core->coreIndex);
-  break;
-  case 2:
-  RP2350SIO_writeUint32(sio, (isOe ? GPIO_OE_CLR : GPIO_OUT_CLR), val, core->coreIndex);
-  break;
-  case 3:
-  RP2350SIO_writeUint32(sio, (isOe ? GPIO_OE_XOR : GPIO_OUT_XOR), val, core->coreIndex);
-  break;
-  }
-  }
-  }
-  } else {
-  int32_t pin = ((int32_t)(((int32_t)((uint32_t)(CRn) << (4)))) | (int32_t)(CRm));
-  if ((pin >= 30)) {
-  if (isRead) {
-  writeMrcResult(core, Rt, 0);
-  }
+  writeMrcResult(core, Rt, gpiocRead(core, base, hiBank));
   return 1;
   }
-  int32_t bitMask = ((int32_t)((uint32_t)(1) << (((int32_t)(pin)) & 31)));
-  if (isRead) {
-  if (isInput) {
-  writeMrcResult(core, Rt, ((int32_t)(((int32_t)(RP2350SIO_readUint32(sio, GPIO_IN, core->coreIndex)) >> (((int32_t)(pin)) & 31))) & (int32_t)(1)));
+  int32_t value = ((uint32_t)(regs->r[Rt]) >> (0));
+  if ((opc1 <= 3)) {
+  gpiocWrite(core, base, hiBank, opc1, value);
   } else {
-  writeMrcResult(core, Rt, ((int32_t)(((int32_t)(RP2350SIO_readUint32(sio, baseOffset, core->coreIndex)) >> (((int32_t)(pin)) & 31))) & (int32_t)(1)));
-  }
-  } else {
-  if (((!isInput) && (!isHi))) {
-  switch (opc2) {
-  case 4:
-  if (((int32_t)(regs->r[Rt]) & (int32_t)(1))) {
-  RP2350SIO_writeUint32(sio, (isOe ? GPIO_OE_SET : GPIO_OUT_SET), bitMask, core->coreIndex);
-  } else {
-  RP2350SIO_writeUint32(sio, (isOe ? GPIO_OE_CLR : GPIO_OUT_CLR), bitMask, core->coreIndex);
-  }
-  break;
-  case 5:
-  RP2350SIO_writeUint32(sio, (isOe ? GPIO_OE_SET : GPIO_OUT_SET), bitMask, core->coreIndex);
-  break;
-  case 6:
-  RP2350SIO_writeUint32(sio, (isOe ? GPIO_OE_CLR : GPIO_OUT_CLR), bitMask, core->coreIndex);
-  break;
-  case 7:
-  RP2350SIO_writeUint32(sio, (isOe ? GPIO_OE_XOR : GPIO_OUT_XOR), bitMask, core->coreIndex);
-  break;
-  }
-  }
+  if ((opc1 >= 5)) {
+  gpiocWriteBit(core, base, value, (opc1 - 4));
   }
   }
   return 1;
@@ -18178,13 +18200,13 @@ static int32_t RPSPI_dataBits_get(RPSPI* self) {
 }
 
 static int32_t RPSPI_masterMode_get(RPSPI* self) {
-  return (!((int32_t)(self->control0) & (int32_t)(MS)));
+  return (!((int32_t)(self->control1) & (int32_t)(MS)));
 }
 
 static int32_t RPSPI_spiMode_get(RPSPI* self) {
   int32_t cpol = ((int32_t)(self->control0) & (int32_t)(SPO));
   int32_t cpha = ((int32_t)(self->control0) & (int32_t)(SPH));
-  return (cpol ? (cpha ? 2 : 3) : (cpha ? 1 : 0));
+  return (cpol ? (cpha ? 3 : 2) : (cpha ? 1 : 0));
 }
 
 static int32_t RPSPI_clockFrequency_get(RPSPI* self) {
@@ -18377,13 +18399,13 @@ static int32_t RPSPI__RP2040_dataBits_get(RPSPI__RP2040* self) {
 }
 
 static int32_t RPSPI__RP2040_masterMode_get(RPSPI__RP2040* self) {
-  return (!((int32_t)(self->control0) & (int32_t)(MS)));
+  return (!((int32_t)(self->control1) & (int32_t)(MS)));
 }
 
 static int32_t RPSPI__RP2040_spiMode_get(RPSPI__RP2040* self) {
   int32_t cpol = ((int32_t)(self->control0) & (int32_t)(SPO));
   int32_t cpha = ((int32_t)(self->control0) & (int32_t)(SPH));
-  return (cpol ? (cpha ? 2 : 3) : (cpha ? 1 : 0));
+  return (cpol ? (cpha ? 3 : 2) : (cpha ? 1 : 0));
 }
 
 static int32_t RPSPI__RP2040_clockFrequency_get(RPSPI__RP2040* self) {
@@ -19035,10 +19057,13 @@ static void RPTimer_writeUint32(RPTimer* self, int32_t offset, int32_t value) {
   {
   int32_t alarmIndex = ((double)((offset - ALARM0)) / (double)(4));
   RPTimerAlarm* alarm = self->alarms[alarmIndex];
-  double deltaMicros = ((uint32_t)((value - ((double)(IClock_getNanos(self->clock)) / (double)(1000)))) >> (0));
+  double nowNanos = IClock_getNanos(self->clock);
+  double nowMicros = floor(((double)(nowNanos) / (double)(1000)));
+  double deltaMicros = ((uint32_t)((value - nowMicros)) >> (0));
+  double deltaNanos = ((deltaMicros * 1000.0) - (nowNanos - (nowMicros * 1000.0)));
   (alarm->armed = true);
   (alarm->targetMicros = value);
-  IAlarm_schedule(alarm->clockAlarm, (deltaMicros * 1000.0));
+  IAlarm_schedule(alarm->clockAlarm, ((deltaNanos > 0) ? deltaNanos : 0));
   return;
   }
   case ARMED:
@@ -19216,10 +19241,13 @@ static void RPTimer__RP2040_writeUint32(RPTimer__RP2040* self, int32_t offset, i
   {
   int32_t alarmIndex = ((double)((offset - ALARM0)) / (double)(4));
   RPTimerAlarm__RP2040* alarm = self->alarms[alarmIndex];
-  double deltaMicros = ((uint32_t)((value - ((double)(IClock_getNanos(self->clock)) / (double)(1000)))) >> (0));
+  double nowNanos = IClock_getNanos(self->clock);
+  double nowMicros = floor(((double)(nowNanos) / (double)(1000)));
+  double deltaMicros = ((uint32_t)((value - nowMicros)) >> (0));
+  double deltaNanos = ((deltaMicros * 1000.0) - (nowNanos - (nowMicros * 1000.0)));
   (alarm->armed = true);
   (alarm->targetMicros = value);
-  IAlarm_schedule(alarm->clockAlarm, (deltaMicros * 1000.0));
+  IAlarm_schedule(alarm->clockAlarm, ((deltaNanos > 0) ? deltaNanos : 0));
   return;
   }
   case ARMED:
@@ -23693,9 +23721,9 @@ static RP2350* RP2350_new(RP2350Options* options) {
   self->sramDecode = calloc(((double)((((256 * 2) + 8) * 1024)) / (double)(2)), sizeof(uint64_t));
   self->flashDecode = calloc(((double)(FLASH_SIZE__rp2350) / (double)(2)), sizeof(uint64_t));
   self->identifier = "rp2350";
-  self->clock = SimulationClock_new(125e6);
-  self->clkSys = (125 * MHz);
-  self->clkPeri = (125 * MHz);
+  self->clock = SimulationClock_new((150 * MHz));
+  self->clkSys = (150 * MHz);
+  self->clkPeri = (150 * MHz);
   self->sio = RP2350SIO_new(self, IRQ2350_SIO_IRQ_FIFO, IRQ2350_SIO_IRQ_FIFO, IRQ2350_SIO_IRQ_MTIMECMP);
   self->otp = RP2350OTP_new(self, "OTP_BASE");
   self->watchdog = RPWatchdog_new(self, "WATCHDOG_BASE");
