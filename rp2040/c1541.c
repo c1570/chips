@@ -3,6 +3,7 @@
 //
 
 #include "pico/stdlib.h"
+#include "pico/multicore.h"
 #include "hardware/gpio.h"
 #include "cycle_tracing.h"
 
@@ -44,7 +45,8 @@ static bool drive_motor_status = 1;
 static int drive_current_track = 0;
 #define C1541_TRACK_CHANGED_HOOK(s,v) {cycle_info("track");drive_current_track=v;}
 #define C1541_MOTOR_CHANGED_HOOK(s,v) gpio_put(MOTOR_STATUS_PIN,v)
-#define C1541_LED_CHANGED_HOOK(s,v) {cycle_info("led");gpio_put(LED_PIN,v);}
+#define C1541_LED_CHANGED_HOOK(s,v) {cycle_info("led  ");gpio_put(LED_PIN,v);}
+#define C1541_CYCLE_INFO(a) cycle_info(a)
 #include "iecbus_rp2.h"
 #include "../systems/c1541.h"
 #include "../tests/c1541-roms.h"
@@ -55,6 +57,21 @@ static struct {
     c1541_t c1541;
     bool keep_running;
 } state;
+
+static volatile uint32_t via2_start;
+static volatile uint32_t via2_done;
+static volatile bool via2_irq;
+
+static void core1_entry(void) {
+    while (true) {
+        while (via2_start == 0) {
+        }
+        via2_start = 0;
+        via2_irq = _c1541_tick_via2_a(&state.c1541);
+        via2_done = 1;
+        _c1541_tick_via2_b(&state.c1541);
+    }
+}
 
 void cleanup(int signal) {
     state.keep_running = false;
@@ -83,52 +100,33 @@ void init_iec_gpio(void) {
 // Read incoming IEC signals from GPIOs
 uint8_t read_iec_signals(void) {
     uint8_t signals = 0xFF;  // Start with all inactive (high)
+    const uint32_t gpio = gpio_get_all();
 
     // GPIO reads return 1 when HIGH (inactive), 0 when LOW (active)
-    if (!gpio_get(IEC_PIN_ATN))   signals &= ~IECLINE_ATN;
-    if (!gpio_get(IEC_PIN_DATA))  signals &= ~IECLINE_DATA;
-    if (!gpio_get(IEC_PIN_CLK))   signals &= ~IECLINE_CLK;
-    if (!gpio_get(IEC_PIN_RESET)) signals &= ~IECLINE_RESET;
-    if (!gpio_get(IEC_PIN_SRQ))   signals &= ~IECLINE_SRQIN;
+    if (!(gpio & (1u << IEC_PIN_ATN)))   signals &= ~IECLINE_ATN;
+    if (!(gpio & (1u << IEC_PIN_DATA)))  signals &= ~IECLINE_DATA;
+    if (!(gpio & (1u << IEC_PIN_CLK)))   signals &= ~IECLINE_CLK;
+    if (!(gpio & (1u << IEC_PIN_RESET))) signals &= ~IECLINE_RESET;
+    if (!(gpio & (1u << IEC_PIN_SRQ)))   signals &= ~IECLINE_SRQIN;
 
     return signals;
 }
 
 // Write outgoing IEC signals using open-collector logic
 void write_iec_signals(uint8_t signals) {
-    // Open-collector output: set direction to output to pull low (active),
-    // or input to release (inactive/high via pull-up)
-
-    // DATA line: pull low if active, otherwise release (input)
-    if (signals & IECLINE_DATA) {
-        gpio_set_dir(IEC_PIN_DATA, GPIO_IN);  // Release (inactive)
-    } else {
-        gpio_set_dir(IEC_PIN_DATA, GPIO_OUT); // Pull low (active)
-    }
-
-    // CLK line
-    if (signals & IECLINE_CLK) {
-        gpio_set_dir(IEC_PIN_CLK, GPIO_IN);   // Release (inactive)
-    } else {
-        gpio_set_dir(IEC_PIN_CLK, GPIO_OUT);  // Pull low (active)
-    }
-
-    // ATN line (typically input-only for drive, but handle for completeness)
-    if (signals & IECLINE_ATN) {
-        gpio_set_dir(IEC_PIN_ATN, GPIO_IN);   // Release (inactive)
-    } else {
-        gpio_set_dir(IEC_PIN_ATN, GPIO_OUT);  // Pull low (active)
-    }
-
-    // RESET line
-    if (signals & IECLINE_RESET) {
-        gpio_set_dir(IEC_PIN_RESET, GPIO_IN); // Release (inactive)
-    } else {
-        gpio_set_dir(IEC_PIN_RESET, GPIO_OUT);// Pull low (active)
-    }
-
-    // always input for now
-    gpio_set_dir(IEC_PIN_SRQ, GPIO_IN);
+    // Open-collector output: GPIO_OUT (dir=1) pulls low (active),
+    // GPIO_IN (dir=0) releases the line (inactive/high via pull-up).
+    const uint32_t mask = (1u << IEC_PIN_DATA) | (1u << IEC_PIN_CLK) |
+                          (1u << IEC_PIN_ATN) | (1u << IEC_PIN_RESET) |
+                          (1u << IEC_PIN_SRQ);
+    const uint32_t inv = (uint32_t)(uint8_t)~signals;
+    uint32_t dirs = 0;
+    dirs |= ((inv >> 0) & 1u) << IEC_PIN_DATA;   // IECLINE_DATA
+    dirs |= ((inv >> 1) & 1u) << IEC_PIN_CLK;    // IECLINE_CLK
+    dirs |= ((inv >> 2) & 1u) << IEC_PIN_ATN;    // IECLINE_ATN
+    dirs |= ((inv >> 4) & 1u) << IEC_PIN_RESET;  // IECLINE_RESET
+    // SRQ always input for now (dir bit left 0)
+    gpio_set_dir_masked(mask, dirs);
 }
 
 #include "../docs/1541_test_demo.h"
@@ -178,7 +176,6 @@ int main(int argc, char **argv) {
     uint tick = 0;
     uint ftick = 0;
     uint out_signals = 0;
-    uint in_signals = 0;
     // Initialize RP2040 GPIOs for IEC bus (open collector logic)
     init_iec_gpio();
     gpio_init(MOTOR_STATUS_PIN);
@@ -191,22 +188,32 @@ int main(int argc, char **argv) {
     c1541_init(&state.c1541, &floppy_desc);
     iecbus_device_t* host_iec = iec_connect(&state.c1541.iec_bus, false);
     c1541_fetch_track(&state.c1541); // read initial track
+    multicore_launch_core1(core1_entry);
 
     do {
       // Read IEC incoming signals from GPIOs and update the IEC bus
       iec_set_from_host_signals(read_iec_signals());
-      c1541_tick(&state.c1541);
+      cycle_info("gpioin   ");
+
+      uint64_t pins = _c1541_tick_core0a(&state.c1541, state.c1541.pins);
+      via2_done = 0;
+      via2_start = 1;
+      pins = _c1541_tick_core0b(&state.c1541, pins);
+      cycle_info("c1541");
       //if((tick&0xfffff)==0) printf("%d %d %04x\n", tick, state.c1541.iec_bus->master_tick, state.c1541.cpu.PC);
       tick++;
 
-      const uint in_new_signals = iec_get_signals(state.c1541.iec_bus);
       const uint out_new_signals = iec_get_drive_out_signals();
-      if((out_new_signals != out_signals) || (in_new_signals != in_signals)) {
+      if (out_new_signals != out_signals) {
         out_signals = out_new_signals;
-        in_signals = in_new_signals;
-        //printf("1541 iec output - DATA(%d) CLK(%d), input - ATN(%d) DATA(%d) CLK(%d)\n", IEC_DATA_ACTIVE(out_signals), IEC_CLK_ACTIVE(out_signals), IEC_ATN_ACTIVE(in_signals), IEC_DATA_ACTIVE(in_signals), IEC_CLK_ACTIVE(in_signals));
         write_iec_signals(out_new_signals);
       }
+      while (via2_done == 0) {
+      }
+      if (via2_irq) {
+        pins |= M6502_IRQ;
+      }
+      state.c1541.pins = pins;
       //_c1541_debug_out_processor_pc(tick, &state.c1541, state.c1541.pins, state.c1541.via_1.pins);
       cycle_info("tick "); // rp2040js catches these and ticks the c64 emulation
     } while (state.keep_running);

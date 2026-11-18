@@ -67,6 +67,9 @@ extern "C" {
 #ifndef C1541_TRACK_CHANGED_HOOK
 #define C1541_TRACK_CHANGED_HOOK(s,v)
 #endif
+#ifndef C1541_CYCLE_INFO
+#define C1541_CYCLE_INFO(a)
+#endif
 
 #define VIA2_STEPPER_LO_BIT_POS  0
 #define VIA2_STEPPER_HI_BIT_POS  1
@@ -324,6 +327,7 @@ uint64_t _c1541_tick_cpu(c1541_t *sys, const uint64_t input_pins) {
     uint32_t chip_tick = get_ticks();
 #endif
     uint64_t pins = m6502_tick(&sys->cpu, input_pins);
+    C1541_CYCLE_INFO("m6502");
 #ifdef PICO
     ticks_chip_cpu = get_elapsed_ticks(chip_tick);
 #endif
@@ -380,6 +384,7 @@ uint64_t _c1541_tick_cpu(c1541_t *sys, const uint64_t input_pins) {
 #ifdef PICO
     ticks_cpu = get_elapsed_ticks(tick);
 #endif
+    C1541_CYCLE_INFO("decode   ");
     return pins;
 }
 
@@ -405,7 +410,7 @@ uint8_t _c1541_tick_via1(c1541_t* sys) {
 }
 
 // _c1541_tick_via2 returns if IRQ should be set
-uint8_t _c1541_tick_via2(c1541_t* sys) {
+uint8_t _c1541_tick_via2_a(c1541_t* sys) {
 #ifdef PICO
     uint32_t tick = get_ticks();
 #endif
@@ -495,6 +500,7 @@ uint8_t _c1541_tick_via2(c1541_t* sys) {
 //         printf("chip_tick via2 prepare: %ld sys tick(s)\n", dt);
 // #endif
     }
+    C1541_CYCLE_INFO("gcr  ");
 
     // tick VIA2
     {
@@ -506,18 +512,20 @@ uint8_t _c1541_tick_via2(c1541_t* sys) {
 #endif
         pins = _m6522_tick(&sys->via_2, pins); // use internal _m6522_tick(), register reads/writes are done in cpu tick directly
         sys->via_2.pins = pins;
+        C1541_CYCLE_INFO("m6522b   ");
 #ifdef PICO
         ticks_chip_via2 = get_elapsed_ticks(chip_tick);
 #endif
-// #ifdef PICO
-//         uint32_t dt = get_elapsed_ticks(tick);
-//         printf("chip_tick via2: %ld sys tick(s)\n", dt);
-// #endif
-        // if (pins & M6502_IRQ) {
-        //     pins |= M6502_IRQ;
-        // }
-        // bool drive_stepping = (sys->ram[0x20] & 0x60) == 0x60;
+    }
+#ifdef PICO
+    ticks_via2 = get_elapsed_ticks(tick);
+#endif
+    return 0 != (sys->via_2.pins & M6522_IRQ);
+}
 
+void _c1541_tick_via2_b(c1541_t* sys) {
+    uint64_t pins = sys->via_2.pins;
+    {
         // code from PiCiJi/Denise
         bool updateStepper(uint8_t step) {
             if (step == 1) {
@@ -564,10 +572,14 @@ uint8_t _c1541_tick_via2(c1541_t* sys) {
             }
         }
     }
-#ifdef PICO
-    ticks_via2 = get_elapsed_ticks(tick);
-#endif
-    return 0 != (pins & M6522_IRQ);
+    C1541_CYCLE_INFO("stepper  ");
+}
+
+uint8_t _c1541_tick_via2(c1541_t* sys) {
+    const uint8_t irq = _c1541_tick_via2_a(sys);
+    _c1541_tick_via2_b(sys);
+    C1541_CYCLE_INFO("via2 ");
+    return irq;
 }
 
 void _c1541_update_via_1_from_iec(c1541_t *sys) {
@@ -605,24 +617,40 @@ void _c1541_update_iec_from_via_1(c1541_t* sys) {
     iec_set_signals(sys->iec_bus, sys->iec_device, out_signals);
 }
 
-uint64_t _c1541_tick(c1541_t* sys, const uint64_t input_pins) {
+uint64_t _c1541_tick_core0a(c1541_t* sys, const uint64_t input_pins) {
     uint64_t pins = 0;
-    const uint64_t via_pin_mask = M6502_PIN_MASK;
-
-    _c1541_update_via_1_from_iec(sys);       // mostly updates via_1.pb.pins here for C1541 CPU tick TODO CHECK CA1 picked up one cycle late?
-    pins = _c1541_tick_cpu(sys, input_pins); // VIA1/2 reg reads/writes are handled here, too
-    pins &= ~(M6502_IRQ);
 
     _c1541_update_via_1_from_iec(sys);
+    C1541_CYCLE_INFO("iecin");
+    pins = _c1541_tick_cpu(sys, input_pins);
+    pins &= ~(M6502_IRQ);
+    return pins;
+}
+
+static inline __attribute__((always_inline))
+uint64_t _c1541_tick_core0b(c1541_t* sys, uint64_t pins) {
+    C1541_CYCLE_INFO("iecin2   ");
     if (_c1541_tick_via1(sys)) {
         pins |= M6502_IRQ;
     }
+    C1541_CYCLE_INFO("via1 ");
     _c1541_update_iec_from_via_1(sys);
+    C1541_CYCLE_INFO("iecout   ");
+    return pins;
+}
 
-    if (_c1541_tick_via2(sys)) {
+bool _c1541_tick_core1(c1541_t* sys) {
+    const bool irq = _c1541_tick_via2(sys);
+    C1541_CYCLE_INFO("via2 ");
+    return irq;
+}
+
+uint64_t _c1541_tick(c1541_t* sys, const uint64_t input_pins) {
+    uint64_t pins = _c1541_tick_core0a(sys, input_pins);
+    pins = _c1541_tick_core0b(sys, pins);
+    if (_c1541_tick_core1(sys)) {
         pins |= M6502_IRQ;
     }
-
     return pins;
 }
 

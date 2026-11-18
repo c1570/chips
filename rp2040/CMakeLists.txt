@@ -21,6 +21,7 @@ add_executable(c1541
 # Link against required Pico SDK libraries
 target_link_libraries(c1541
     pico_stdlib
+    pico_multicore
     hardware_gpio
     hardware_structs
 )

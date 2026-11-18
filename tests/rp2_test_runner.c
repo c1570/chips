@@ -58,6 +58,34 @@ static RP2350* mcu;
  * cycle_info() in the firmware's cycle_tracing.h. This is the runner's clock. */
 static bool c1541_tick_done = false;
 
+#define PROFILE_SLOTS 32
+typedef struct {
+  char tag[16];
+  int32_t core;
+  uint64_t cycles;
+  uint64_t count;
+} profile_entry_t;
+static profile_entry_t profile[PROFILE_SLOTS];
+static size_t profile_len;
+static int64_t last_trace_cycles[2];
+static bool profile_active;
+
+static int64_t mcu_cycles(void) {
+  const int64_t c0 = ICpuCore_getCycles(mcu->core[0]);
+  if (mcu->core[1].vtable == NULL) return c0;
+  const int64_t c1 = ICpuCore_getCycles(mcu->core[1]);
+  return c0 > c1 ? c0 : c1;
+}
+
+static void copy_tag(char* dst, size_t dst_size, const char* src) {
+  size_t k = 0;
+  while (src != NULL && src[k] != '\0' && k + 1 < dst_size) {
+    dst[k] = src[k];
+    k++;
+  }
+  dst[k] = '\0';
+}
+
 /* ── UART ───────────────────────────────────────────────────────────────────── */
 static void on_uart_byte(void* ctx, int32_t value) {
   (void)ctx;
@@ -67,13 +95,59 @@ static void on_uart_byte(void* ctx, int32_t value) {
 /* ── Trace markers ──────────────────────────────────────────────────────────── */
 static void on_trace(void* ctx, int32_t core_number, int32_t pc, const char* tag) {
   (void)ctx;
-  (void)core_number;
+  (void)pc;
+  const int32_t core = (core_number == 1) ? 1 : 0;
+  if (profile_active && tag != NULL) {
+    const int64_t now_cycles = ICpuCore_getCycles(mcu->core[core]);
+    const int64_t delta = now_cycles - last_trace_cycles[core];
+    char name[16];
+    copy_tag(name, sizeof(name), tag);
+    size_t i = 0;
+    while (i < profile_len && (profile[i].core != core || strcmp(profile[i].tag, name) != 0)) i++;
+    if (i == profile_len && profile_len < PROFILE_SLOTS) {
+      copy_tag(profile[i].tag, sizeof(profile[i].tag), name);
+      profile[i].core = core;
+      profile_len++;
+    }
+    if (i < profile_len) {
+      profile[i].cycles += (uint64_t)delta;
+      profile[i].count++;
+    }
+    last_trace_cycles[core] = now_cycles;
+  }
   if (tag != NULL && strcmp(tag, "tick ") == 0) {
     c1541_tick_done = true;
-  } else {
-    printf("%" PRId64 " PC 0x%x tag %s\n", (int64_t)RP2350_cycles_get(mcu), (unsigned)pc,
-           tag ? tag : "");
   }
+}
+
+static int cmp_profile(const void* a, const void* b) {
+  const profile_entry_t* pa = a;
+  const profile_entry_t* pb = b;
+  return (pa->cycles < pb->cycles) - (pa->cycles > pb->cycles);
+}
+
+static void print_profile(double c1541_ticks) {
+  if (profile_len == 0 || c1541_ticks <= 0.0) return;
+  profile_entry_t sorted[PROFILE_SLOTS];
+  memcpy(sorted, profile, profile_len * sizeof(*sorted));
+  qsort(sorted, profile_len, sizeof(*sorted), cmp_profile);
+  uint64_t total = 0;
+  for (size_t i = 0; i < profile_len; i++) total += sorted[i].cycles;
+  printf("\n--- cycle profile (per-core RP2 cycles per C1541 tick) ---\n");
+  printf("%-10s %4s %12s %9s %12s %8s\n", "tag", "core", "total", "count", "per-tick", "share");
+  for (size_t i = 0; i < profile_len; i++) {
+    char name[16];
+    copy_tag(name, sizeof(name), sorted[i].tag);
+    size_t n = strlen(name);
+    while (n > 0 && name[n - 1] == ' ') name[--n] = '\0';
+    printf("%-10s %4d %12" PRIu64 " %9" PRIu64 " %12.1f %7.1f%%\n", name, sorted[i].core,
+           sorted[i].cycles, sorted[i].count, (double)sorted[i].cycles / c1541_ticks,
+           100.0 * (double)sorted[i].cycles / (double)total);
+  }
+  printf("%-10s %4s %12" PRIu64 " %9s %12.1f %8s\n", "TOTAL", "", total, "",
+         (double)total / c1541_ticks, "100.0%");
+  printf("cores at end: c0=%" PRId64 " c1=%" PRId64 "\n",
+         ICpuCore_getCycles(mcu->core[0]), ICpuCore_getCycles(mcu->core[1]));
 }
 
 /* ── Milliseconds since an arbitrary epoch, matching the JS `+new Date()` use ── */
@@ -271,6 +345,7 @@ int main(void) {
           for (int i = 0; i < 256; i++) printf(" %02X", expected[i]);
           printf("\n");
         }
+        print_profile(tick_count_c1541);
         free(hz_needed);
         return pass ? 0 : 1;
       }
@@ -279,11 +354,15 @@ int main(void) {
 
     if (must_tick_c1541) {
       c1541_tick_done = false;
-      const int64_t start_cycles = RP2350_cycles_get(mcu);
+      const int64_t start_cycles = mcu_cycles();
+      profile_active = true;
+      last_trace_cycles[0] = ICpuCore_getCycles(mcu->core[0]);
+      last_trace_cycles[1] = mcu->core[1].vtable ? ICpuCore_getCycles(mcu->core[1]) : 0;
       while (!c1541_tick_done) {
         RP2350_step(mcu);
       }
-      const int64_t elapsed = RP2350_cycles_get(mcu) - start_cycles;
+      profile_active = false;
+      const int64_t elapsed = mcu_cycles() - start_cycles;
       hz_needed_push((double)elapsed * C1541_TICKS_PER_SECOND);
     }
 
@@ -294,6 +373,7 @@ int main(void) {
     tick_count_c1541 += c1541_tick_delta;
   }
 
+  print_profile(tick_count_c1541);
   free(hz_needed);
   return 0;
 }
