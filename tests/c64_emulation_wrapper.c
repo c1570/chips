@@ -8,6 +8,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #define CHIPS_IMPL
 #include "../chips/chips_common.h"
@@ -54,6 +56,35 @@ void set_keybuf(char* str) {
     for(uint i=0; i<c64.ram[198]; i++) { c64.ram[631+i]=str[i]; };
 }
 
+// Typing queue for text longer than the KERNAL keyboard buffer ($C6 = count,
+// $0277.. = data, 10 bytes). The next chunk is pushed once BASIC has consumed
+// the previous one; text typed ahead waits in the buffer until BASIC is back at
+// READY, so each command line runs after the previous one has finished.
+#define KEYBUF_COUNT 198
+#define KEYBUF_DATA 631
+#define KEYBUF_SIZE 10
+static char type_queue[512];
+static size_t type_pos, type_len;
+
+void c64_type_text(const char* text) {
+    size_t n = strlen(text);
+    if (type_len + n > sizeof(type_queue)) {
+        fprintf(stderr, "c64_type_text: queue full\n");
+        return;
+    }
+    memcpy(type_queue + type_len, text, n);
+    type_len += n;
+}
+
+static void feed_keyboard(void) {
+    if (type_pos == type_len || c64.ram[KEYBUF_COUNT] != 0) return;
+    size_t n = type_len - type_pos;
+    if (n > KEYBUF_SIZE) n = KEYBUF_SIZE;
+    memcpy(&c64.ram[KEYBUF_DATA], type_queue + type_pos, n);
+    c64.ram[KEYBUF_COUNT] = (uint8_t)n;
+    type_pos += n;
+}
+
 // Tick C64 emulation (called on STROBE rising edge from RP2040)
 // This is a stopgap for proper timing - C64 runs when RP2040 signals it
 void c64_emulation_tick() {
@@ -64,11 +95,31 @@ void c64_emulation_tick() {
     c64_tick_count += c64_exec(&c64, 2);  // Execute for 1 tick (2µS, rounded down)
 
 #ifndef AUTOTEST
-    if(c64_tick_count == 150000) {
-      set_keybuf("L\x6f\"$\",8\r");
+    // SD2IEC_CD=<name>: change into a directory or disk image on device 8 first
+    static const char* cd_target;
+    static bool cd_checked;
+    if (!cd_checked) {
+      cd_target = getenv("SD2IEC_CD");
+      if (cd_target != NULL && *cd_target == '\0') cd_target = NULL;
+      cd_checked = true;
     }
-    if(c64_tick_count == 4300000) {
-      set_keybuf("LIST\r");
+
+    if (cd_target != NULL) {
+      if (c64_tick_count == 150000) {
+        char line[128];
+        snprintf(line, sizeof(line), "OPEN1,8,15,\"CD:%s\":CLOSE1\r", cd_target);
+        c64_type_text(line);
+        c64_type_text("LOAD\"$\",8\r");
+        c64_type_text("LIST\r");
+      }
+      feed_keyboard();
+    } else {
+      if(c64_tick_count == 150000) {
+        set_keybuf("L\x6f\"$\",8\r");
+      }
+      if(c64_tick_count == 4300000) {
+        set_keybuf("LIST\r");
+      }
     }
 #endif
 }
@@ -219,4 +270,9 @@ void c64_print_screen() {
     printf("\nC64 ticks: %lu | BG: %d | Border: %d\n",
            (unsigned long)c64_tick_count, bg, border);
     fflush(stdout);
+}
+
+// 6502 program counter (debugging)
+uint16_t c64_get_pc(void) {
+    return m6502_pc(&c64.cpu);
 }
