@@ -307,6 +307,7 @@ void _c1541_write(c1541_t* sys, uint16_t addr, uint8_t data) {
   ((byte) & 0x02 ? '1' : '0'), \
   ((byte) & 0x01 ? '1' : '0')
 
+static inline __attribute__((always_inline))
 uint64_t _c1541_tick_cpu(c1541_t *sys, const uint64_t input_pins) {
 #ifdef PICO
     uint32_t tick = get_ticks();
@@ -393,15 +394,10 @@ uint8_t _c1541_tick_via1(c1541_t* sys) {
 #ifdef PICO
     uint32_t tick = get_ticks();
 #endif
-    uint64_t pins = sys->via_1.pins;
-
-    #ifdef PICO
-    uint32_t chip_tick = get_ticks();
-    pins = m6522_tick(&sys->via_1, pins);
-    ticks_chip_via1 = get_elapsed_ticks(chip_tick);
-    #else
-    pins = m6522_tick(&sys->via_1, pins);
-    #endif
+    /* use the internal _m6522_tick(), register reads/writes are done in the
+       cpu tick directly (the VIA1 CS pins are never used here) */
+    uint64_t pins = _m6522_tick(&sys->via_1, sys->via_1.pins);
+    sys->via_1.pins = pins;
 
 #ifdef PICO
     ticks_via1 = get_elapsed_ticks(tick);
@@ -583,17 +579,16 @@ uint8_t _c1541_tick_via2(c1541_t* sys) {
 }
 
 void _c1541_update_via_1_from_iec(c1541_t *sys) {
-    uint64_t pins = sys->via_1.pins;
-    uint8_t iec_lines = iec_get_signals(sys->iec_bus);
-    pins &= ~(M6522_PB0 | M6522_PB2 | M6522_PB7 | M6522_CA1);
-    if (IEC_ATN_ACTIVE(iec_lines)) {
-        pins |= M6522_PB7; // ATN IN
-        pins |= M6522_CA1;
+    const uint8_t iec_lines = iec_get_signals(sys->iec_bus);
+    uint64_t pins = sys->via_1.pins & ~(M6522_PB0 | M6522_PB2 | M6522_PB7 | M6522_CA1);
+    /* lines are active-low, the according VIA pins go to 1 when active */
+    if (!(iec_lines & IECLINE_ATN)) {
+        pins |= M6522_PB7 | M6522_CA1; // ATN IN
     }
-    if (IEC_CLK_ACTIVE(iec_lines)) {
+    if (!(iec_lines & IECLINE_CLK)) {
         pins |= M6522_PB2; // CLK IN
     }
-    if (IEC_DATA_ACTIVE(iec_lines)) {
+    if (!(iec_lines & IECLINE_DATA)) {
         pins |= M6522_PB0; // DATA IN
     }
     // note ATNA logic (activates DATA dependent on ATN and PB4) gets handled by iecbus.h
@@ -603,20 +598,17 @@ void _c1541_update_via_1_from_iec(c1541_t *sys) {
 }
 
 void _c1541_update_iec_from_via_1(c1541_t* sys) {
-    uint8_t out_signals = ~0;
     const uint64_t pins = sys->via_1.pins;
-    if (pins & M6522_PB3) {
-        out_signals &= ~IECLINE_CLK;
-    }
-    if (pins & M6522_PB1) {
-        out_signals &= ~IECLINE_DATA;
-    }
-    if (!(pins & M6522_PB4)) {
-        out_signals &= ~IECLINE_ATNA;
-    }
+    /* drive pulls a line low (active) when the according PB bit is set,
+       except ATNA which is active when PB4 is clear */
+    const uint8_t out_signals = (uint8_t)~0u & (uint8_t)~(
+          (((uint8_t)(pins >> M6522_PIN_PB3) & 1) << 1)             // IECLINE_CLK
+        | (((uint8_t)(pins >> M6522_PIN_PB1) & 1) << 0)             // IECLINE_DATA
+        | ((((uint8_t)(pins >> M6522_PIN_PB4) & 1) ^ 1) << 5));     // IECLINE_ATNA
     iec_set_signals(sys->iec_bus, sys->iec_device, out_signals);
 }
 
+static inline __attribute__((always_inline))
 uint64_t _c1541_tick_core0a(c1541_t* sys, const uint64_t input_pins) {
     uint64_t pins = 0;
 

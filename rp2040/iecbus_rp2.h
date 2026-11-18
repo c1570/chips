@@ -29,11 +29,12 @@ iecbus_device_t* iec_connect(iecbus_t** iec_bus, bool have_atna_logic) {};
 void iec_disconnect(iecbus_t* iec_bus, iecbus_device_t* iec_device) {};
 
 uint8_t iec_get_signals(iecbus_t* iec_bus) {
-    uint signals = iecbus_host_signals & iecbus_drive_signals;
-    if (IEC_ATN_ACTIVE(signals) ^ IEC_ATNA_ACTIVE(iecbus_drive_signals)) {
-        signals &= ~IECLINE_DATA;
-    }
-    return signals;
+    const uint signals = iecbus_host_signals & iecbus_drive_signals;
+    /* the drive pulls DATA low when ATN is active and ATNA is not (the
+       reverse also applies, see iecbus.h); computed branchless */
+    const uint atn_active  = ((signals & IECLINE_ATN) ^ IECLINE_ATN) >> 2;      /* 1 = active */
+    const uint atna_active = (iecbus_drive_signals & IECLINE_ATNA) >> 5;        /* 1 = active */
+    return signals & ~(atn_active ^ atna_active);
 };
 
 void iec_set_signals(iecbus_t* iec_bus, iecbus_device_t* iec_device, uint8_t signals) {
@@ -45,10 +46,9 @@ void iec_set_from_host_signals(uint8_t signals) {
 }
 
 uint8_t iec_get_drive_out_signals() {
-    if (IEC_ATN_ACTIVE(iecbus_host_signals & iecbus_drive_signals) ^ IEC_ATNA_ACTIVE(iecbus_drive_signals)) {
-        return iecbus_drive_signals & ~IECLINE_DATA;
-    }
-    return iecbus_drive_signals;
+    const uint atn_active  = (((iecbus_host_signals & iecbus_drive_signals) & IECLINE_ATN) ^ IECLINE_ATN) >> 2;
+    const uint atna_active = (iecbus_drive_signals & IECLINE_ATNA) >> 5;
+    return iecbus_drive_signals & ~(atn_active ^ atna_active);
 }
 
 /*

@@ -99,17 +99,16 @@ void init_iec_gpio(void) {
 
 // Read incoming IEC signals from GPIOs
 uint8_t read_iec_signals(void) {
-    uint8_t signals = 0xFF;  // Start with all inactive (high)
     const uint32_t gpio = gpio_get_all();
-
-    // GPIO reads return 1 when HIGH (inactive), 0 when LOW (active)
-    if (!(gpio & (1u << IEC_PIN_ATN)))   signals &= ~IECLINE_ATN;
-    if (!(gpio & (1u << IEC_PIN_DATA)))  signals &= ~IECLINE_DATA;
-    if (!(gpio & (1u << IEC_PIN_CLK)))   signals &= ~IECLINE_CLK;
-    if (!(gpio & (1u << IEC_PIN_RESET))) signals &= ~IECLINE_RESET;
-    if (!(gpio & (1u << IEC_PIN_SRQ)))   signals &= ~IECLINE_SRQIN;
-
-    return signals;
+    /* GPIO reads 1 when HIGH (inactive), 0 when LOW (active); IEC signal
+       bits are active-low too, so an active line clears its signal bit */
+    const uint32_t inactive =
+          (((gpio >> IEC_PIN_ATN)   & 1u) << 2)    // IECLINE_ATN
+        | (((gpio >> IEC_PIN_CLK)   & 1u) << 1)    // IECLINE_CLK
+        | (((gpio >> IEC_PIN_DATA)  & 1u) << 0)    // IECLINE_DATA
+        | (((gpio >> IEC_PIN_SRQ)   & 1u) << 3)    // IECLINE_SRQIN
+        | (((gpio >> IEC_PIN_RESET) & 1u) << 4);   // IECLINE_RESET
+    return 0xE0u | (uint8_t)inactive;
 }
 
 // Write outgoing IEC signals using open-collector logic

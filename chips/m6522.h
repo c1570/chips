@@ -292,12 +292,14 @@ typedef struct {
     uint8_t outr;
     uint8_t ddr;
     uint8_t pins;
-    bool c1_in;
-    bool c1_out;
-    bool c1_triggered;
-    bool c2_in;
-    bool c2_out;
-    bool c2_triggered;
+    /* packed control-line state (one byte instead of six bools, so that
+       a tick needs only a single load and a single store per port):
+        bit0: c1_in   (CA1/CB1 pin state from previous tick)
+        bit1: c2_in   (CA2/CB2 pin state from previous tick)
+        bit2: c1_out
+        bit3: c2_out
+    */
+    uint8_t ctrl;
 } m6522_port_t;
 
 // timer state
@@ -305,7 +307,6 @@ typedef struct {
     uint16_t latch;     /* 16-bit initial value latch, NOTE: T2 only has an 8-bit latch */
     uint16_t counter;   /* 16-bit counter */
     bool t_bit;         /* toggles between true and false when counter underflows */
-    bool t_out;         /* true for 1 cycle when counter underflow */
     /* merged delay-pipelines:
         2-cycle 'counter active':   bits 0..7
         1-cycle 'force load':       bits 8..16
@@ -367,17 +368,28 @@ uint64_t m6522_tick(m6522_t* m6522, uint64_t pins);
     #define CHIPS_ASSERT(c) assert(c)
 #endif
 
+/*--- delay-pipeline macros ---*/
+/* set or clear a new state at pipeline pos */
+#define _M6522_PIP_SET(pip,offset,pos) {pip|=(1<<(offset+pos));}
+#define _M6522_PIP_CLR(pip,offset,pos) {pip&=~(1<<(offset+pos));}
+/* reset an entire pipeline */
+#define _M6522_PIP_RESET(pip,offset) {pip&=~(0xFF<<offset);}
+/* test pipeline state, pos 0 is the 'output bit' */
+#define _M6522_PIP_TEST(pip,offset,pos) (0!=(pip&(1<<(offset+pos))))
+
+/*--- control-line state bits in m6522_port_t.ctrl ---*/
+#define _M6522_CTRL_C1_IN   (1<<0)
+#define _M6522_CTRL_C2_IN   (1<<1)
+#define _M6522_CTRL_C1_OUT  (1<<2)
+#define _M6522_CTRL_C2_OUT  (1<<3)
+
+/*--- port implementation ---*/
 static void _m6522_init_port(m6522_port_t* p) {
     p->inpr = 0xFF;
     p->outr = 0;
     p->ddr = 0;
     p->pins = 0;
-    p->c1_in = false;
-    p->c1_out = true;
-    p->c1_triggered = false;
-    p->c2_in = false;
-    p->c2_out = true;
-    p->c2_triggered = false;
+    p->ctrl = _M6522_CTRL_C1_OUT | _M6522_CTRL_C2_OUT;
 }
 
 static void _m6522_init_timer(m6522_timer_t* t, bool is_reset) {
@@ -387,7 +399,6 @@ static void _m6522_init_timer(m6522_timer_t* t, bool is_reset) {
         t->counter = 0;
         t->t_bit = false;
     }
-    t->t_out = false;
     t->pip = 0;
 }
 
@@ -427,84 +438,6 @@ void m6522_reset(m6522_t* c) {
     c->acr = 0;
     c->pcr = 0;
     c->pins = 0;
-}
-
-/*--- delay-pipeline macros ---*/
-/* set or clear a new state at pipeline pos */
-#define _M6522_PIP_SET(pip,offset,pos) {pip|=(1<<(offset+pos));}
-#define _M6522_PIP_CLR(pip,offset,pos) {pip&=~(1<<(offset+pos));}
-/* reset an entire pipeline */
-#define _M6522_PIP_RESET(pip,offset) {pip&=~(0xFF<<offset);}
-/* test pipeline state, pos 0 is the 'output bit' */
-#define _M6522_PIP_TEST(pip,offset,pos) (0!=(pip&(1<<(offset+pos))))
-
-/*--- port implementation ---*/
-static inline void _m6522_read_port_pins(m6522_t* c, uint64_t pins) {
-    /* check CA1/CA2/CB1/CB2 triggered */
-    bool new_ca1 = 0 != (pins & M6522_CA1);
-    bool new_ca2 = 0 != (pins & M6522_CA2);
-    bool new_cb1 = 0 != (pins & M6522_CB1);
-    bool new_cb2 = 0 != (pins & M6522_CB2);
-    c->pa.c1_triggered = (c->pa.c1_in != new_ca1) && ((new_ca1 && M6522_PCR_CA1_LOW_TO_HIGH(c)) || (!new_ca1 && M6522_PCR_CA1_HIGH_TO_LOW(c)));
-    c->pa.c2_triggered = (c->pa.c2_in != new_ca2) && ((new_ca2 && M6522_PCR_CA2_LOW_TO_HIGH(c)) || (!new_ca2 && M6522_PCR_CA2_HIGH_TO_LOW(c)));
-    // FIXME: copy paste error? new_ca1
-    // c->pb.c1_triggered = (c->pb.c1_in != new_cb1) && ((new_cb1 && M6522_PCR_CB1_LOW_TO_HIGH(c)) || (!new_ca1 && M6522_PCR_CB1_HIGH_TO_LOW(c)));
-    // c->pb.c2_triggered = (c->pb.c2_in != new_cb2) && ((new_cb2 && M6522_PCR_CB2_LOW_TO_HIGH(c)) || (!new_ca2 && M6522_PCR_CB2_HIGH_TO_LOW(c)));
-    c->pb.c1_triggered = (c->pb.c1_in != new_cb1) && ((new_cb1 && M6522_PCR_CB1_LOW_TO_HIGH(c)) || (!new_cb1 && M6522_PCR_CB1_HIGH_TO_LOW(c)));
-    c->pb.c2_triggered = (c->pb.c2_in != new_cb2) && ((new_cb2 && M6522_PCR_CB2_LOW_TO_HIGH(c)) || (!new_cb2 && M6522_PCR_CB2_HIGH_TO_LOW(c)));
-    c->pa.c1_in = new_ca1;
-    c->pa.c2_in = new_cb2;
-    c->pb.c1_in = new_cb1;
-    c->pb.c2_in = new_cb2;
-
-    /* with latching enabled, only update input register when CA1 / CB1 goes active */
-    if (M6522_ACR_PA_LATCH_ENABLE(c)) {
-        if (c->pa.c1_triggered) {
-            c->pa.inpr = M6522_GET_PA(pins);
-        }
-    }
-    else {
-        c->pa.inpr = M6522_GET_PA(pins);
-    }
-    if (M6522_ACR_PB_LATCH_ENABLE(c)) {
-        if (c->pb.c1_triggered) {
-            c->pb.inpr = M6522_GET_PB(pins);
-        }
-    }
-    else {
-        c->pb.inpr = M6522_GET_PB(pins);
-    }
-}
-
-static inline uint8_t _m6522_merge_pb7(m6522_t* c, uint8_t data) {
-    if (M6522_ACR_T1_SET_PB7(c)) {
-        data &= ~(1<<7);
-        if (c->t1.t_bit) {
-            data |= (1<<7);
-        }
-    }
-    return data;
-}
-
-static inline uint64_t _m6522_write_port_pins(m6522_t* c, uint64_t pins) {
-    c->pa.pins = (c->pa.inpr & ~c->pa.ddr) | (c->pa.outr & c->pa.ddr);
-    c->pb.pins = _m6522_merge_pb7(c, (c->pb.inpr & ~c->pb.ddr) | (c->pb.outr & c->pb.ddr));
-    M6522_SET_PAB(pins, c->pa.pins, c->pb.pins);
-    /* NOTE: CA1 actually is an input-only pin */
-    pins &= ~(M6522_CA1|M6522_CA2|M6522_CB1|M6522_CB2);
-    if (c->pa.c1_out) {
-        pins |= M6522_CA1;
-    }
-    if (c->pa.c2_out) {
-        pins |= M6522_CA2;
-    }
-    if (c->pb.c1_out) {
-        pins |= M6522_CB1;
-    }
-    if (c->pb.c2_out) {
-        pins |= M6522_CB2;
-    }
-    return pins;
 }
 
 static inline void _m6522_set_intr(m6522_t* c, uint8_t data) {
@@ -552,135 +485,185 @@ static inline void _m6522_write_ifr(m6522_t* c, uint8_t data) {
 
     (essentially: T1 is always reloaded from latch, both in continuous
     and oneshot mode, while T2 is never reloaded)
-*/
-static void _m6522_tick_t1(m6522_t* c) {
-    m6522_timer_t* t = &c->t1;
 
-    /* decrement counter? */
-    if (_M6522_PIP_TEST(t->pip, M6522_PIP_TIMER_COUNT, 0)) {
-        t->counter--;
+    NOTE: _m6522_tick() is the hot-most function in the c1541 emulation
+    (it runs once per emulated drive cycle for each of the two VIAs),
+    so the per-tick work below is written with as few branches and
+    memory accesses as possible, at the price of some unusual code.
+    Behaviour is identical to the previous, straightforward version:
+
+      - sample the CA1/CA2/CB1/CB2 control pins and compute the
+        edge/polarity trigger flags branchlessly, keeping the previous
+        pin state in the packed port.ctrl byte (one load + one store
+        per port and tick, instead of six byte-sized bool fields)
+      - update the PA/PB input registers (with optional CA1/CB1-gated
+        latching)
+      - on any control-line event: set CA1/CA2/CB1/CB2 interrupt flags
+        and CA2/CB2 auto-handshake outputs
+      - tick T1 (always counts down, reloads from latch on underflow)
+        and T2 (counts down or counts PB6 falling edges, never reloads)
+      - merge the IRQ pin from the (pip-delayed) IFR bit7
+      - recompute the PA/PB port pins from ddr/outr/inpr and merge
+        them, plus the control output pins, into the pin mask
+      - tick the interrupt and timer delay pipelines forward
+*/
+static uint64_t _m6522_tick(m6522_t* c, uint64_t pins) {
+    const uint8_t pcr = c->pcr;
+    const uint8_t acr = c->acr;
+    uint8_t ifr = c->intr.ifr;
+
+    /*--- control pin sampling and edge/polarity detection ---*/
+    const uint8_t new_ca1 = (uint8_t)((pins >> M6522_PIN_CA1) & 1);
+    const uint8_t new_ca2 = (uint8_t)((pins >> M6522_PIN_CA2) & 1);
+    const uint8_t new_cb1 = (uint8_t)((pins >> M6522_PIN_CB1) & 1);
+    const uint8_t new_cb2 = (uint8_t)((pins >> M6522_PIN_CB2) & 1);
+    uint8_t pa_ctrl = c->pa.ctrl;
+    uint8_t pb_ctrl = c->pb.ctrl;
+    /* CA1/CB1: edge on the line with the PCR-selected polarity (pcr bit 0 / bit 4) */
+    const uint8_t ca1_trig = (pa_ctrl ^ new_ca1) & (new_ca1 ^ pcr ^ 1) & 1;
+    const uint8_t cb1_trig = (pb_ctrl ^ new_cb1) & (new_cb1 ^ (pcr >> 4) ^ 1) & 1;
+    /* CA2/CB2: edge when the 2-bit PCR control field (bits 3:2 / 7:6, 0=falling,
+       1=rising, >=2 is output mode and never triggers) matches the new level */
+    const uint8_t ca2_trig = ((pa_ctrl >> 1) ^ new_ca2) & (uint8_t)((((pcr >> 2) & 3) ^ new_ca2) == 0);
+    const uint8_t cb2_trig = ((pb_ctrl >> 1) ^ new_cb2) & (uint8_t)((((pcr >> 6) & 3) ^ new_cb2) == 0);
+
+    /*--- input registers (latched on CA1/CB1 when enabled via ACR) ---*/
+    if (!(acr & 0x01) || ca1_trig) {
+        c->pa.inpr = M6522_GET_PA(pins);
+    }
+    if (!(acr & 0x02) || cb1_trig) {
+        c->pb.inpr = M6522_GET_PB(pins);
     }
 
-    /* timer underflow? */
-    t->t_out = (0xFFFF == t->counter);
-    if (t->t_out) {
-        /* continuous or oneshot mode? */
-        if (M6522_ACR_T1_CONTINUOUS(c)) {
-            t->t_bit = !t->t_bit;
-            /* trigger T1 interrupt on each underflow */
-            _m6522_set_intr(c, M6522_IRQ_T1);
-        }
-        else {
-            if (!t->t_bit) {
-                /* trigger T1 only once */
-                _m6522_set_intr(c, M6522_IRQ_T1);
-                t->t_bit = true;
+    /*--- control line interrupts and CA2/CB2 auto-handshake ---*/
+    if (ca1_trig | ca2_trig | cb1_trig | cb2_trig) {
+        if (ca1_trig) {
+            ifr |= M6522_IRQ_CA1;
+            if (((pcr >> 2) & 3) == 2) {    /* CA2 auto-handshake */
+                pa_ctrl |= _M6522_CTRL_C2_OUT;
             }
         }
-        /* reload T1 from latch on each underflow,
-           this happens both in oneshot and continous mode
-        */
-        _M6522_PIP_SET(t->pip, M6522_PIP_TIMER_LOAD, 1);
-    }
-
-    /* reload timer from latch? */
-    if (_M6522_PIP_TEST(t->pip, M6522_PIP_TIMER_LOAD, 0)) {
-        t->counter = t->latch;
-    }
-}
-
-
-static void _m6522_tick_t2(m6522_t* c, uint64_t pins) {
-    m6522_timer_t* t = &c->t2;
-
-    /* either decrement on PB6, or on tick */
-    if (M6522_ACR_T2_COUNT_PB6(c)) {
-        /* count falling edge of PB6 */
-        if (M6522_PB6 & (~pins & (pins ^ c->pins))) {
-            t->counter--;
+        if (ca2_trig && !(pcr & 0x08)) {    /* CA2 is an input */
+            ifr |= M6522_IRQ_CA2;
+        }
+        if (cb1_trig) {
+            ifr |= M6522_IRQ_CB1;
+            if (((pcr >> 6) & 3) == 2) {    /* CB2 auto-handshake */
+                pb_ctrl |= _M6522_CTRL_C2_OUT;
+            }
+        }
+        if (cb2_trig && !(pcr & 0x80)) {    /* CB2 is an input */
+            ifr |= M6522_IRQ_CB2;
         }
     }
-    else if (_M6522_PIP_TEST(t->pip, M6522_PIP_TIMER_COUNT, 0)) {
-        t->counter--;
+
+    /* store new control pin input state
+       (NOTE: pa.c2_in is fed from CB2, matching the original code) */
+    pa_ctrl = (pa_ctrl & ~0x03) | new_ca1 | (new_cb2 << 1);
+    pb_ctrl = (pb_ctrl & ~0x03) | new_cb1 | (new_cb2 << 1);
+    c->pa.ctrl = pa_ctrl;
+    c->pb.ctrl = pb_ctrl;
+
+    /*--- T1 ---*/
+    {
+        m6522_timer_t* t = &c->t1;
+        uint16_t pip = t->pip;
+        uint16_t counter = t->counter;
+        bool underflow;
+        if (pip & 0x01) {
+            /* after the decrement, the counter is 0xFFFF exactly when it was 0 before */
+            underflow = (0 == counter);
+            counter--;
+            t->counter = counter;
+        }
+        else {
+            underflow = (0xFFFF == counter);
+        }
+        if (underflow) {
+            if (acr & 0x40) {
+                /* continuous mode: toggle PB7 and trigger T1 on each underflow */
+                t->t_bit = !t->t_bit;
+                ifr |= M6522_IRQ_T1;
+            }
+            else if (!t->t_bit) {
+                /* one-shot mode: trigger T1 only once */
+                ifr |= M6522_IRQ_T1;
+                t->t_bit = true;
+            }
+            /* reload T1 from latch on each underflow (delayed by pipeline) */
+            pip |= 0x0200;
+        }
+        if (pip & 0x0100) {
+            t->counter = t->latch;
+        }
+        t->pip = pip;
     }
 
-    /* underflow? */
-    t->t_out = (0xFFFF == t->counter);
-    if (t->t_out) {
-        /* t2 is always oneshot */
-        if (!t->t_bit) {
-            /* FIXME: 6526-style "Timer B Bug"? */
-            _m6522_set_intr(c, M6522_IRQ_T2);
+    /*--- T2 ---*/
+    {
+        m6522_timer_t* t = &c->t2;
+        uint16_t counter = t->counter;
+        bool underflow;
+        if (acr & 0x20) {
+            /* count falling PB6 edges */
+            if (M6522_PB6 & (~pins & (pins ^ c->pins))) {
+                counter--;
+                t->counter = counter;
+            }
+            underflow = (0xFFFF == counter);
+        }
+        else if (t->pip & 0x01) {
+            underflow = (0 == counter);
+            counter--;
+            t->counter = counter;
+        }
+        else {
+            underflow = (0xFFFF == counter);
+        }
+        if (underflow && !t->t_bit) {
+            /* T2 is always one-shot */
+            ifr |= M6522_IRQ_T2;
             t->t_bit = true;
         }
         /* NOTE: T2 never reloads from latch on hitting zero */
     }
-}
 
-static void _m6522_tick_pipeline(m6522_t* c) {
-    /* feed counter pipelines, both counters are always counting */
-    _M6522_PIP_SET(c->t1.pip, M6522_PIP_TIMER_COUNT, 2);
-    _M6522_PIP_SET(c->t2.pip, M6522_PIP_TIMER_COUNT, 2);
-
-    /* interrupt pipeline */
-    if (c->intr.ifr & c->intr.ier) {
-        _M6522_PIP_SET(c->intr.pip, M6522_PIP_IRQ, 1);
+    /*--- IRQ output pin (main IFR bit is delayed by the pipeline) ---*/
+    if (c->intr.pip & 0x01) {
+        ifr |= (1<<7);
     }
-
-    /* tick pipelines forward */
-    c->t1.pip = (c->t1.pip >> 1) & 0x7F7F;
-    c->t2.pip = (c->t2.pip >> 1) & 0x7F7F;
-    c->intr.pip = (c->intr.pip >> 1) & 0x7F7F;
-}
-
-static void _m6522_update_cab(m6522_t* c) {
-    if (c->pa.c1_triggered) {
-        _m6522_set_intr(c, M6522_IRQ_CA1);
-        if (M6522_PCR_CA2_AUTO_HS(c)) {
-            c->pa.c2_out = true;
-        }
-    }
-    if (c->pa.c2_triggered && M6522_PCR_CA2_INPUT(c)) {
-        _m6522_set_intr(c, M6522_IRQ_CA2);
-    }
-    if (c->pb.c1_triggered) {
-        _m6522_set_intr(c, M6522_IRQ_CB1);
-        if (M6522_PCR_CB2_AUTO_HS(c)) {
-            c->pb.c2_out = true;
-        }
-    }
-    // FIXME: shift-in/out on CB1
-    if (c->pb.c2_triggered && M6522_PCR_CB2_INPUT(c)) {
-        _m6522_set_intr(c, M6522_IRQ_CB2);
-    }
-}
-
-static uint64_t _m6522_update_irq(m6522_t* c, uint64_t pins) {
-
-    /* main interrupt bit (delayed by pip) */
-    if (_M6522_PIP_TEST(c->intr.pip, M6522_PIP_IRQ, 0)) {
-        c->intr.ifr |= (1<<7);
-    }
-
-    /* merge IRQ bit */
-    if (0 != (c->intr.ifr & (1<<7))) {
+    c->intr.ifr = ifr;
+    if (ifr & (1<<7)) {
         pins |= M6522_IRQ;
     }
     else {
         pins &= ~M6522_IRQ;
     }
-    return pins;
-}
 
-/* perform a tick */
-static uint64_t _m6522_tick(m6522_t* c, uint64_t pins) {
-    _m6522_read_port_pins(c, pins);
-    _m6522_update_cab(c);
-    _m6522_tick_t1(c);
-    _m6522_tick_t2(c, pins);
-    pins = _m6522_update_irq(c, pins);
-    pins = _m6522_write_port_pins(c, pins);
-    _m6522_tick_pipeline(c);
+    /*--- output port pins ---*/
+    {
+        const uint8_t pa_pins = (c->pa.inpr & ~c->pa.ddr) | (c->pa.outr & c->pa.ddr);
+        uint8_t pb_pins = (c->pb.inpr & ~c->pb.ddr) | (c->pb.outr & c->pb.ddr);
+        if (acr & 0x80) {
+            /* PB7 is driven by the T1 toggle flip-flop */
+            pb_pins = (pb_pins & 0x7F) | ((uint8_t)(c->t1.t_bit ? 1 : 0) << 7);
+        }
+        c->pa.pins = pa_pins;
+        c->pb.pins = pb_pins;
+        /* merge PA/PB and the control output pins into the pin mask */
+        pins &= ~(M6522_PA_PINS | M6522_PB_PINS | M6522_CA1 | M6522_CA2 | M6522_CB1 | M6522_CB2);
+        pins |= ((uint64_t)pa_pins << M6522_PIN_PA0)
+              | ((uint64_t)pb_pins << M6522_PIN_PB0)
+              | ((uint64_t)(pa_ctrl & 0x0C) << 40)     /* CA1<<42, CA2<<43 */
+              | ((uint64_t)(pb_ctrl & 0x0C) << 42);    /* CB1<<44, CB2<<45 */
+    }
+
+    /*--- tick the delay pipelines forward ---*/
+    /* (pipelines only ever use bits 0..2 and 8..10, so the 0x7F7F mask
+        of the original implementation is not needed here) */
+    c->t1.pip = (uint16_t)((c->t1.pip >> 1) | 0x0002);
+    c->t2.pip = (uint16_t)((c->t2.pip >> 1) | 0x0002);
+    c->intr.pip = (uint16_t)((c->intr.pip >> 1) | (uint16_t)(((ifr & c->intr.ier) != 0) << 1));
     return pins;
 }
 
@@ -707,7 +690,7 @@ static uint8_t _m6522_read(m6522_t* c, uint8_t addr) {
             }
             _m6522_clear_pa_intr(c);
             if (M6522_PCR_CA2_PULSE_OUTPUT(c) || M6522_PCR_CA2_AUTO_HS(c)) {
-                c->pa.c2_out = false;
+                c->pa.ctrl &= ~_M6522_CTRL_C2_OUT;
             }
             if (M6522_PCR_CA2_PULSE_OUTPUT(c)) {
                 /* FIXME: pulse output delay pipeline */
@@ -787,7 +770,7 @@ static void _m6522_write(m6522_t* c, uint8_t addr, uint8_t data) {
             c->pb.outr = data;
             _m6522_clear_pb_intr(c);
             if (M6522_PCR_CB2_AUTO_HS(c)) {
-                c->pb.c2_out = false;
+                c->pb.ctrl &= ~_M6522_CTRL_C2_OUT;
             }
             break;
 
@@ -795,7 +778,7 @@ static void _m6522_write(m6522_t* c, uint8_t addr, uint8_t data) {
             c->pa.outr = data;
             _m6522_clear_pa_intr(c);
             if (M6522_PCR_CA2_PULSE_OUTPUT(c) || M6522_PCR_CA2_AUTO_HS(c)) {
-                c->pa.c2_out = false;
+                c->pa.ctrl &= ~_M6522_CTRL_C2_OUT;
             }
             if (M6522_PCR_CA2_PULSE_OUTPUT(c)) {
                 /* FIXME: pulse output delay pipeline */
@@ -861,10 +844,20 @@ static void _m6522_write(m6522_t* c, uint8_t addr, uint8_t data) {
         case M6522_REG_PCR:
             c->pcr = data;
             if (M6522_PCR_CA2_FIX_OUTPUT(c)) {
-                c->pa.c2_out = M6522_PCR_CA2_OUTPUT_LEVEL(c);
+                if (M6522_PCR_CA2_OUTPUT_LEVEL(c)) {
+                    c->pa.ctrl |= _M6522_CTRL_C2_OUT;
+                }
+                else {
+                    c->pa.ctrl &= ~_M6522_CTRL_C2_OUT;
+                }
             }
             if (M6522_PCR_CB2_FIX_OUTPUT(c)) {
-                c->pb.c2_out = M6522_PCR_CB2_OUTPUT_LEVEL(c);
+                if (M6522_PCR_CB2_OUTPUT_LEVEL(c)) {
+                    c->pb.ctrl |= _M6522_CTRL_C2_OUT;
+                }
+                else {
+                    c->pb.ctrl &= ~_M6522_CTRL_C2_OUT;
+                }
             }
             break;
 
