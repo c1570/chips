@@ -197,10 +197,11 @@ int main(int argc, char **argv) {
       iec_set_from_host_signals(read_iec_signals());
       cycle_info("gpioin   ");
 
-      uint64_t pins = _c1541_tick_core0a(&state.c1541, state.c1541.pins);
+      uint32_t via1_in;
+      uint64_t pins = _c1541_tick_core0a(&state.c1541, state.c1541.pins, &via1_in);
       via2_done = 0;
       via2_start = 1;
-      pins = _c1541_tick_core0b(&state.c1541, pins);
+      pins = _c1541_tick_core0b(&state.c1541, pins, via1_in);
       cycle_info("c1541");
       //if((tick&0xfffff)==0) printf("%d %d %04x\n", tick, state.c1541.iec_bus->master_tick, state.c1541.cpu.PC);
       tick++;

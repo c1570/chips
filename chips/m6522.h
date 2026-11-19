@@ -332,8 +332,13 @@ typedef struct {
     uint8_t pcr;        /* peripheral control register */
     /* previous sample of the CA1/CA2/CB1/CB2 control input pins as a 4-bit
        nibble; edges (and thus control-line interrupts and latching) can only
-       fire when this changes, see _m6522_tick() */
+       fire when this changes, see _m6522_tick_io() */
     uint8_t ctrl_pins;
+    /* last CA1/CA2/CB1/CB2 output nibble; systems that loop the outputs
+       back to the inputs (like the c1541) use this as the next input
+       baseline — initialized to 0 so the boot sequence matches the old
+       behaviour of an all-zero pin mask */
+    uint8_t io_ctl;
     uint64_t pins;
     char *chip_name;
 } m6522_t;
@@ -442,6 +447,7 @@ void m6522_reset(m6522_t* c) {
     c->acr = 0;
     c->pcr = 0;
     c->ctrl_pins = 0;
+    c->io_ctl = 0;
     c->pins = 0;
 }
 
@@ -512,13 +518,19 @@ static inline void _m6522_write_ifr(m6522_t* c, uint8_t data) {
         them, plus the control output pins, into the pin mask
       - tick the interrupt and timer delay pipelines forward
 */
-static uint64_t _m6522_tick(m6522_t* c, uint64_t pins) {
+/* perform a tick with the pin values passed split (not packed into the
+   64-bit pin mask): the input word is ctl:16 | pb:8 | pa where ctl is the
+   CA1/CA2/CB1/CB2 input state nibble, the return word is
+   irq:24 | ctl_out:16 | pb_out:8 | pa_out */
+static uint32_t _m6522_tick_io(m6522_t* c, uint32_t in) {
     const uint8_t pcr = c->pcr;
     const uint8_t acr = c->acr;
     uint8_t ifr = c->intr.ifr;
     uint8_t pa_ctrl = c->pa.ctrl;
     uint8_t pb_ctrl = c->pb.ctrl;
     uint8_t ca1_trig = 0, ca2_trig = 0, cb1_trig = 0, cb2_trig = 0;
+    const uint8_t pa_in = (uint8_t)in;
+    const uint8_t pb_in = (uint8_t)(in >> 8);
 
     /*--- control pin sampling and edge/polarity detection ---*/
     /* fast path: edges (and with them control-line interrupts, handshake
@@ -527,7 +539,7 @@ static uint64_t _m6522_tick(m6522_t* c, uint64_t pins) {
        sample is cached in ctrl_pins as a 4-bit nibble. Within the slow
        path, only the pins that actually changed are processed (in the c1541
        an edge is almost always CA1-only: ATN on VIA1, byte-ready on VIA2) */
-    const uint8_t pin_nibble = (uint8_t)((pins >> M6522_PIN_CA1) & 0x0F);
+    const uint8_t pin_nibble = (uint8_t)(in >> 16);
     const uint8_t changed = pin_nibble ^ c->ctrl_pins;
     if (changed) {
         c->ctrl_pins = pin_nibble;
@@ -586,10 +598,10 @@ static uint64_t _m6522_tick(m6522_t* c, uint64_t pins) {
 
     /*--- input registers (latched on CA1/CB1 when enabled via ACR) ---*/
     if (!(acr & 0x01) || ca1_trig) {
-        c->pa.inpr = M6522_GET_PA(pins);
+        c->pa.inpr = pa_in;
     }
     if (!(acr & 0x02) || cb1_trig) {
-        c->pb.inpr = M6522_GET_PB(pins);
+        c->pb.inpr = pb_in;
     }
 
     /*--- T1 ---*/
@@ -633,8 +645,8 @@ static uint64_t _m6522_tick(m6522_t* c, uint64_t pins) {
         uint16_t counter = t->counter;
         bool underflow;
         if (acr & 0x20) {
-            /* count falling PB6 edges */
-            if (M6522_PB6 & (~pins & (pins ^ c->pins))) {
+            /* count falling PB6 edges (previous PB output high, input low) */
+            if (c->pb.pins & ~pb_in & 0x40) {
                 counter--;
                 t->counter = counter;
             }
@@ -656,35 +668,22 @@ static uint64_t _m6522_tick(m6522_t* c, uint64_t pins) {
         /* NOTE: T2 never reloads from latch on hitting zero */
     }
 
-    /*--- IRQ output pin (main IFR bit is delayed by the pipeline) ---*/
+    /*--- IRQ output (main IFR bit is delayed by the pipeline) ---*/
     if (c->intr.pip & 0x01) {
         ifr |= (1<<7);
     }
     c->intr.ifr = ifr;
-    if (ifr & (1<<7)) {
-        pins |= M6522_IRQ;
-    }
-    else {
-        pins &= ~M6522_IRQ;
-    }
+    const uint32_t irq = (uint32_t)(ifr >> 7);
 
     /*--- output port pins ---*/
-    {
-        const uint8_t pa_pins = (c->pa.inpr & ~c->pa.ddr) | (c->pa.outr & c->pa.ddr);
-        uint8_t pb_pins = (c->pb.inpr & ~c->pb.ddr) | (c->pb.outr & c->pb.ddr);
-        if (acr & 0x80) {
-            /* PB7 is driven by the T1 toggle flip-flop */
-            pb_pins = (pb_pins & 0x7F) | ((uint8_t)(c->t1.t_bit ? 1 : 0) << 7);
-        }
-        c->pa.pins = pa_pins;
-        c->pb.pins = pb_pins;
-        /* merge PA/PB and the control output pins into the pin mask */
-        pins &= ~(M6522_PA_PINS | M6522_PB_PINS | M6522_CA1 | M6522_CA2 | M6522_CB1 | M6522_CB2);
-        pins |= ((uint64_t)pa_pins << M6522_PIN_PA0)
-              | ((uint64_t)pb_pins << M6522_PIN_PB0)
-              | ((uint64_t)(pa_ctrl & 0x0C) << 40)     /* CA1<<42, CA2<<43 */
-              | ((uint64_t)(pb_ctrl & 0x0C) << 42);    /* CB1<<44, CB2<<45 */
+    const uint8_t pa_pins = (c->pa.inpr & ~c->pa.ddr) | (c->pa.outr & c->pa.ddr);
+    uint8_t pb_pins = (c->pb.inpr & ~c->pb.ddr) | (c->pb.outr & c->pb.ddr);
+    if (acr & 0x80) {
+        /* PB7 is driven by the T1 toggle flip-flop */
+        pb_pins = (pb_pins & 0x7F) | ((uint8_t)(c->t1.t_bit ? 1 : 0) << 7);
     }
+    c->pa.pins = pa_pins;
+    c->pb.pins = pb_pins;
 
     /*--- tick the delay pipelines forward ---*/
     /* (pipelines only ever use bits 0..2 and 8..10, so the 0x7F7F mask
@@ -692,7 +691,10 @@ static uint64_t _m6522_tick(m6522_t* c, uint64_t pins) {
     c->t1.pip = (uint16_t)((c->t1.pip >> 1) | 0x0002);
     c->t2.pip = (uint16_t)((c->t2.pip >> 1) | 0x0002);
     c->intr.pip = (uint16_t)((c->intr.pip >> 1) | (uint16_t)(((ifr & c->intr.ier) != 0) << 1));
-    return pins;
+    const uint8_t ctl_out = ((pa_ctrl & 0x0C) >> 2) | (pb_ctrl & 0x0C);   /* CA1/CA2/CB1/CB2 */
+    c->io_ctl = ctl_out;
+    return (uint32_t)pa_pins | ((uint32_t)pb_pins << 8) | ((uint32_t)ctl_out << 16)
+         | (irq << 24);
 }
 
 /* read a register */
@@ -918,8 +920,24 @@ uint64_t m6522_tick(m6522_t* c, uint64_t pins) {
             _m6522_write(c, addr, data);
         }
     }
-    /* FIXME: move tick above read/write? */
-    pins = _m6522_tick(c, pins);
+    /* run the split-value tick and merge the result back into the pin mask */
+    {
+        const uint32_t in = (uint32_t)(pins >> 48)                       /* PA | PB<<8 */
+                          | ((uint32_t)((pins >> M6522_PIN_CA1) & 0x0F) << 16);
+        const uint32_t io = _m6522_tick_io(c, in);
+        /* keep RS/DATA/RW/IRQ/CS bits, replace PA/PB and CA1..CB2 */
+        uint32_t hi = ((uint32_t)(pins >> 32) & 0x0000C3FFu)
+                    | ((io & 0x00FFu) << 16)      /* PA */
+                    | ((io & 0xFF00u))            /* PB */
+                    | ((io & 0x000F0000u) >> 6);  /* ctl nibble -> bits 42..45 */
+        pins = (pins & 0x00000000FFFFFFFFULL) | ((uint64_t)hi << 32);
+        if (io & 0x01000000u) {
+            pins |= M6522_IRQ;
+        }
+        else {
+            pins &= ~M6522_IRQ;
+        }
+    }
     c->pins = pins;
     return pins;
 }

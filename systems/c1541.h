@@ -221,7 +221,7 @@ void c1541_init(c1541_t* sys, const c1541_desc_t* desc) {
     // not entirely sure with those inits but on the real drive after reset,
     // the motor is active briefly (yet no seek happens when 00 bits are written
     // to the stepper once the motor gets turned off...)
-    M6522_SET_PAB(sys->via_2.pins, 0x00, 0x04);
+    sys->via_2.pb.pins = 0x04;
 
     sys->via_1.chip_name = "via1";
     sys->via_2.chip_name = "via2";
@@ -315,7 +315,7 @@ uint64_t _c1541_tick_cpu(c1541_t *sys, const uint64_t input_pins) {
     const bool is_cpu_sync = (input_pins & M6502_SYNC);
 
     // s0 pin high workaround for injecting OV flag to the cpu on a new instruction
-    if (is_cpu_sync && (sys->byte_ready_countdown == 0) && (sys->via_2.pins & M6522_CA2)) {
+    if (is_cpu_sync && (sys->byte_ready_countdown == 0) && (sys->via_2.io_ctl & 0x02)) {
         sys->byte_ready_countdown--;
         m6502_set_p(&sys->cpu, m6502_p(&sys->cpu)|M6502_VF);
     }
@@ -390,19 +390,15 @@ uint64_t _c1541_tick_cpu(c1541_t *sys, const uint64_t input_pins) {
 }
 
 // _c1541_tick_via1 returns if IRQ should be set
-uint8_t _c1541_tick_via1(c1541_t* sys) {
+uint8_t _c1541_tick_via1(c1541_t* sys, const uint32_t via1_in) {
 #ifdef PICO
     uint32_t tick = get_ticks();
 #endif
-    /* use the internal _m6522_tick(), register reads/writes are done in the
-       cpu tick directly (the VIA1 CS pins are never used here) */
-    uint64_t pins = _m6522_tick(&sys->via_1, sys->via_1.pins);
-    sys->via_1.pins = pins;
-
+    const uint32_t io = _m6522_tick_io(&sys->via_1, via1_in);
 #ifdef PICO
     ticks_via1 = get_elapsed_ticks(tick);
 #endif
-    return 0 != (pins & M6522_IRQ);
+    return (uint8_t)(io >> 24);
 }
 
 // _c1541_tick_via2 returns if IRQ should be set
@@ -410,15 +406,15 @@ uint8_t _c1541_tick_via2_a(c1541_t* sys) {
 #ifdef PICO
     uint32_t tick = get_ticks();
 #endif
-    uint64_t pins = sys->via_2.pins;
+    /* VIA2 input pins: PA = read data, CA1 = byte-ready, PB7 = sync;
+       everything else feeds back from the previous outputs */
+    uint8_t pa = sys->via_2.pa.pins;
+    uint8_t pb = sys->via_2.pb.pins;
+    uint8_t ctl = sys->via_2.io_ctl;   /* control outputs loop back */
     {
         // Prepare VIA2 pins
-// #ifdef PICO
-//         uint32_t tick = get_ticks();
-// #endif
-
-        bool output_enable = (sys->via_2.pins & M6522_CB2) != 0;
-        bool motor_active = (sys->via_2.pins & M6522_PB2) != 0;
+        const bool output_enable = (ctl & 0x08) != 0;    /* CB2 */
+        const bool motor_active = (pb & 0x04) != 0;      /* PB2 */
         bool sync_bits_present = ((sys->current_data + 1) & (1<<10)) != 0;
         bool is_sync = sync_bits_present && output_enable;
         bool latch_data = false;
@@ -433,7 +429,7 @@ uint8_t _c1541_tick_via2_a(c1541_t* sys) {
             sys->rotor_nanoseconds_counter += 1000;
             if (sys->rotor_nanoseconds_counter >= sys->nanoseconds_per_bit) {
                 sys->rotor_nanoseconds_counter -= sys->nanoseconds_per_bit;
-                
+
                 // shift in next gcr bit
                 sys->current_data <<= 1;
                 sys->current_data &= (1<<10)-1;
@@ -457,7 +453,7 @@ uint8_t _c1541_tick_via2_a(c1541_t* sys) {
                 }
 
                 is_sync = (((sys->current_data + 1) & (1<<10)) != 0) && output_enable;
-                
+
                 if (is_sync) {
                     sys->output_bit_counter = 0;
                 } else {
@@ -471,56 +467,47 @@ uint8_t _c1541_tick_via2_a(c1541_t* sys) {
             }
         }
 
-        pins &= ~M6522_PB7;
-        if (!is_sync) {
-            pins |= M6522_PB7;
-        }
+        /* PB7 reads the (inverted) sync state */
+        pb = (pb & 0x7F) | (is_sync ? 0 : 0x80);
 
         if(sys->byte_ready_countdown > 0) {
             sys->byte_ready_countdown--;
         }
 
-        pins &= ~M6522_CA1;
+        /* CA1 input is the byte-ready strobe (CA2/CB1/CB2 loop back) */
+        ctl &= ~0x01;
         if (latch_data) {
             sys->output_data = sys->current_data & 0xff;
             if (output_enable) {
-                pins |= M6522_CA1;
+                ctl |= 0x01;
             }
         }
 
         if (output_enable) {
-            M6522_SET_PA(pins, sys->output_data);
+            pa = sys->output_data;
         }
-// #ifdef PICO
-//         uint32_t dt = get_elapsed_ticks(tick);
-//         printf("chip_tick via2 prepare: %ld sys tick(s)\n", dt);
-// #endif
     }
     C1541_CYCLE_INFO("gcr  ");
 
     // tick VIA2
     {
-// #ifdef PICO
-//         uint32_t tick = get_ticks();
-// #endif
 #ifdef PICO
         uint32_t chip_tick = get_ticks();
 #endif
-        pins = _m6522_tick(&sys->via_2, pins); // use internal _m6522_tick(), register reads/writes are done in cpu tick directly
-        sys->via_2.pins = pins;
-        C1541_CYCLE_INFO("via2 ");
+        const uint32_t io = _m6522_tick_io(&sys->via_2, (uint32_t)pa | ((uint32_t)pb << 8) | ((uint32_t)ctl << 16));
 #ifdef PICO
         ticks_chip_via2 = get_elapsed_ticks(chip_tick);
 #endif
-    }
+        C1541_CYCLE_INFO("via2 ");
 #ifdef PICO
-    ticks_via2 = get_elapsed_ticks(tick);
+        ticks_via2 = get_elapsed_ticks(tick);
 #endif
-    return 0 != (sys->via_2.pins & M6522_IRQ);
+        return (uint8_t)(io >> 24);
+    }
 }
 
 void _c1541_tick_via2_b(c1541_t* sys) {
-    uint64_t pins = sys->via_2.pins;
+    const uint8_t pb = sys->via_2.pb.pins;   /* stepper PB0/PB1, motor PB2 */
     {
         // code from PiCiJi/Denise
         bool updateStepper(uint8_t step) {
@@ -557,7 +544,7 @@ void _c1541_tick_via2_b(c1541_t* sys) {
 
         if (sys->rotor_active) {
             // TODO if stepper has settled...
-            const uint8_t new_stepper_position = (((pins >> M6522_PIN_PB0) & 3) - (sys->half_track & 3)) & 3;
+            const uint8_t new_stepper_position = ((pb & 3) - (sys->half_track & 3)) & 3;
             if (new_stepper_position != 0) {
                 updateStepper(new_stepper_position);
                 C1541_TRACK_CHANGED_HOOK(sys, sys->half_track);
@@ -579,41 +566,46 @@ uint8_t _c1541_tick_via2(c1541_t* sys) {
     return irq;
 }
 
-void _c1541_update_via_1_from_iec(c1541_t *sys) {
+uint32_t _c1541_update_via_1_from_iec(c1541_t *sys) {
     const uint8_t iec_lines = iec_get_signals(sys->iec_bus);
-    uint64_t pins = sys->via_1.pins & ~(M6522_PB0 | M6522_PB2 | M6522_PB7 | M6522_CA1);
+    /* VIA1 input pins: PB0 = DATA in, PB2 = CLK in, PB7/CA1 = ATN in;
+       everything else feeds back from the previous outputs */
+    uint8_t pb = sys->via_1.pb.pins;
+    uint8_t ctl = sys->via_1.io_ctl;   /* control outputs loop back */
+    pb &= ~(0x01 | 0x04 | 0x80);
+    ctl &= ~0x01;
     /* lines are active-low, the according VIA pins go to 1 when active */
     if (!(iec_lines & IECLINE_ATN)) {
-        pins |= M6522_PB7 | M6522_CA1; // ATN IN
+        pb |= 0x80; ctl |= 0x01;   // ATN IN
     }
     if (!(iec_lines & IECLINE_CLK)) {
-        pins |= M6522_PB2; // CLK IN
+        pb |= 0x04;                // CLK IN
     }
     if (!(iec_lines & IECLINE_DATA)) {
-        pins |= M6522_PB0; // DATA IN
+        pb |= 0x01;                // DATA IN
     }
     // note ATNA logic (activates DATA dependent on ATN and PB4) gets handled by iecbus.h
 
-    sys->via_1.pb.pins = M6522_GET_PB(pins);
-    sys->via_1.pins = pins;
+    sys->via_1.pb.pins = pb;   /* the CPU may read $1800 in this cycle */
+    return (uint32_t)sys->via_1.pa.pins | ((uint32_t)pb << 8) | ((uint32_t)ctl << 16);
 }
 
 void _c1541_update_iec_from_via_1(c1541_t* sys) {
-    const uint64_t pins = sys->via_1.pins;
+    const uint8_t pb = sys->via_1.pb.pins;
     /* drive pulls a line low (active) when the according PB bit is set,
        except ATNA which is active when PB4 is clear */
-    const uint8_t out_signals = (uint8_t)~0u & (uint8_t)~(
-          (((uint8_t)(pins >> M6522_PIN_PB3) & 1) << 1)             // IECLINE_CLK
-        | (((uint8_t)(pins >> M6522_PIN_PB1) & 1) << 0)             // IECLINE_DATA
-        | ((((uint8_t)(pins >> M6522_PIN_PB4) & 1) ^ 1) << 5));     // IECLINE_ATNA
+    const uint8_t out_signals = (uint8_t)~(
+          (((pb >> 3) & 1) << 1)             // IECLINE_CLK
+        | (((pb >> 1) & 1) << 0)             // IECLINE_DATA
+        | ((((pb >> 4) & 1) ^ 1) << 5));     // IECLINE_ATNA
     iec_set_signals(sys->iec_bus, sys->iec_device, out_signals);
 }
 
 static inline __attribute__((always_inline))
-uint64_t _c1541_tick_core0a(c1541_t* sys, const uint64_t input_pins) {
+uint64_t _c1541_tick_core0a(c1541_t* sys, const uint64_t input_pins, uint32_t* via1_in) {
     uint64_t pins = 0;
 
-    _c1541_update_via_1_from_iec(sys);
+    *via1_in = _c1541_update_via_1_from_iec(sys);
     C1541_CYCLE_INFO("iecin");
     pins = _c1541_tick_cpu(sys, input_pins);
     pins &= ~(M6502_IRQ);
@@ -621,9 +613,9 @@ uint64_t _c1541_tick_core0a(c1541_t* sys, const uint64_t input_pins) {
 }
 
 static inline __attribute__((always_inline))
-uint64_t _c1541_tick_core0b(c1541_t* sys, uint64_t pins) {
+uint64_t _c1541_tick_core0b(c1541_t* sys, uint64_t pins, const uint32_t via1_in) {
     C1541_CYCLE_INFO("iecin2   ");
-    if (_c1541_tick_via1(sys)) {
+    if (_c1541_tick_via1(sys, via1_in)) {
         pins |= M6502_IRQ;
     }
     C1541_CYCLE_INFO("via1 ");
@@ -639,8 +631,9 @@ bool _c1541_tick_core1(c1541_t* sys) {
 }
 
 uint64_t _c1541_tick(c1541_t* sys, const uint64_t input_pins) {
-    uint64_t pins = _c1541_tick_core0a(sys, input_pins);
-    pins = _c1541_tick_core0b(sys, pins);
+    uint32_t via1_in;
+    uint64_t pins = _c1541_tick_core0a(sys, input_pins, &via1_in);
+    pins = _c1541_tick_core0b(sys, pins, via1_in);
     if (_c1541_tick_core1(sys)) {
         pins |= M6502_IRQ;
     }
