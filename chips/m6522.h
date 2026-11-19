@@ -330,6 +330,10 @@ typedef struct {
     m6522_int_t intr;
     uint8_t acr;        /* auxilary control register */
     uint8_t pcr;        /* peripheral control register */
+    /* previous sample of the CA1/CA2/CB1/CB2 control input pins as a 4-bit
+       nibble; edges (and thus control-line interrupts and latching) can only
+       fire when this changes, see _m6522_tick() */
+    uint8_t ctrl_pins;
     uint64_t pins;
     char *chip_name;
 } m6522_t;
@@ -437,6 +441,7 @@ void m6522_reset(m6522_t* c) {
     _m6522_init_interrupt(&c->intr);
     c->acr = 0;
     c->pcr = 0;
+    c->ctrl_pins = 0;
     c->pins = 0;
 }
 
@@ -511,21 +516,73 @@ static uint64_t _m6522_tick(m6522_t* c, uint64_t pins) {
     const uint8_t pcr = c->pcr;
     const uint8_t acr = c->acr;
     uint8_t ifr = c->intr.ifr;
-
-    /*--- control pin sampling and edge/polarity detection ---*/
-    const uint8_t new_ca1 = (uint8_t)((pins >> M6522_PIN_CA1) & 1);
-    const uint8_t new_ca2 = (uint8_t)((pins >> M6522_PIN_CA2) & 1);
-    const uint8_t new_cb1 = (uint8_t)((pins >> M6522_PIN_CB1) & 1);
-    const uint8_t new_cb2 = (uint8_t)((pins >> M6522_PIN_CB2) & 1);
     uint8_t pa_ctrl = c->pa.ctrl;
     uint8_t pb_ctrl = c->pb.ctrl;
-    /* CA1/CB1: edge on the line with the PCR-selected polarity (pcr bit 0 / bit 4) */
-    const uint8_t ca1_trig = (pa_ctrl ^ new_ca1) & (new_ca1 ^ pcr ^ 1) & 1;
-    const uint8_t cb1_trig = (pb_ctrl ^ new_cb1) & (new_cb1 ^ (pcr >> 4) ^ 1) & 1;
-    /* CA2/CB2: edge when the 2-bit PCR control field (bits 3:2 / 7:6, 0=falling,
-       1=rising, >=2 is output mode and never triggers) matches the new level */
-    const uint8_t ca2_trig = ((pa_ctrl >> 1) ^ new_ca2) & (uint8_t)((((pcr >> 2) & 3) ^ new_ca2) == 0);
-    const uint8_t cb2_trig = ((pb_ctrl >> 1) ^ new_cb2) & (uint8_t)((((pcr >> 6) & 3) ^ new_cb2) == 0);
+    uint8_t ca1_trig = 0, ca2_trig = 0, cb1_trig = 0, cb2_trig = 0;
+
+    /*--- control pin sampling and edge/polarity detection ---*/
+    /* fast path: edges (and with them control-line interrupts, handshake
+       outputs and the c1_in/c2_in state) can only fire when the CA1/CA2/
+       CB1/CB2 input pins changed since the previous tick; the previous
+       sample is cached in ctrl_pins as a 4-bit nibble. Within the slow
+       path, only the pins that actually changed are processed (in the c1541
+       an edge is almost always CA1-only: ATN on VIA1, byte-ready on VIA2) */
+    const uint8_t pin_nibble = (uint8_t)((pins >> M6522_PIN_CA1) & 0x0F);
+    const uint8_t changed = pin_nibble ^ c->ctrl_pins;
+    if (changed) {
+        c->ctrl_pins = pin_nibble;
+        /* CA1: edge with the PCR-selected polarity (pcr bit 0) */
+        if (changed & 0x01) {
+            const uint8_t new_ca1 = pin_nibble & 0x01;
+            ca1_trig = ((pa_ctrl ^ new_ca1) & (new_ca1 ^ pcr ^ 1)) & 1;
+            pa_ctrl = (pa_ctrl & ~0x01) | new_ca1;
+        }
+        /* CA2: edge when the 2-bit PCR control field (bits 3:2, 0=falling,
+           1=rising, >=2 output mode) matches the new level */
+        if (changed & 0x02) {
+            const uint8_t new_ca2 = (pin_nibble >> 1) & 0x01;
+            ca2_trig = ((pa_ctrl >> 1) ^ new_ca2) & (uint8_t)((((pcr >> 2) & 3) ^ new_ca2) == 0);
+            pa_ctrl = (pa_ctrl & ~0x02) | (new_ca2 << 1);
+        }
+        /* CB1: edge with the PCR-selected polarity (pcr bit 4) */
+        if (changed & 0x04) {
+            const uint8_t new_cb1 = (pin_nibble >> 2) & 0x01;
+            cb1_trig = ((pb_ctrl ^ new_cb1) & (new_cb1 ^ (pcr >> 4) ^ 1)) & 1;
+            pb_ctrl = (pb_ctrl & ~0x01) | new_cb1;
+        }
+        /* CB2: like CA2 with pcr bits 7:6. NOTE: pa.c2_in is fed from CB2
+           as well, matching the original code */
+        if (changed & 0x08) {
+            const uint8_t new_cb2 = (pin_nibble >> 3) & 0x01;
+            cb2_trig = ((pb_ctrl >> 1) ^ new_cb2) & (uint8_t)((((pcr >> 6) & 3) ^ new_cb2) == 0);
+            pb_ctrl = (pb_ctrl & ~0x02) | (new_cb2 << 1);
+            pa_ctrl = (pa_ctrl & ~0x02) | (new_cb2 << 1);
+        }
+
+        /*--- control line interrupts and CA2/CB2 auto-handshake ---*/
+        if (ca1_trig | ca2_trig | cb1_trig | cb2_trig) {
+            if (ca1_trig) {
+                ifr |= M6522_IRQ_CA1;
+                if (((pcr >> 2) & 3) == 2) {    /* CA2 auto-handshake */
+                    pa_ctrl |= _M6522_CTRL_C2_OUT;
+                }
+            }
+            if (ca2_trig && !(pcr & 0x08)) {    /* CA2 is an input */
+                ifr |= M6522_IRQ_CA2;
+            }
+            if (cb1_trig) {
+                ifr |= M6522_IRQ_CB1;
+                if (((pcr >> 6) & 3) == 2) {    /* CB2 auto-handshake */
+                    pb_ctrl |= _M6522_CTRL_C2_OUT;
+                }
+            }
+            if (cb2_trig && !(pcr & 0x80)) {    /* CB2 is an input */
+                ifr |= M6522_IRQ_CB2;
+            }
+        }
+        c->pa.ctrl = pa_ctrl;
+        c->pb.ctrl = pb_ctrl;
+    }
 
     /*--- input registers (latched on CA1/CB1 when enabled via ACR) ---*/
     if (!(acr & 0x01) || ca1_trig) {
@@ -534,35 +591,6 @@ static uint64_t _m6522_tick(m6522_t* c, uint64_t pins) {
     if (!(acr & 0x02) || cb1_trig) {
         c->pb.inpr = M6522_GET_PB(pins);
     }
-
-    /*--- control line interrupts and CA2/CB2 auto-handshake ---*/
-    if (ca1_trig | ca2_trig | cb1_trig | cb2_trig) {
-        if (ca1_trig) {
-            ifr |= M6522_IRQ_CA1;
-            if (((pcr >> 2) & 3) == 2) {    /* CA2 auto-handshake */
-                pa_ctrl |= _M6522_CTRL_C2_OUT;
-            }
-        }
-        if (ca2_trig && !(pcr & 0x08)) {    /* CA2 is an input */
-            ifr |= M6522_IRQ_CA2;
-        }
-        if (cb1_trig) {
-            ifr |= M6522_IRQ_CB1;
-            if (((pcr >> 6) & 3) == 2) {    /* CB2 auto-handshake */
-                pb_ctrl |= _M6522_CTRL_C2_OUT;
-            }
-        }
-        if (cb2_trig && !(pcr & 0x80)) {    /* CB2 is an input */
-            ifr |= M6522_IRQ_CB2;
-        }
-    }
-
-    /* store new control pin input state
-       (NOTE: pa.c2_in is fed from CB2, matching the original code) */
-    pa_ctrl = (pa_ctrl & ~0x03) | new_ca1 | (new_cb2 << 1);
-    pb_ctrl = (pb_ctrl & ~0x03) | new_cb1 | (new_cb2 << 1);
-    c->pa.ctrl = pa_ctrl;
-    c->pb.ctrl = pb_ctrl;
 
     /*--- T1 ---*/
     {

@@ -252,6 +252,7 @@ static void print_profile(double c1541_ticks) {
     printf("%-13s %4d %9" PRIu64 " %8" PRIu64 " %12.1f %7.1f%%\n", name, sorted[i].core,
            sorted[i].count, sorted[i].max, avg, 100.0 * (double)sorted[i].cycles / (double)total);
   }
+  printf("slow *ticks (>%d): %u\n", SLOW_TICK_THRESHOLD, slow_tick_warnings);
   printf("cores at end: c0=%" PRId64 " c1=%" PRId64 "\n",
          ICpuCore_getCycles(mcu->core[0]), ICpuCore_getCycles(mcu->core[1]));
 }
