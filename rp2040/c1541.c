@@ -63,6 +63,7 @@ static volatile uint32_t via2_done;
 static volatile bool via2_irq;
 
 static void core1_entry(void) {
+    cycle_info("bootc1   "); // core1 idle-while-core0-boots lands here (huge first sample)
     while (true) {
         while (via2_start == 0) {
         }
@@ -189,7 +190,7 @@ int main(int argc, char **argv) {
     iecbus_device_t* host_iec = iec_connect(&state.c1541.iec_bus, false);
     c1541_fetch_track(&state.c1541); // read initial track
     multicore_launch_core1(core1_entry);
-    cycle_info("boot "); // everything before this was one-time boot work
+    cycle_info("bootc0   "); // everything before this was one-time boot work
 
     do {
       // Read IEC incoming signals from GPIOs and update the IEC bus
