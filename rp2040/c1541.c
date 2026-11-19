@@ -67,25 +67,32 @@ static volatile bool via2_irq;
 static void core1_entry(void) {
     cycle_info("bootc1   "); // core1 idle-while-core0-boots lands here (huge first sample)
     while (true) {
-        /* speculate the GCR prepare while waiting for core0; its inputs are
-           stable during core0's CPU tick except for $1C00 writes (motor/
-           speed zone), which set via2_gcr_dirty and force a re-prepare */
-        uint32_t via2_in;
-        c1541_gcr_pending_t pend;
-        /* speculate the GCR prepare while waiting for core0; its inputs are
-           stable during core0's CPU tick except for $1C00 writes (motor/
-           speed zone), which set via2_gcr_dirty and force a re-prepare */
-        _c1541_via2_gcr_prepare(&state.c1541, &via2_in, &pend);
+        /* speculate the GCR prepare while waiting for core0: it reads the
+           committed state buffer and writes only the idle one, so core0's
+           CPU tick cannot observe it. Inputs taken from sys (motor state,
+           speed zone) are stable during the CPU tick except for $1C00
+           writes, which set via2_gcr_dirty */
+        uint32_t via2_in = _c1541_via2_gcr_prepare(&state.c1541);
         while (via2_start == 0) {
         }
         via2_start = 0;
         cycle_info("gcr-idle "); // waiting for core0 to hand over the VIA2 tick
         if (via2_gcr_dirty) {
+            /* the speculation was wrong: re-prepare from the still-untouched
+               committed buffer (with the final motor/speed state) */
             via2_gcr_dirty = false;
-            _c1541_via2_gcr_prepare(&state.c1541, &via2_in, &pend);
+            via2_in = _c1541_via2_gcr_prepare(&state.c1541);
         }
         cycle_info("gcr  ");
-        _c1541_via2_gcr_commit(&state.c1541, &pend);
+        _c1541_via2_gcr_commit(&state.c1541);   /* flip the buffers */
+        /* apply the byte-ready countdown (the only part that must run after
+           the cpu tick: its s0/OV workaround decrements it directly) */
+        if (via2_in & C1541_GCR_BYTE_READY) {
+            state.c1541.byte_ready_countdown = 2;
+        }
+        if (state.c1541.byte_ready_countdown > 0) {
+            state.c1541.byte_ready_countdown--;
+        }
         via2_irq = (uint8_t)(_m6522_tick_io(&state.c1541.via_2, via2_in) >> 24);
         cycle_info("via2 ");
         via2_done = 1;
@@ -161,9 +168,10 @@ bool c1541_fetch_track(c1541_t* sys) {
     sys->gcr_bytes[data_size] = 0; // mark track done, protection against memory garbage
     sys->gcr_size = data_size;
     /* the GCR read cursor must be reset whenever the track data changes */
-    sys->gcr_byte_pos = 0;
-    sys->gcr_bit_mask = 0x80;
-    sys->gcr_current_byte = sys->gcr_bytes[0];
+    c1541_gcr_state_t* const gcr = &sys->gcr_state[sys->gcr_committed];
+    gcr->gcr_byte_pos = 0;
+    gcr->gcr_bit_mask = 0x80;
+    gcr->gcr_current_byte = sys->gcr_bytes[0];
     return true;
 }
 

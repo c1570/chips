@@ -113,6 +113,20 @@ typedef struct {
     } roms;
 } c1541_desc_t;
 
+/* double-buffered GCR read-head state (see c1541_t.gcr_state) */
+typedef struct {
+    uint32_t rotor_nanoseconds_counter;
+    uint16_t current_data;
+    uint16_t gcr_byte_pos;
+    /* GCR read cursor: the current byte is cached (avoids an address
+       computation and load per bit) and the bit position is kept as a
+       rotating 1-of-8 mask (0x80, 0x40, ... 0x01, then wrap) */
+    uint8_t gcr_current_byte;
+    uint8_t gcr_bit_mask;
+    uint8_t output_bit_counter;
+    uint8_t output_data;
+} c1541_gcr_state_t;
+
 // 1541 emulator state
 typedef struct {
     uint64_t pins;
@@ -126,19 +140,18 @@ typedef struct {
        that all accesses are within the 12-bit immediate range on RV32
        (the arrays pushed these fields to offsets > 24K before, forcing
        lui+add base chains around every access) */
-    uint32_t rotor_nanoseconds_counter;
     uint32_t nanoseconds_per_bit;
     bool rotor_active;
-    uint16_t gcr_byte_pos;
-    /* GCR read cursor: the current byte is cached (avoids an address
-       computation and load per bit) and the bit position is kept as a
-       rotating 1-of-8 mask (0x80, 0x40, ... 0x01, then wrap) */
-    uint8_t gcr_current_byte;
-    uint8_t gcr_bit_mask;
-
-    uint16_t current_data;
-    uint8_t output_data;
-    uint8_t output_bit_counter;
+    /* double-buffered GCR read-head state: _c1541_via2_gcr_prepare()
+       reads the committed buffer and writes the other one, the commit is
+       just a buffer swap. This lets core1 speculate the prepare (the
+       speculation writes only the idle buffer); when core0 wrote $1C00
+       during its CPU tick, the untouched committed buffer is re-prepared
+       from, with no rollback needed */
+    c1541_gcr_state_t gcr_state[2];
+    uint8_t gcr_committed;       /* index of the committed buffer */
+    /* NOT part of the buffers: the cpu tick's s0/OV workaround decrements
+       the countdown directly, so it must never be speculated */
     int byte_ready_countdown;
 
     uint8_t half_track;          // Track 1 = 0b10=2, Track 1.5 = 0b11=3, Track 2 = 0b100=4, ...
@@ -186,24 +199,21 @@ bool c1541_attach_disk(c1541_t* sys, const char* filename);
 // fetch track data for current half-track position (opens file, reads offsets, reads track)
 bool c1541_fetch_track(c1541_t* sys);
 
-/* pending drive state produced by the (possibly speculative) GCR prepare */
-typedef struct {
-    uint32_t rotor_nanoseconds_counter;
-    uint16_t current_data;
-    uint16_t gcr_byte_pos;
-    uint8_t gcr_current_byte;
-    uint8_t gcr_bit_mask;
-    uint8_t output_bit_counter;
-    uint8_t output_data;
-    bool byte_ready;            /* byte-ready event: set countdown at commit */
-} c1541_gcr_pending_t;
+/* in the prepare's return value: a byte-ready event happened (the
+   byte_ready_countdown must not be speculated, see the commit below) */
+#define C1541_GCR_BYTE_READY (1u << 24)
 
-/* run the GCR read-head prepare: computes the VIA2 input pins (packed for
-   _m6522_tick_io) and the drive state changes, WITHOUT committing them yet
-   (lets the RP2 firmware speculate this during core1's idle time) */
-void _c1541_via2_gcr_prepare(c1541_t* sys, uint32_t* via2_in, c1541_gcr_pending_t* pend);
-/* commit the pending drive state from _c1541_via2_gcr_prepare() */
-void _c1541_via2_gcr_commit(c1541_t* sys, const c1541_gcr_pending_t* pend);
+/* run the GCR read-head prepare: reads the committed state buffer, writes
+   the results into the other one (invisible until committed) and returns
+   the packed VIA2 input pins, plus C1541_GCR_BYTE_READY when a byte-ready
+   event occurred. After the (possibly speculative) prepare, the caller
+   must apply the byte-ready countdown:
+     if (r & C1541_GCR_BYTE_READY) sys->byte_ready_countdown = 2;
+     if (sys->byte_ready_countdown > 0) sys->byte_ready_countdown--;   */
+uint32_t _c1541_via2_gcr_prepare(c1541_t* sys);
+/* make the buffer written by the last _c1541_via2_gcr_prepare() the
+   committed one (single buffer swap) */
+void _c1541_via2_gcr_commit(c1541_t* sys);
 
 #ifdef __cplusplus
 } // extern "C"
@@ -230,12 +240,12 @@ void c1541_init(c1541_t* sys, const c1541_desc_t* desc) {
     sys->disk_type = 0;
     sys->gcr_size = 0;
     sys->gcr_bytes[0] = 0;
-    sys->gcr_byte_pos = 0;
-    sys->gcr_current_byte = 0;
-    sys->gcr_bit_mask = 0x80;
+    memset(sys->gcr_state, 0, sizeof(sys->gcr_state));
+    sys->gcr_state[0].gcr_bit_mask = 0x80;
+    sys->gcr_state[1].gcr_bit_mask = 0x80;
+    sys->gcr_committed = 0;
     sys->current_byte = 0;
     sys->current_bit_pos = 0;
-    sys->rotor_nanoseconds_counter = 0;
     sys->rotor_active = 1;
     const uint8_t initial_full_track = 18;
     sys->nanoseconds_per_bit = c1541_speedzone[2];
@@ -301,13 +311,24 @@ void _c1541_write(c1541_t* sys, uint16_t addr, uint8_t data) {
     } else if (uc7_input == 0x1C) {
         // Write to VIA2
         if ((addr & 0xf) == 0) {
-            C1541_VIA2_GCR_DIRTY();    /* invalidate a speculative GCR prepare */
             sys->rotor_active = (data & VIA2_ROTOR) != 0;
-            if (!sys->rotor_active) {
-                sys->rotor_nanoseconds_counter = 0;
-            }
 
-            sys->nanoseconds_per_bit = c1541_speedzone[(data >> 5) & 3];
+            /* a speculative GCR prepare only depends on the speed zone and
+               (via the motor-off rotor clear) on the rotor state; other
+               $1C00 writes (stepper, LED, unchanged speed) cannot change
+               its result, so no re-prepare is needed for those */
+            const uint32_t ns_per_bit = c1541_speedzone[(data >> 5) & 3];
+            bool gcr_dirty = (ns_per_bit != sys->nanoseconds_per_bit);
+            if (!sys->rotor_active) {
+                /* clear in the committed buffer: a speculative prepare
+                   reading it concurrently is discarded via the dirty flag */
+                sys->gcr_state[sys->gcr_committed].rotor_nanoseconds_counter = 0;
+                gcr_dirty = true;
+            }
+            sys->nanoseconds_per_bit = ns_per_bit;
+            if (gcr_dirty) {
+                C1541_VIA2_GCR_DIRTY();
+            }
 
             uint changed_bits = sys->via_2.pb.outr ^ data;
             if(changed_bits & 0b1000) {
@@ -437,73 +458,66 @@ uint8_t _c1541_tick_via1(c1541_t* sys, const uint32_t via1_in) {
     return (uint8_t)(io >> 24);
 }
 
-void _c1541_via2_gcr_prepare(c1541_t* sys, uint32_t* via2_in, c1541_gcr_pending_t* pend) {
+uint32_t _c1541_via2_gcr_prepare(c1541_t* sys) {
+    /* read from the committed buffer, write the results into the other
+       one; the caller makes them official with _c1541_via2_gcr_commit() */
+    c1541_gcr_state_t* const src = &sys->gcr_state[sys->gcr_committed];
+    c1541_gcr_state_t* const dst = &sys->gcr_state[sys->gcr_committed ^ 1];
+    *dst = *src;   /* start from the committed state, mutate below */
+
     /* VIA2 input pins: PA = read data, CA1 = byte-ready, PB7 = sync;
        everything else feeds back from the previous outputs */
     uint8_t pa = sys->via_2.pa.pins;
     uint8_t pb = sys->via_2.pb.pins;
     uint8_t ctl = sys->via_2.io_ctl;
-    /* seed the pending state with the current values; only what the rotor
-       block changes differs at commit time */
-    pend->rotor_nanoseconds_counter = sys->rotor_nanoseconds_counter;
-    pend->current_data = sys->current_data;
-    pend->gcr_byte_pos = sys->gcr_byte_pos;
-    pend->gcr_current_byte = sys->gcr_current_byte;
-    pend->gcr_bit_mask = sys->gcr_bit_mask;
-    pend->output_bit_counter = sys->output_bit_counter;
-    pend->output_data = sys->output_data;
-    pend->byte_ready = false;
 
     const bool output_enable = (ctl & 0x08) != 0;    /* CB2 */
     const bool motor_active = (pb & 0x04) != 0;      /* PB2 */
-    bool sync_bits_present = ((uint32_t)(sys->current_data + 1) & (1<<10)) != 0;
+    bool sync_bits_present = ((uint32_t)(dst->current_data + 1) & (1<<10)) != 0;
     bool is_sync = sync_bits_present && output_enable;
     bool latch_data = false;
+    uint32_t byte_ready = 0;
 
     // Motor active?
     if (motor_active) {
-        uint32_t rotor = sys->rotor_nanoseconds_counter + 1000;
-        if (rotor >= sys->nanoseconds_per_bit) {
-            rotor -= sys->nanoseconds_per_bit;
-            uint16_t data = pend->current_data;
+        dst->rotor_nanoseconds_counter += 1000;
+        if (dst->rotor_nanoseconds_counter >= sys->nanoseconds_per_bit) {
+            dst->rotor_nanoseconds_counter -= sys->nanoseconds_per_bit;
 
             // shift in next gcr bit
-            data <<= 1;
-            data &= (1<<10)-1;
-            if (pend->gcr_current_byte & pend->gcr_bit_mask) {
+            dst->current_data <<= 1;
+            dst->current_data &= (1<<10)-1;
+            if (dst->gcr_current_byte & dst->gcr_bit_mask) {
                 // GCR 1 bit
-                data |= 1;
+                dst->current_data |= 1;
             } else {
                 // GCR 0 bit
             }
-            pend->current_data = data;
 
             // update gcr read position
-            pend->gcr_bit_mask >>= 1;
-            if (0 == pend->gcr_bit_mask) {
-                pend->gcr_bit_mask = 0x80;
-                pend->gcr_byte_pos++;
-                if (pend->gcr_byte_pos >= sys->gcr_size || 0 == (pend->gcr_current_byte = sys->gcr_bytes[pend->gcr_byte_pos])) {
-                    pend->gcr_byte_pos = 0;
-                    pend->gcr_current_byte = sys->gcr_bytes[0];
+            dst->gcr_bit_mask >>= 1;
+            if (0 == dst->gcr_bit_mask) {
+                dst->gcr_bit_mask = 0x80;
+                dst->gcr_byte_pos++;
+                if (dst->gcr_byte_pos >= sys->gcr_size || 0 == (dst->gcr_current_byte = sys->gcr_bytes[dst->gcr_byte_pos])) {
+                    dst->gcr_byte_pos = 0;
+                    dst->gcr_current_byte = sys->gcr_bytes[0];
                 }
             }
 
-            is_sync = ((((uint32_t)(data + 1)) & (1<<10)) != 0) && output_enable;
+            is_sync = ((((uint32_t)(dst->current_data + 1)) & (1<<10)) != 0) && output_enable;
 
             if (is_sync) {
-                pend->output_bit_counter = 0;
+                dst->output_bit_counter = 0;
             } else {
-                const uint8_t bit_ctr = pend->output_bit_counter + 1;
-                pend->output_bit_counter = bit_ctr;
-                if (bit_ctr > 7) {
-                    pend->output_bit_counter = 0;
-                    pend->byte_ready = true;
+                dst->output_bit_counter++;
+                if (dst->output_bit_counter > 7) {
+                    dst->output_bit_counter = 0;
+                    byte_ready = C1541_GCR_BYTE_READY;
                     latch_data = true;
                 }
             }
         }
-        pend->rotor_nanoseconds_counter = rotor;
     }
 
     /* PB7 reads the (inverted) sync state */
@@ -512,36 +526,21 @@ void _c1541_via2_gcr_prepare(c1541_t* sys, uint32_t* via2_in, c1541_gcr_pending_
     /* CA1 input is the byte-ready strobe (CA2/CB1/CB2 loop back) */
     ctl &= ~0x01;
     if (latch_data) {
-        pend->output_data = pend->current_data & 0xff;
+        dst->output_data = dst->current_data & 0xff;
         if (output_enable) {
             ctl |= 0x01;
         }
     }
 
     if (output_enable) {
-        pa = pend->output_data;
+        pa = dst->output_data;
     }
 
-    *via2_in = (uint32_t)pa | ((uint32_t)pb << 8) | ((uint32_t)ctl << 16);
+    return (uint32_t)pa | ((uint32_t)pb << 8) | ((uint32_t)ctl << 16) | byte_ready;
 }
 
-void _c1541_via2_gcr_commit(c1541_t* sys, const c1541_gcr_pending_t* pend) {
-    sys->rotor_nanoseconds_counter = pend->rotor_nanoseconds_counter;
-    sys->current_data = pend->current_data;
-    sys->gcr_byte_pos = pend->gcr_byte_pos;
-    sys->gcr_current_byte = pend->gcr_current_byte;
-    sys->gcr_bit_mask = pend->gcr_bit_mask;
-    sys->output_bit_counter = pend->output_bit_counter;
-    sys->output_data = pend->output_data;
-    /* the byte-ready countdown is applied here (not speculated): the cpu
-       tick's s0/OV workaround decrements it directly, and a speculative
-       prepare would run before that decrement */
-    if (pend->byte_ready) {
-        sys->byte_ready_countdown = 2;
-    }
-    if (sys->byte_ready_countdown > 0) {
-        sys->byte_ready_countdown--;
-    }
+void _c1541_via2_gcr_commit(c1541_t* sys) {
+    sys->gcr_committed ^= 1;
 }
 
 // _c1541_tick_via2 returns if IRQ should be set
@@ -549,11 +548,17 @@ uint8_t _c1541_tick_via2_a(c1541_t* sys) {
 #ifdef PICO
     uint32_t tick = get_ticks();
 #endif
-    uint32_t via2_in;
-    c1541_gcr_pending_t pend;
-    _c1541_via2_gcr_prepare(sys, &via2_in, &pend);
+    const uint32_t via2_in = _c1541_via2_gcr_prepare(sys);
     C1541_CYCLE_INFO("gcr  ");
-    _c1541_via2_gcr_commit(sys, &pend);
+    _c1541_via2_gcr_commit(sys);
+    /* apply the byte-ready countdown (the only part that must run after
+       the cpu tick: its s0/OV workaround decrements it directly) */
+    if (via2_in & C1541_GCR_BYTE_READY) {
+        sys->byte_ready_countdown = 2;
+    }
+    if (sys->byte_ready_countdown > 0) {
+        sys->byte_ready_countdown--;
+    }
 
     // tick VIA2
     {
@@ -932,9 +937,10 @@ bool _c1541_fetch_track_data(c1541_t* sys) {
 bool c1541_fetch_track(c1541_t* sys) {
     const bool ok = _c1541_fetch_track_data(sys);
     /* the GCR read cursor must be reset whenever the track data changes */
-    sys->gcr_byte_pos = 0;
-    sys->gcr_bit_mask = 0x80;
-    sys->gcr_current_byte = sys->gcr_bytes[0];
+    c1541_gcr_state_t* const gcr = &sys->gcr_state[sys->gcr_committed];
+    gcr->gcr_byte_pos = 0;
+    gcr->gcr_bit_mask = 0x80;
+    gcr->gcr_current_byte = sys->gcr_bytes[0];
     return ok;
 }
 #endif
