@@ -54,7 +54,7 @@ extern uint8_t c64_ram_read(uint16_t addr);
 
 static RP2350* mcu;
 
-/* Set by the onTrace callback when the firmware reaches its "tick " marker; see
+/* Set by the onTrace callback when the firmware reaches its "*tick" marker; see
  * cycle_info() in the firmware's cycle_tracing.h. This is the runner's clock. */
 static bool c1541_tick_done = false;
 
@@ -64,6 +64,11 @@ typedef struct {
   int32_t core;
   uint64_t cycles;
   uint64_t count;
+  uint64_t max;
+  /* tags starting with '*' are self-referential: they measure the time since
+   * their own previous occurrence (instead of since the previous marker);
+   * last_self is that timestamp, -1 until the first occurrence was seen */
+  int64_t last_self;
 } profile_entry_t;
 static profile_entry_t profile[PROFILE_SLOTS];
 static size_t profile_len;
@@ -99,7 +104,6 @@ static void on_trace(void* ctx, int32_t core_number, int32_t pc, const char* tag
   const int32_t core = (core_number == 1) ? 1 : 0;
   if (profile_active && tag != NULL) {
     const int64_t now_cycles = ICpuCore_getCycles(mcu->core[core]);
-    const int64_t delta = now_cycles - last_trace_cycles[core];
     char name[16];
     copy_tag(name, sizeof(name), tag);
     size_t i = 0;
@@ -107,15 +111,35 @@ static void on_trace(void* ctx, int32_t core_number, int32_t pc, const char* tag
     if (i == profile_len && profile_len < PROFILE_SLOTS) {
       copy_tag(profile[i].tag, sizeof(profile[i].tag), name);
       profile[i].core = core;
+      profile[i].last_self = -1;
       profile_len++;
     }
     if (i < profile_len) {
-      profile[i].cycles += (uint64_t)delta;
-      profile[i].count++;
+      if (name[0] == '*') {
+        /* self-referential marker: measure against its own previous occurrence */
+        if (profile[i].last_self >= 0) {
+          const int64_t delta = now_cycles - profile[i].last_self;
+          profile[i].cycles += (uint64_t)delta;
+          profile[i].count++;
+          if (delta > 0 && (uint64_t)delta > profile[i].max) {
+            profile[i].max = (uint64_t)delta;
+          }
+        }
+        profile[i].last_self = now_cycles;
+      }
+      else {
+        const int64_t delta = now_cycles - last_trace_cycles[core];
+        profile[i].cycles += (uint64_t)delta;
+        profile[i].count++;
+        if (delta > 0 && (uint64_t)delta > profile[i].max) {
+          profile[i].max = (uint64_t)delta;
+        }
+      }
     }
+    /* every marker (including '*'-prefixed ones) becomes "the last tag" */
     last_trace_cycles[core] = now_cycles;
   }
-  if (tag != NULL && strcmp(tag, "tick ") == 0) {
+  if (tag != NULL && strcmp(tag, "*tick") == 0) {
     c1541_tick_done = true;
   }
 }
@@ -133,19 +157,20 @@ static void print_profile(double c1541_ticks) {
   qsort(sorted, profile_len, sizeof(*sorted), cmp_profile);
   uint64_t total = 0;
   for (size_t i = 0; i < profile_len; i++) total += sorted[i].cycles;
+  (void)total;
   printf("\n--- cycle profile (per-core RP2 cycles per C1541 tick) ---\n");
-  printf("%-10s %4s %12s %9s %12s %8s\n", "tag", "core", "total", "count", "per-tick", "share");
+  printf("%-13s %4s %8s %12s %8s\n", "tag", "core", "max", "avg", "share");
   for (size_t i = 0; i < profile_len; i++) {
     char name[16];
     copy_tag(name, sizeof(name), sorted[i].tag);
     size_t n = strlen(name);
     while (n > 0 && name[n - 1] == ' ') name[--n] = '\0';
-    printf("%-10s %4d %12" PRIu64 " %9" PRIu64 " %12.1f %7.1f%%\n", name, sorted[i].core,
-           sorted[i].cycles, sorted[i].count, (double)sorted[i].cycles / c1541_ticks,
-           100.0 * (double)sorted[i].cycles / (double)total);
+    const double avg = sorted[i].count > 0
+                           ? (double)sorted[i].cycles / (double)sorted[i].count
+                           : 0.0;
+    printf("%-13s %4d %8" PRIu64 " %12.1f %7.1f%%\n", name, sorted[i].core,
+           sorted[i].max, avg, 100.0 * (double)sorted[i].cycles / (double)total);
   }
-  printf("%-10s %4s %12" PRIu64 " %9s %12.1f %8s\n", "TOTAL", "", total, "",
-         (double)total / c1541_ticks, "100.0%");
   printf("cores at end: c0=%" PRId64 " c1=%" PRId64 "\n",
          ICpuCore_getCycles(mcu->core[0]), ICpuCore_getCycles(mcu->core[1]));
 }

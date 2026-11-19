@@ -67,6 +67,7 @@ static void core1_entry(void) {
         while (via2_start == 0) {
         }
         via2_start = 0;
+        cycle_info("gcr-idle "); // waiting for core0 to hand over the VIA2 tick
         via2_irq = _c1541_tick_via2_a(&state.c1541);
         via2_done = 1;
         _c1541_tick_via2_b(&state.c1541);
@@ -188,6 +189,7 @@ int main(int argc, char **argv) {
     iecbus_device_t* host_iec = iec_connect(&state.c1541.iec_bus, false);
     c1541_fetch_track(&state.c1541); // read initial track
     multicore_launch_core1(core1_entry);
+    cycle_info("boot "); // everything before this was one-time boot work
 
     do {
       // Read IEC incoming signals from GPIOs and update the IEC bus
@@ -207,6 +209,7 @@ int main(int argc, char **argv) {
         out_signals = out_new_signals;
         write_iec_signals(out_new_signals);
       }
+      cycle_info("tick-waitc1  "); // IEC output update done, start waiting for core1
       while (via2_done == 0) {
       }
       if (via2_irq) {
@@ -214,7 +217,7 @@ int main(int argc, char **argv) {
       }
       state.c1541.pins = pins;
       //_c1541_debug_out_processor_pc(tick, &state.c1541, state.c1541.pins, state.c1541.via_1.pins);
-      cycle_info("tick "); // rp2040js catches these and ticks the c64 emulation
+      cycle_info("*tick"); // self-referential: the runner measures these against the PREVIOUS *tick (full tick wall time) and ticks the c64 emulation
     } while (state.keep_running);
 
     c1541_discard(&state.c1541);
