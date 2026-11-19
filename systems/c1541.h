@@ -119,20 +119,19 @@ typedef struct {
     m6522_t via_1;
     m6522_t via_2;
     bool valid;
-    mem_t mem;
-    uint8_t ram[0x0800];
-    uint8_t rom[0x4000];
+    /* hot per-tick drive state, kept before the big rom/ram/gcr arrays so
+       that all accesses are within the 12-bit immediate range on RV32
+       (the arrays pushed these fields to offsets > 24K before, forcing
+       lui+add base chains around every access) */
     uint32_t rotor_nanoseconds_counter;
     uint32_t nanoseconds_per_bit;
     bool rotor_active;
-    uint8_t gcr_bytes[0x2000];
-    uint32_t gcr_size;
     uint16_t gcr_byte_pos;
-    uint8_t gcr_bit_pos;
-    uint8_t gcr_ones;
-    uint8_t current_byte;
-    uint8_t current_bit_pos;
-    bool gcr_sync;
+    /* GCR read cursor: the current byte is cached (avoids an address
+       computation and load per bit) and the bit position is kept as a
+       rotating 1-of-8 mask (0x80, 0x40, ... 0x01, then wrap) */
+    uint8_t gcr_current_byte;
+    uint8_t gcr_bit_mask;
 
     uint16_t current_data;
     uint8_t output_data;
@@ -142,6 +141,16 @@ typedef struct {
     uint8_t half_track;          // Track 1 = 0b10=2, Track 1.5 = 0b11=3, Track 2 = 0b100=4, ...
     uint8_t stepper_position;    // 0..3
     uint8_t coil_dir;            // 0..1
+
+    mem_t mem;
+    uint8_t ram[0x0800];
+    uint8_t rom[0x4000];
+    uint8_t gcr_bytes[0x2000];
+    uint32_t gcr_size;
+    uint8_t gcr_ones;
+    uint8_t current_byte;
+    uint8_t current_bit_pos;
+    bool gcr_sync;
 
     char disk_filename[256];
     bool disk_loaded;
@@ -197,7 +206,8 @@ void c1541_init(c1541_t* sys, const c1541_desc_t* desc) {
     sys->gcr_size = 0;
     sys->gcr_bytes[0] = 0;
     sys->gcr_byte_pos = 0;
-    sys->gcr_bit_pos = 0;
+    sys->gcr_current_byte = 0;
+    sys->gcr_bit_mask = 0x80;
     sys->current_byte = 0;
     sys->current_bit_pos = 0;
     sys->rotor_nanoseconds_counter = 0;
@@ -433,7 +443,7 @@ uint8_t _c1541_tick_via2_a(c1541_t* sys) {
                 // shift in next gcr bit
                 sys->current_data <<= 1;
                 sys->current_data &= (1<<10)-1;
-                if (sys->gcr_bytes[sys->gcr_byte_pos] & (1<<(7-sys->gcr_bit_pos))) {
+                if (sys->gcr_current_byte & sys->gcr_bit_mask) {
                     // GCR 1 bit
                     sys->current_data |= 1;
                 } else {
@@ -441,14 +451,13 @@ uint8_t _c1541_tick_via2_a(c1541_t* sys) {
                 }
 
                 // update gcr read position
-                sys->gcr_bit_pos++;
-                if (sys->gcr_bit_pos > 7) {
-                    sys->gcr_bit_pos = 0;
+                sys->gcr_bit_mask >>= 1;
+                if (0 == sys->gcr_bit_mask) {
+                    sys->gcr_bit_mask = 0x80;
                     sys->gcr_byte_pos++;
-                    if (sys->gcr_byte_pos >= sys->gcr_size || sys->gcr_bytes[sys->gcr_byte_pos] == 0) {
+                    if (sys->gcr_byte_pos >= sys->gcr_size || 0 == (sys->gcr_current_byte = sys->gcr_bytes[sys->gcr_byte_pos])) {
                         sys->gcr_byte_pos = 0;
-			// FIXME: debug output
-                        //printf("%ld - 1541 - disk cycle complete\n", get_world_tick());
+                        sys->gcr_current_byte = sys->gcr_bytes[0];
                     }
                 }
 
@@ -506,54 +515,51 @@ uint8_t _c1541_tick_via2_a(c1541_t* sys) {
     }
 }
 
+// move the head by one half-track (code from PiCiJi/Denise); returns
+// true when the half-track changed
+static bool _c1541_update_stepper(c1541_t* sys, uint8_t step) {
+    if (step == 1) {
+        if (sys->half_track < ((MAX_TRACKS_1541 * 2) - 1)) {
+            sys->half_track++;
+            sys->coil_dir = 1;
+            return true;
+        }
+        sys->coil_dir = 0;
+    } else if (step == 3) {
+        if (sys->half_track > 0) {
+            sys->half_track--;
+            sys->coil_dir = 0;
+            return true;
+        }
+        sys->coil_dir = 1;
+    } else if (step == 2) {
+        // Primitive 7 Sins uses this method
+        if (sys->coil_dir) {
+            if (sys->half_track & 1) {
+                if (_c1541_update_stepper(sys, 1))
+                    return _c1541_update_stepper(sys, 1);
+            }
+        } else {
+            if ((sys->half_track & 1) == 0) {
+                if (_c1541_update_stepper(sys, 3))
+                    return _c1541_update_stepper(sys, 3);
+            }
+        }
+    }
+    return false;
+}
+
 void _c1541_tick_via2_b(c1541_t* sys) {
     const uint8_t pb = sys->via_2.pb.pins;   /* stepper PB0/PB1, motor PB2 */
-    {
-        // code from PiCiJi/Denise
-        bool updateStepper(uint8_t step) {
-            if (step == 1) {
-                if (sys->half_track < ((MAX_TRACKS_1541 * 2) - 1)) {
-                    sys->half_track++;
-                    sys->coil_dir = 1;
-                    return true;
-                }
-                sys->coil_dir = 0;
-            } else if (step == 3) {
-                if (sys->half_track > 0) {
-                    sys->half_track--;
-                    sys->coil_dir = 0;
-                   return true;
-                }
-                sys->coil_dir = 1;
-            } else if (step == 2) {
-                // Primitive 7 Sins uses this method
-                if (sys->coil_dir) {
-                    if (sys->half_track & 1) {
-                        if (updateStepper(1))
-                            return updateStepper(1);
-                    }
-                } else {
-                    if ((sys->half_track & 1) == 0) {
-                        if (updateStepper(3))
-                            return updateStepper(3);
-                    }
-                }
-            }
-            return false;
-        }
-
-        if (sys->rotor_active) {
-            // TODO if stepper has settled...
-            const uint8_t new_stepper_position = ((pb & 3) - (sys->half_track & 3)) & 3;
-            if (new_stepper_position != 0) {
-                updateStepper(new_stepper_position);
-                C1541_TRACK_CHANGED_HOOK(sys, sys->half_track);
-                c1541_fetch_track(sys); //TODO do this in background/only after the head settled
-                C1541_CYCLE_INFO("\\fetchtrk"); // outlier marker: the runner attributes the next *tick sample to "*\tick"
-                sys->gcr_byte_pos = 0;
-                sys->gcr_bit_pos = 0;
-                sys->stepper_position = new_stepper_position;
-            }
+    if (sys->rotor_active) {
+        // TODO if stepper has settled...
+        const uint8_t new_stepper_position = ((pb & 3) - (sys->half_track & 3)) & 3;
+        if (new_stepper_position != 0) {
+            _c1541_update_stepper(sys, new_stepper_position);
+            C1541_TRACK_CHANGED_HOOK(sys, sys->half_track);
+            c1541_fetch_track(sys); //TODO do this in background/only after the head settled
+            C1541_CYCLE_INFO("\\fetchtrk"); // outlier marker: the runner attributes the next *tick sample to "*\tick"
+            sys->stepper_position = new_stepper_position;
         }
     }
     C1541_CYCLE_INFO("stepper  ");
@@ -569,21 +575,14 @@ uint8_t _c1541_tick_via2(c1541_t* sys) {
 uint32_t _c1541_update_via_1_from_iec(c1541_t *sys) {
     const uint8_t iec_lines = iec_get_signals(sys->iec_bus);
     /* VIA1 input pins: PB0 = DATA in, PB2 = CLK in, PB7/CA1 = ATN in;
-       everything else feeds back from the previous outputs */
-    uint8_t pb = sys->via_1.pb.pins;
-    uint8_t ctl = sys->via_1.io_ctl;   /* control outputs loop back */
-    pb &= ~(0x01 | 0x04 | 0x80);
-    ctl &= ~0x01;
-    /* lines are active-low, the according VIA pins go to 1 when active */
-    if (!(iec_lines & IECLINE_ATN)) {
-        pb |= 0x80; ctl |= 0x01;   // ATN IN
-    }
-    if (!(iec_lines & IECLINE_CLK)) {
-        pb |= 0x04;                // CLK IN
-    }
-    if (!(iec_lines & IECLINE_DATA)) {
-        pb |= 0x01;                // DATA IN
-    }
+       everything else feeds back from the previous outputs. Lines are
+       active-low, the according VIA pins go to 1 when active */
+    const uint8_t active = ~iec_lines;
+    const uint8_t pb = (sys->via_1.pb.pins & ~(0x01 | 0x04 | 0x80))
+                     | (active & 0x01)            // DATA IN
+                     | ((active & 0x02) << 1)     // CLK IN
+                     | ((active & 0x04) << 5);    // ATN IN
+    const uint8_t ctl = (sys->via_1.io_ctl & ~0x01) | ((active & 0x04) >> 2);
     // note ATNA logic (activates DATA dependent on ATN and PB4) gets handled by iecbus.h
 
     sys->via_1.pb.pins = pb;   /* the CPU may read $1800 in this cycle */
@@ -716,7 +715,7 @@ bool c1541_attach_disk(c1541_t* sys, const char* filename) {
 }
 
 #ifndef IS_RP2
-bool c1541_fetch_track(c1541_t* sys) {
+bool _c1541_fetch_track_data(c1541_t* sys) {
     CHIPS_ASSERT(sys && sys->valid);
 
     if (!sys->disk_loaded || sys->disk_filename[0] == '\0') {
@@ -871,6 +870,15 @@ bool c1541_fetch_track(c1541_t* sys) {
     sys->gcr_bytes[data_size] = 0;  // Mark end of track
 
     return true;
+}
+
+bool c1541_fetch_track(c1541_t* sys) {
+    const bool ok = _c1541_fetch_track_data(sys);
+    /* the GCR read cursor must be reset whenever the track data changes */
+    sys->gcr_byte_pos = 0;
+    sys->gcr_bit_mask = 0x80;
+    sys->gcr_current_byte = sys->gcr_bytes[0];
+    return ok;
 }
 #endif
 

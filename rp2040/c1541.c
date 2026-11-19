@@ -142,6 +142,10 @@ bool c1541_fetch_track(c1541_t* sys) {
     }
     sys->gcr_bytes[data_size] = 0; // mark track done, protection against memory garbage
     sys->gcr_size = data_size;
+    /* the GCR read cursor must be reset whenever the track data changes */
+    sys->gcr_byte_pos = 0;
+    sys->gcr_bit_mask = 0x80;
+    sys->gcr_current_byte = sys->gcr_bytes[0];
     return true;
 }
 

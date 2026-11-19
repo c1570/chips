@@ -522,7 +522,8 @@ static inline void _m6522_write_ifr(m6522_t* c, uint8_t data) {
    64-bit pin mask): the input word is ctl:16 | pb:8 | pa where ctl is the
    CA1/CA2/CB1/CB2 input state nibble, the return word is
    irq:24 | ctl_out:16 | pb_out:8 | pa_out */
-static uint32_t _m6522_tick_io(m6522_t* c, uint32_t in) {
+static inline __attribute__((always_inline))
+uint32_t _m6522_tick_io(m6522_t* c, uint32_t in) {
     const uint8_t pcr = c->pcr;
     const uint8_t acr = c->acr;
     uint8_t ifr = c->intr.ifr;
@@ -698,7 +699,8 @@ static uint32_t _m6522_tick_io(m6522_t* c, uint32_t in) {
 }
 
 /* read a register */
-static uint8_t _m6522_read(m6522_t* c, uint8_t addr) {
+static inline __attribute__((always_inline))
+uint8_t _m6522_read(m6522_t* c, uint8_t addr) {
     uint8_t data = 0;
     switch (addr) {
         case M6522_REG_RB:
