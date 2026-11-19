@@ -562,7 +562,7 @@ void _c1541_tick_via2_b(c1541_t* sys) {
                 updateStepper(new_stepper_position);
                 C1541_TRACK_CHANGED_HOOK(sys, sys->half_track);
                 c1541_fetch_track(sys); //TODO do this in background/only after the head settled
-                C1541_CYCLE_INFO("fetchtrk "); // closes the (rare) stepper + track fetch work
+                C1541_CYCLE_INFO("\\fetchtrk"); // outlier marker: the runner attributes the next *tick sample to "*\tick"
                 sys->gcr_byte_pos = 0;
                 sys->gcr_bit_pos = 0;
                 sys->stepper_position = new_stepper_position;

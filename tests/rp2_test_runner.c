@@ -75,13 +75,6 @@ static size_t profile_len;
 static int64_t last_trace_cycles[2];
 static bool profile_active;
 
-static int64_t mcu_cycles(void) {
-  const int64_t c0 = ICpuCore_getCycles(mcu->core[0]);
-  if (mcu->core[1].vtable == NULL) return c0;
-  const int64_t c1 = ICpuCore_getCycles(mcu->core[1]);
-  return c0 > c1 ? c0 : c1;
-}
-
 static void copy_tag(char* dst, size_t dst_size, const char* src) {
   size_t k = 0;
   while (src != NULL && src[k] != '\0' && k + 1 < dst_size) {
@@ -89,6 +82,58 @@ static void copy_tag(char* dst, size_t dst_size, const char* src) {
     k++;
   }
   dst[k] = '\0';
+}
+
+/* Set when a '\'-prefixed marker (outlier event, e.g. \fetchtrk on core1) was
+ * seen since the last star-marker sample; the next star sample is then
+ * attributed to "*\<tag>" instead of "*<tag>". Global across cores: outlier
+ * events typically happen on core1 while the slow tick is observed by *tick
+ * on core0 (which waits for core1's via2_done). */
+static bool star_outlier;
+
+/* ── Slow-tick diagnostics ────────────────────────────────────────────────────
+ * Per-marker deltas of the tick that is currently being measured (everything
+ * since the previous *tick). If a *tick sample exceeds SLOW_TICK_THRESHOLD
+ * (and is not a '\' outlier tick), a warning with this breakdown is printed,
+ * so it is visible where that tick spent its cycles. */
+#define SLOW_TICK_THRESHOLD 390
+#define SLOW_TICK_WARN_MAX 10
+#define TICK_TRACE_MAX 64
+typedef struct {
+  int32_t core;
+  char tag[16];
+  int64_t delta;
+} tick_trace_entry_t;
+static tick_trace_entry_t tick_trace[TICK_TRACE_MAX];
+static size_t tick_trace_len;
+static uint32_t slow_tick_warnings;
+
+static void tick_trace_add(int32_t core, const char* tag, int64_t delta) {
+  if (tick_trace_len < TICK_TRACE_MAX) {
+    tick_trace[tick_trace_len].core = core;
+    copy_tag(tick_trace[tick_trace_len].tag, sizeof(tick_trace[0].tag), tag);
+    tick_trace[tick_trace_len].delta = delta;
+    tick_trace_len++;
+  }
+}
+
+static void tick_trace_print(int64_t tick_delta, int64_t core0_cycles) {
+  printf("WARNING: slow *tick: %" PRId64 " cycles (budget %d) at core0 cycle %" PRId64 "\n",
+         tick_delta, SLOW_TICK_THRESHOLD, core0_cycles);
+  for (size_t k = 0; k < tick_trace_len; k++) {
+    char name[16];
+    copy_tag(name, sizeof(name), tick_trace[k].tag);
+    size_t n = strlen(name);
+    while (n > 0 && name[n - 1] == ' ') name[--n] = '\0';
+    printf("  %-13s core%d %8" PRId64 "\n", name, tick_trace[k].core, tick_trace[k].delta);
+  }
+}
+
+static int64_t mcu_cycles(void) {
+  const int64_t c0 = ICpuCore_getCycles(mcu->core[0]);
+  if (mcu->core[1].vtable == NULL) return c0;
+  const int64_t c1 = ICpuCore_getCycles(mcu->core[1]);
+  return c0 > c1 ? c0 : c1;
 }
 
 /* ── UART ───────────────────────────────────────────────────────────────────── */
@@ -119,13 +164,45 @@ static void on_trace(void* ctx, int32_t core_number, int32_t pc, const char* tag
         /* self-referential marker: measure against its own previous occurrence */
         if (profile[i].last_self >= 0) {
           const int64_t delta = now_cycles - profile[i].last_self;
-          profile[i].cycles += (uint64_t)delta;
-          profile[i].count++;
-          if (delta > 0 && (uint64_t)delta > profile[i].max) {
-            profile[i].max = (uint64_t)delta;
+          const bool was_outlier = star_outlier;
+          /* route the sample to "*\<tag>" when an outlier ('\'-prefixed marker)
+           * happened since the previous occurrence */
+          size_t j = i;
+          if (was_outlier) {
+            char oname[16];
+            oname[0] = '*';
+            oname[1] = '\\';
+            copy_tag(oname + 2, sizeof(oname) - 2, name + 1);
+            j = 0;
+            while (j < profile_len && (profile[j].core != core || strcmp(profile[j].tag, oname) != 0)) j++;
+            if (j == profile_len && profile_len < PROFILE_SLOTS) {
+              copy_tag(profile[j].tag, sizeof(profile[j].tag), oname);
+              profile[j].core = core;
+              profile[j].last_self = -1;
+              profile_len++;
+            }
+          }
+          if (j < profile_len) {
+            profile[j].cycles += (uint64_t)delta;
+            profile[j].count++;
+            if (delta > 0 && (uint64_t)delta > profile[j].max) {
+              profile[j].max = (uint64_t)delta;
+            }
+          }
+          tick_trace_add(core, name, delta);
+          if (!was_outlier && delta > SLOW_TICK_THRESHOLD) {
+            if (slow_tick_warnings < SLOW_TICK_WARN_MAX) {
+              tick_trace_print(delta, ICpuCore_getCycles(mcu->core[0]));
+            }
+            else if (slow_tick_warnings == SLOW_TICK_WARN_MAX) {
+              printf("... further slow-tick warnings suppressed\n");
+            }
+            slow_tick_warnings++;
           }
         }
         profile[i].last_self = now_cycles;
+        star_outlier = false; /* every star encounter closes the outlier window */
+        tick_trace_len = 0;   /* ... and starts a new per-tick breakdown */
       }
       else {
         const int64_t delta = now_cycles - last_trace_cycles[core];
@@ -134,6 +211,10 @@ static void on_trace(void* ctx, int32_t core_number, int32_t pc, const char* tag
         if (delta > 0 && (uint64_t)delta > profile[i].max) {
           profile[i].max = (uint64_t)delta;
         }
+        if (name[0] == '\\') {
+          star_outlier = true;
+        }
+        tick_trace_add(core, name, delta);
       }
     }
     /* every marker (including '*'-prefixed ones) becomes "the last tag" */
@@ -159,7 +240,7 @@ static void print_profile(double c1541_ticks) {
   for (size_t i = 0; i < profile_len; i++) total += sorted[i].cycles;
   (void)total;
   printf("\n--- cycle profile (per-core RP2 cycles per C1541 tick) ---\n");
-  printf("%-13s %4s %8s %12s %8s\n", "tag", "core", "max", "avg", "share");
+  printf("%-13s %4s %9s %8s %12s %8s\n", "tag", "core", "count", "max", "avg", "share");
   for (size_t i = 0; i < profile_len; i++) {
     char name[16];
     copy_tag(name, sizeof(name), sorted[i].tag);
@@ -168,8 +249,8 @@ static void print_profile(double c1541_ticks) {
     const double avg = sorted[i].count > 0
                            ? (double)sorted[i].cycles / (double)sorted[i].count
                            : 0.0;
-    printf("%-13s %4d %8" PRIu64 " %12.1f %7.1f%%\n", name, sorted[i].core,
-           sorted[i].max, avg, 100.0 * (double)sorted[i].cycles / (double)total);
+    printf("%-13s %4d %9" PRIu64 " %8" PRIu64 " %12.1f %7.1f%%\n", name, sorted[i].core,
+           sorted[i].count, sorted[i].max, avg, 100.0 * (double)sorted[i].cycles / (double)total);
   }
   printf("cores at end: c0=%" PRId64 " c1=%" PRId64 "\n",
          ICpuCore_getCycles(mcu->core[0]), ICpuCore_getCycles(mcu->core[1]));
