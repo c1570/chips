@@ -47,6 +47,8 @@ static int drive_current_track = 0;
 #define C1541_MOTOR_CHANGED_HOOK(s,v) gpio_put(MOTOR_STATUS_PIN,v)
 #define C1541_LED_CHANGED_HOOK(s,v) {cycle_info("led  ");gpio_put(LED_PIN,v);}
 #define C1541_CYCLE_INFO(a) cycle_info(a)
+static volatile bool via2_gcr_dirty;   /* core0 wrote $1C00, core1 must re-prepare */
+#define C1541_VIA2_GCR_DIRTY() (via2_gcr_dirty = true)
 #include "iecbus_rp2.h"
 #include "../systems/c1541.h"
 #include "../tests/c1541-roms.h"
@@ -65,11 +67,27 @@ static volatile bool via2_irq;
 static void core1_entry(void) {
     cycle_info("bootc1   "); // core1 idle-while-core0-boots lands here (huge first sample)
     while (true) {
+        /* speculate the GCR prepare while waiting for core0; its inputs are
+           stable during core0's CPU tick except for $1C00 writes (motor/
+           speed zone), which set via2_gcr_dirty and force a re-prepare */
+        uint32_t via2_in;
+        c1541_gcr_pending_t pend;
+        /* speculate the GCR prepare while waiting for core0; its inputs are
+           stable during core0's CPU tick except for $1C00 writes (motor/
+           speed zone), which set via2_gcr_dirty and force a re-prepare */
+        _c1541_via2_gcr_prepare(&state.c1541, &via2_in, &pend);
         while (via2_start == 0) {
         }
         via2_start = 0;
         cycle_info("gcr-idle "); // waiting for core0 to hand over the VIA2 tick
-        via2_irq = _c1541_tick_via2_a(&state.c1541);
+        if (via2_gcr_dirty) {
+            via2_gcr_dirty = false;
+            _c1541_via2_gcr_prepare(&state.c1541, &via2_in, &pend);
+        }
+        cycle_info("gcr  ");
+        _c1541_via2_gcr_commit(&state.c1541, &pend);
+        via2_irq = (uint8_t)(_m6522_tick_io(&state.c1541.via_2, via2_in) >> 24);
+        cycle_info("via2 ");
         via2_done = 1;
         _c1541_tick_via2_b(&state.c1541);
     }

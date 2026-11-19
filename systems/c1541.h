@@ -70,6 +70,9 @@ extern "C" {
 #ifndef C1541_CYCLE_INFO
 #define C1541_CYCLE_INFO(a)
 #endif
+#ifndef C1541_VIA2_GCR_DIRTY
+#define C1541_VIA2_GCR_DIRTY()
+#endif
 
 #define VIA2_STEPPER_LO_BIT_POS  0
 #define VIA2_STEPPER_HI_BIT_POS  1
@@ -143,8 +146,6 @@ typedef struct {
     uint8_t coil_dir;            // 0..1
 
     mem_t mem;
-    uint8_t ram[0x0800];
-    uint8_t rom[0x4000];
     uint8_t gcr_bytes[0x2000];
     uint32_t gcr_size;
     uint8_t gcr_ones;
@@ -157,6 +158,11 @@ typedef struct {
     uint8_t disk_type;  // 0=none, 1=G64, 2=D64
 
     uint32_t exit_countdown;
+
+    /* big memory arrays at the very end, so that the fields above stay
+       within the 12-bit immediate range on RV32 */
+    uint8_t ram[0x0800];
+    uint8_t rom[0x4000];
 } c1541_t;
 
 // initialize a new c1541_t instance
@@ -179,6 +185,25 @@ void c1541_snapshot_onload(c1541_t* snapshot, c1541_t* sys, void* base);
 bool c1541_attach_disk(c1541_t* sys, const char* filename);
 // fetch track data for current half-track position (opens file, reads offsets, reads track)
 bool c1541_fetch_track(c1541_t* sys);
+
+/* pending drive state produced by the (possibly speculative) GCR prepare */
+typedef struct {
+    uint32_t rotor_nanoseconds_counter;
+    uint16_t current_data;
+    uint16_t gcr_byte_pos;
+    uint8_t gcr_current_byte;
+    uint8_t gcr_bit_mask;
+    uint8_t output_bit_counter;
+    uint8_t output_data;
+    bool byte_ready;            /* byte-ready event: set countdown at commit */
+} c1541_gcr_pending_t;
+
+/* run the GCR read-head prepare: computes the VIA2 input pins (packed for
+   _m6522_tick_io) and the drive state changes, WITHOUT committing them yet
+   (lets the RP2 firmware speculate this during core1's idle time) */
+void _c1541_via2_gcr_prepare(c1541_t* sys, uint32_t* via2_in, c1541_gcr_pending_t* pend);
+/* commit the pending drive state from _c1541_via2_gcr_prepare() */
+void _c1541_via2_gcr_commit(c1541_t* sys, const c1541_gcr_pending_t* pend);
 
 #ifdef __cplusplus
 } // extern "C"
@@ -276,6 +301,7 @@ void _c1541_write(c1541_t* sys, uint16_t addr, uint8_t data) {
     } else if (uc7_input == 0x1C) {
         // Write to VIA2
         if ((addr & 0xf) == 0) {
+            C1541_VIA2_GCR_DIRTY();    /* invalidate a speculative GCR prepare */
             sys->rotor_active = (data & VIA2_ROTOR) != 0;
             if (!sys->rotor_active) {
                 sys->rotor_nanoseconds_counter = 0;
@@ -411,99 +437,130 @@ uint8_t _c1541_tick_via1(c1541_t* sys, const uint32_t via1_in) {
     return (uint8_t)(io >> 24);
 }
 
+void _c1541_via2_gcr_prepare(c1541_t* sys, uint32_t* via2_in, c1541_gcr_pending_t* pend) {
+    /* VIA2 input pins: PA = read data, CA1 = byte-ready, PB7 = sync;
+       everything else feeds back from the previous outputs */
+    uint8_t pa = sys->via_2.pa.pins;
+    uint8_t pb = sys->via_2.pb.pins;
+    uint8_t ctl = sys->via_2.io_ctl;
+    /* seed the pending state with the current values; only what the rotor
+       block changes differs at commit time */
+    pend->rotor_nanoseconds_counter = sys->rotor_nanoseconds_counter;
+    pend->current_data = sys->current_data;
+    pend->gcr_byte_pos = sys->gcr_byte_pos;
+    pend->gcr_current_byte = sys->gcr_current_byte;
+    pend->gcr_bit_mask = sys->gcr_bit_mask;
+    pend->output_bit_counter = sys->output_bit_counter;
+    pend->output_data = sys->output_data;
+    pend->byte_ready = false;
+
+    const bool output_enable = (ctl & 0x08) != 0;    /* CB2 */
+    const bool motor_active = (pb & 0x04) != 0;      /* PB2 */
+    bool sync_bits_present = ((uint32_t)(sys->current_data + 1) & (1<<10)) != 0;
+    bool is_sync = sync_bits_present && output_enable;
+    bool latch_data = false;
+
+    // Motor active?
+    if (motor_active) {
+        uint32_t rotor = sys->rotor_nanoseconds_counter + 1000;
+        if (rotor >= sys->nanoseconds_per_bit) {
+            rotor -= sys->nanoseconds_per_bit;
+            uint16_t data = pend->current_data;
+
+            // shift in next gcr bit
+            data <<= 1;
+            data &= (1<<10)-1;
+            if (pend->gcr_current_byte & pend->gcr_bit_mask) {
+                // GCR 1 bit
+                data |= 1;
+            } else {
+                // GCR 0 bit
+            }
+            pend->current_data = data;
+
+            // update gcr read position
+            pend->gcr_bit_mask >>= 1;
+            if (0 == pend->gcr_bit_mask) {
+                pend->gcr_bit_mask = 0x80;
+                pend->gcr_byte_pos++;
+                if (pend->gcr_byte_pos >= sys->gcr_size || 0 == (pend->gcr_current_byte = sys->gcr_bytes[pend->gcr_byte_pos])) {
+                    pend->gcr_byte_pos = 0;
+                    pend->gcr_current_byte = sys->gcr_bytes[0];
+                }
+            }
+
+            is_sync = ((((uint32_t)(data + 1)) & (1<<10)) != 0) && output_enable;
+
+            if (is_sync) {
+                pend->output_bit_counter = 0;
+            } else {
+                const uint8_t bit_ctr = pend->output_bit_counter + 1;
+                pend->output_bit_counter = bit_ctr;
+                if (bit_ctr > 7) {
+                    pend->output_bit_counter = 0;
+                    pend->byte_ready = true;
+                    latch_data = true;
+                }
+            }
+        }
+        pend->rotor_nanoseconds_counter = rotor;
+    }
+
+    /* PB7 reads the (inverted) sync state */
+    pb = (pb & 0x7F) | (is_sync ? 0 : 0x80);
+
+    /* CA1 input is the byte-ready strobe (CA2/CB1/CB2 loop back) */
+    ctl &= ~0x01;
+    if (latch_data) {
+        pend->output_data = pend->current_data & 0xff;
+        if (output_enable) {
+            ctl |= 0x01;
+        }
+    }
+
+    if (output_enable) {
+        pa = pend->output_data;
+    }
+
+    *via2_in = (uint32_t)pa | ((uint32_t)pb << 8) | ((uint32_t)ctl << 16);
+}
+
+void _c1541_via2_gcr_commit(c1541_t* sys, const c1541_gcr_pending_t* pend) {
+    sys->rotor_nanoseconds_counter = pend->rotor_nanoseconds_counter;
+    sys->current_data = pend->current_data;
+    sys->gcr_byte_pos = pend->gcr_byte_pos;
+    sys->gcr_current_byte = pend->gcr_current_byte;
+    sys->gcr_bit_mask = pend->gcr_bit_mask;
+    sys->output_bit_counter = pend->output_bit_counter;
+    sys->output_data = pend->output_data;
+    /* the byte-ready countdown is applied here (not speculated): the cpu
+       tick's s0/OV workaround decrements it directly, and a speculative
+       prepare would run before that decrement */
+    if (pend->byte_ready) {
+        sys->byte_ready_countdown = 2;
+    }
+    if (sys->byte_ready_countdown > 0) {
+        sys->byte_ready_countdown--;
+    }
+}
+
 // _c1541_tick_via2 returns if IRQ should be set
 uint8_t _c1541_tick_via2_a(c1541_t* sys) {
 #ifdef PICO
     uint32_t tick = get_ticks();
 #endif
-    /* VIA2 input pins: PA = read data, CA1 = byte-ready, PB7 = sync;
-       everything else feeds back from the previous outputs */
-    uint8_t pa = sys->via_2.pa.pins;
-    uint8_t pb = sys->via_2.pb.pins;
-    uint8_t ctl = sys->via_2.io_ctl;   /* control outputs loop back */
-    {
-        // Prepare VIA2 pins
-        const bool output_enable = (ctl & 0x08) != 0;    /* CB2 */
-        const bool motor_active = (pb & 0x04) != 0;      /* PB2 */
-        bool sync_bits_present = ((sys->current_data + 1) & (1<<10)) != 0;
-        bool is_sync = sync_bits_present && output_enable;
-        bool latch_data = false;
-
-        // Motor active?
-        if (motor_active) {
-            //// FIXME: for debugging purpose the countdown runs for 2 simulated seconds and terminates the program afterward
-            //if (sys->exit_countdown == 0) {
-            //    sys->exit_countdown = C1541_FREQUENCY << 1;
-            //}
-//            via_output = true;
-            sys->rotor_nanoseconds_counter += 1000;
-            if (sys->rotor_nanoseconds_counter >= sys->nanoseconds_per_bit) {
-                sys->rotor_nanoseconds_counter -= sys->nanoseconds_per_bit;
-
-                // shift in next gcr bit
-                sys->current_data <<= 1;
-                sys->current_data &= (1<<10)-1;
-                if (sys->gcr_current_byte & sys->gcr_bit_mask) {
-                    // GCR 1 bit
-                    sys->current_data |= 1;
-                } else {
-                    // GCR 0 bit
-                }
-
-                // update gcr read position
-                sys->gcr_bit_mask >>= 1;
-                if (0 == sys->gcr_bit_mask) {
-                    sys->gcr_bit_mask = 0x80;
-                    sys->gcr_byte_pos++;
-                    if (sys->gcr_byte_pos >= sys->gcr_size || 0 == (sys->gcr_current_byte = sys->gcr_bytes[sys->gcr_byte_pos])) {
-                        sys->gcr_byte_pos = 0;
-                        sys->gcr_current_byte = sys->gcr_bytes[0];
-                    }
-                }
-
-                is_sync = (((sys->current_data + 1) & (1<<10)) != 0) && output_enable;
-
-                if (is_sync) {
-                    sys->output_bit_counter = 0;
-                } else {
-                    sys->output_bit_counter++;
-                    if (sys->output_bit_counter > 7) {
-                        sys->output_bit_counter = 0;
-                        sys->byte_ready_countdown = 2;
-                        latch_data = true;
-                    }
-                }
-            }
-        }
-
-        /* PB7 reads the (inverted) sync state */
-        pb = (pb & 0x7F) | (is_sync ? 0 : 0x80);
-
-        if(sys->byte_ready_countdown > 0) {
-            sys->byte_ready_countdown--;
-        }
-
-        /* CA1 input is the byte-ready strobe (CA2/CB1/CB2 loop back) */
-        ctl &= ~0x01;
-        if (latch_data) {
-            sys->output_data = sys->current_data & 0xff;
-            if (output_enable) {
-                ctl |= 0x01;
-            }
-        }
-
-        if (output_enable) {
-            pa = sys->output_data;
-        }
-    }
+    uint32_t via2_in;
+    c1541_gcr_pending_t pend;
+    _c1541_via2_gcr_prepare(sys, &via2_in, &pend);
     C1541_CYCLE_INFO("gcr  ");
+    _c1541_via2_gcr_commit(sys, &pend);
 
     // tick VIA2
     {
 #ifdef PICO
         uint32_t chip_tick = get_ticks();
 #endif
-        const uint32_t io = _m6522_tick_io(&sys->via_2, (uint32_t)pa | ((uint32_t)pb << 8) | ((uint32_t)ctl << 16));
+        const uint32_t io = _m6522_tick_io(&sys->via_2, via2_in);
 #ifdef PICO
         ticks_chip_via2 = get_elapsed_ticks(chip_tick);
 #endif

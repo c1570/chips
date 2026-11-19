@@ -94,10 +94,10 @@ static bool star_outlier;
 /* ── Slow-tick diagnostics ────────────────────────────────────────────────────
  * Per-marker deltas of the tick that is currently being measured (everything
  * since the previous *tick). If a *tick sample exceeds SLOW_TICK_THRESHOLD
- * (and is not a '\' outlier tick), a warning with this breakdown is printed,
- * so it is visible where that tick spent its cycles. */
+ * (and is not a '\' outlier tick), it is counted as slow; a warning with the
+ * breakdown is printed only when the cycle count exceeds the last warned
+ * count (starting at the threshold), so only new maxima are shown. */
 #define SLOW_TICK_THRESHOLD 390
-#define SLOW_TICK_WARN_MAX 10
 #define TICK_TRACE_MAX 64
 typedef struct {
   int32_t core;
@@ -107,6 +107,7 @@ typedef struct {
 static tick_trace_entry_t tick_trace[TICK_TRACE_MAX];
 static size_t tick_trace_len;
 static uint32_t slow_tick_warnings;
+static int64_t slow_tick_last_warned = SLOW_TICK_THRESHOLD;
 
 static void tick_trace_add(int32_t core, const char* tag, int64_t delta) {
   if (tick_trace_len < TICK_TRACE_MAX) {
@@ -191,13 +192,11 @@ static void on_trace(void* ctx, int32_t core_number, int32_t pc, const char* tag
           }
           tick_trace_add(core, name, delta);
           if (!was_outlier && delta > SLOW_TICK_THRESHOLD) {
-            if (slow_tick_warnings < SLOW_TICK_WARN_MAX) {
-              tick_trace_print(delta, ICpuCore_getCycles(mcu->core[0]));
-            }
-            else if (slow_tick_warnings == SLOW_TICK_WARN_MAX) {
-              printf("... further slow-tick warnings suppressed\n");
-            }
             slow_tick_warnings++;
+            if (delta > slow_tick_last_warned) {
+              tick_trace_print(delta, ICpuCore_getCycles(mcu->core[0]));
+              slow_tick_last_warned = delta;
+            }
           }
         }
         profile[i].last_self = now_cycles;
