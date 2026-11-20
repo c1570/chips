@@ -388,6 +388,7 @@ typedef struct {
 
     float c64_microseconds;
     float c1541_microseconds;
+    uint32_t cia_tod_accu;
 } c64_t;
 
 // initialize a new C64 instance
@@ -584,6 +585,12 @@ static uint64_t _c64_tick(c64_t* sys, uint64_t pins) {
     uint64_t vic_pins = pins & M6502_PIN_MASK;
     uint64_t cia1_pins = pins & M6502_PIN_MASK;
     uint64_t cia2_pins = pins & M6502_PIN_MASK;
+    sys->cia_tod_accu += 50;
+    if (sys->cia_tod_accu >= 985248) {
+        sys->cia_tod_accu -= 985248;
+        cia1_pins |= M6526_TOD;
+        cia2_pins |= M6526_TOD;
+    }
     uint64_t sid_pins = pins & M6502_PIN_MASK;
     if ((pins & (M6502_RDY|M6502_RW)) != (M6502_RDY|M6502_RW)) {
         if (M6510_CHECK_IO(pins)) {
